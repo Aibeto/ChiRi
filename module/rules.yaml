@@ -2,115 +2,124 @@ yumi_scheduler: true
 dynamic_enabled: true
 global_mode: "powersave"
 
-app_modes:
-  com.miHoYo.GenshinImpact: "fas"
-  com.tencent.tmgp.sgame: "fas"
-  com.tencent.tmgp.speedmobile: "fas"
-  com.tencent.lolm: "fas"
+# ════════════════════════════════════════════════════════════════
+#  FAS（帧感知调度）暂禁用：功能存在 bug，需关闭调试，故本文件中的
+#  app_modes 的 "fas" 映射、以及下方整个 fas_rules 配置模板已全部注释。
+#  恢复方法：取消 app_modes 中相应 "fas" 映射、恢复 fas_rules 配置段即可。
+# ════════════════════════════════════════════════════════════════
+
+app_modes: {}
+  # com.miHoYo.GenshinImpact: "fas"   # FAS 暂禁用
+  # com.tencent.tmgp.sgame: "fas"     # FAS 暂禁用
+  # com.tencent.tmgp.speedmobile: "fas" # FAS 暂禁用
+  # com.tencent.lolm: "fas"           # FAS 暂禁用
 
 ignored_apps:
   - com.android.systemui
 
-fas_rules:
-  # ── 全局默认档位 (未在 per_app_profiles 中配置的游戏使用) ──
-  fps_gears: [30.0, 60.0, 90.0, 120.0, 144.0]
-  fps_margin: 3.0
-
-  # ── 每游戏 FAS 配置 ──
-  # target_fps: 该游戏会渲染到的目标帧率数组，运行时动态匹配
-  # fps_margin: 该游戏的帧率余量 (可选，不设则用全局值)
-  per_app_profiles:
-    "com.miHoYo.GenshinImpact":
-      target_fps: [30, 60]
-      fps_margin: 4.0
-
-    "com.tencent.tmgp.pubgmhd":
-      target_fps: [60, 90, 120]
-      fps_margin: 3.0
-
-    "com.tencent.tmgp.speedmobile":
-      target_fps: [30, 60, 120, 144]
-      fps_margin: 3.0
-
-    "com.tencent.tmgp.sgame":
-      target_fps: [60, 90, 120]
-      fps_margin: 3.0
-
-    "com.hypergryph.arknights":
-      target_fps: [30, 60]
-
-    "com.miHoYo.hkrpg":
-      target_fps: [30, 60]
-
-    "com.kurogame.mingchao":
-      target_fps: [24, 30, 45, 60]
-
-    "com.tencent.lolm":
-      target_fps: [60, 90, 120, 144]
-      fps_margin: 3.0
-
-  # ── PID 控制器核心系数 ──
-  pid:
-    kp: 0.05
-    ki: 0.01
-    kd: 0.006
-
-  # ── 集群算力感知 ──
-  auto_capacity_weight: true
-  cluster_profiles:
-    - capacity_weight: 1.0   # 小核
-    - capacity_weight: 1.5   # 中核
-    - capacity_weight: 2.5   # 大核
-    - capacity_weight: 3.5   # 超大核
-
-  # ── 归一化性能 (Perf) 范围 ──
-  perf_floor: 0.22
-  perf_ceil: 1.0
-  perf_init: 0.45
-  perf_cold_boot: 0.85
-  freq_hysteresis: 0.015
-
-  # ── 重帧 / 硬加载 ──
-  heavy_frame_threshold_ms: 150.0
-  loading_cumulative_ms: 2500.0
-  loading_normal_tolerance: 3
-  loading_perf_floor: 0.60
-  loading_perf_ceiling: 0.70
-
-  # ── 加载后保护 ──
-  post_loading_ignore_frames: 5
-  post_loading_perf: 0.65
-  post_loading_downgrade_guard: 90
-
-  # ── 齿轮切换与阻尼 ──
-  upgrade_confirm_frames: 60
-  downgrade_confirm_frames: 90
-  upgrade_cooldown_after_downgrade: 90
-  gear_dampen_frames: 60
-
-  # ── 降档紧急提频 (Boost) ──
-  downgrade_boost_perf_inc: 0.18
-  downgrade_boost_duration: 45
-
-  # ── 连续稳态快速衰减 (省电核心) ──
-  fast_decay_frame_threshold: 75
-  fast_decay_perf_threshold: 0.70
-  fast_decay_max_step: 0.022
-  fast_decay_min_step: 0.004
-
-  # ── Jank 卡顿保护冷却 ──
-  jank_cooldown_frames: 15
-
-  # ── PID 输出限幅 (防过冲) ──
-  max_inc_damped: 0.045
-  max_inc_normal: 0.075
-  damped_perf_cap: 0.92
-
-  # ── 应用切换 / 息屏检测 ──
-  app_switch_gap_ms: 3000.0
-  app_switch_resume_perf: 0.60
-
-  # ── 其他底层机制 ──
-  freq_force_reapply_interval: 30
-  fixed_max_frame_ms: 500.0
-  cold_boot_ms: 3500
+# ════════════════════════════════════════════════════════════════
+#  【FAS 配置模板 — 已整体注释禁用】
+#  fas_rules:
+#    # ── 全局默认档位 (未在 per_app_profiles 中配置的游戏使用) ──
+#    fps_gears: [30.0, 60.0, 90.0, 120.0, 144.0]
+#    fps_margin: 3.0
+#
+#    # ── 每游戏 FAS 配置 ──
+#    # target_fps: 该游戏会渲染到的目标帧率数组，运行时动态匹配
+#    # fps_margin: 该游戏的帧率余量 (可选，不设则用全局值)
+#    per_app_profiles:
+#      "com.miHoYo.GenshinImpact":
+#        target_fps: [30, 60]
+#        fps_margin: 4.0
+#
+#      "com.tencent.tmgp.pubgmhd":
+#        target_fps: [60, 90, 120]
+#        fps_margin: 3.0
+#
+#      "com.tencent.tmgp.speedmobile":
+#        target_fps: [30, 60, 120, 144]
+#        fps_margin: 3.0
+#
+#      "com.tencent.tmgp.sgame":
+#        target_fps: [60, 90, 120]
+#        fps_margin: 3.0
+#
+#      "com.hypergryph.arknights":
+#        target_fps: [30, 60]
+#
+#      "com.miHoYo.hkrpg":
+#        target_fps: [30, 60]
+#
+#      "com.kurogame.mingchao":
+#        target_fps: [24, 30, 45, 60]
+#
+#      "com.tencent.lolm":
+#        target_fps: [60, 90, 120, 144]
+#        fps_margin: 3.0
+#
+#    # ── PID 控制器核心系数 ──
+#    pid:
+#      kp: 0.05
+#      ki: 0.01
+#      kd: 0.006
+#
+#    # ── 集群算力感知 ──
+#    auto_capacity_weight: true
+#    cluster_profiles:
+#      - capacity_weight: 1.0   # 小核
+#      - capacity_weight: 1.5   # 中核
+#      - capacity_weight: 2.5   # 大核
+#      - capacity_weight: 3.5   # 超大核
+#
+#    # ── 归一化性能 (Perf) 范围 ──
+#    perf_floor: 0.22
+#    perf_ceil: 1.0
+#    perf_init: 0.45
+#    perf_cold_boot: 0.85
+#    freq_hysteresis: 0.015
+#
+#    # ── 重帧 / 硬加载 ──
+#    heavy_frame_threshold_ms: 150.0
+#    loading_cumulative_ms: 2500.0
+#    loading_normal_tolerance: 3
+#    loading_perf_floor: 0.60
+#    loading_perf_ceiling: 0.70
+#
+#    # ── 加载后保护 ──
+#    post_loading_ignore_frames: 5
+#    post_loading_perf: 0.65
+#    post_loading_downgrade_guard: 90
+#
+#    # ── 齿轮切换与阻尼 ──
+#    upgrade_confirm_frames: 60
+#    downgrade_confirm_frames: 90
+#    upgrade_cooldown_after_downgrade: 90
+#    gear_dampen_frames: 60
+#
+#    # ── 降档紧急提频 (Boost) ──
+#    downgrade_boost_perf_inc: 0.18
+#    downgrade_boost_duration: 45
+#
+#    # ── 连续稳态快速衰减 (省电核心) ──
+#    fast_decay_frame_threshold: 75
+#    fast_decay_perf_threshold: 0.70
+#    fast_decay_max_step: 0.022
+#    fast_decay_min_step: 0.004
+#
+#    # ── Jank 卡顿保护冷却 ──
+#    jank_cooldown_frames: 15
+#
+#    # ── PID 输出限幅 (防过冲) ──
+#    max_inc_damped: 0.045
+#    max_inc_normal: 0.075
+#    damped_perf_cap: 0.92
+#
+#    # ── 应用切换 / 息屏检测 ──
+#    app_switch_gap_ms: 3000.0
+#    app_switch_resume_perf: 0.60
+#
+#    # ── 其他底层机制 ──
+#    freq_force_reapply_interval: 30
+#    fixed_max_frame_ms: 500.0
+#    cold_boot_ms: 3500
+# ════════════════════════════════════════════════════════════════

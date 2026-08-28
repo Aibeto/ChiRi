@@ -3,25 +3,28 @@ const mockRules = {
   yumi_scheduler: true,
   dynamic_enabled: true,
   global_mode: "powersave",
-  app_modes: {
-    'com.miHoYo.GenshinImpact': 'fas',
-    'com.tencent.tmgp.sgame': 'fas',
-    'com.tencent.tmgp.speedmobile': 'fas'
-  },
+  // ==== FAS 暂禁用：app_modes 不再映射 "fas" ====
+  app_modes: {},
+  // app_modes: {
+  //   'com.miHoYo.GenshinImpact': 'fas',
+  //   'com.tencent.tmgp.sgame': 'fas',
+  //   'com.tencent.tmgp.speedmobile': 'fas'
+  // },
   ignored_apps: ['com.android.systemui'],
-  fas_rules: {
-    fps_gears: [30.0, 60.0, 90.0, 120.0, 144.0],
-    fps_margin: 3.0,
-    per_app_profiles: {
-      "com.miHoYo.GenshinImpact": { target_fps: [30, 60], fps_margin: 4.0 },
-      "com.tencent.tmgp.sgame": { target_fps: [60, 90, 120], fps_margin: 3.0 }
-    },
-    pid: { kp: 0.035, ki: 0.015, kd: 0.005 },
-    auto_capacity_weight: true,
-    cluster_profiles: [ { capacity_weight: 1.0 }, { capacity_weight: 1.5 }, { capacity_weight: 2.5 }, { capacity_weight: 3.5 } ],
-    perf_floor: 0.22,
-    perf_ceil: 1.0
-  }
+  // ==== FAS 暂禁用：fas_rules 配置模板整体注释 ====
+  // fas_rules: {
+  //   fps_gears: [30.0, 60.0, 90.0, 120.0, 144.0],
+  //   fps_margin: 3.0,
+  //   per_app_profiles: {
+  //     "com.miHoYo.GenshinImpact": { target_fps: [30, 60], fps_margin: 4.0 },
+  //     "com.tencent.tmgp.sgame": { target_fps: [60, 90, 120], fps_margin: 3.0 }
+  //   },
+  //   pid: { kp: 0.035, ki: 0.015, kd: 0.005 },
+  //   auto_capacity_weight: true,
+  //   cluster_profiles: [ { capacity_weight: 1.0 }, { capacity_weight: 1.5 }, { capacity_weight: 2.5 }, { capacity_weight: 3.5 } ],
+  //   perf_floor: 0.22,
+  //   perf_ceil: 1.0
+  // }
 };
 
 const mockConfig = {
@@ -63,18 +66,17 @@ export const MockBridge = {
       (mockRules.app_modes as any)[pkg] = mode; 
     }
 
-    // 同步初始化 per_app_profiles 逻辑
-    if (mode === 'fas') {
-      if (!mockRules.fas_rules) (mockRules.fas_rules as any) = {};
-      if (!mockRules.fas_rules.per_app_profiles) (mockRules.fas_rules.per_app_profiles as any) = {};
-      
-      if (!(mockRules.fas_rules.per_app_profiles as any)[pkg]) {
-        (mockRules.fas_rules.per_app_profiles as any)[pkg] = {
-          target_fps: [30, 60, 90, 120],
-          fps_margin: 3.0
-        };
-      }
-    }
+    // ==== FAS 暂禁用：设为 fas 时同步初始化 per_app_profiles 的逻辑注释 ====
+    // if (mode === 'fas') {
+    //   if (!mockRules.fas_rules) (mockRules.fas_rules as any) = {};
+    //   if (!mockRules.fas_rules.per_app_profiles) (mockRules.fas_rules.per_app_profiles as any) = {};
+    //   if (!(mockRules.fas_rules.per_app_profiles as any)[pkg]) {
+    //     (mockRules.fas_rules.per_app_profiles as any)[pkg] = {
+    //       target_fps: [30, 60, 90, 120],
+    //       fps_margin: 3.0
+    //     };
+    //   }
+    // }
   },  async getRulesConfig(): Promise<any> { await delay(300); return JSON.parse(JSON.stringify(mockRules)); },
   async saveRulesConfig(config: any): Promise<void> { await delay(400); Object.assign(mockRules, config); },
   async getMainConfig(): Promise<any> { await delay(300); return JSON.parse(JSON.stringify(mockConfig)); },

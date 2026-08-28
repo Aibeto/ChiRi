@@ -29,7 +29,7 @@ const appModeActions = computed(() => [
   { name: t('mode_balance'), subname: t('desc_balance'), color: '#2196F3', modeKey: 'balance' },
   { name: t('mode_performance'), subname: t('desc_performance'), color: '#FF9800', modeKey: 'performance' },
   { name: t('mode_fast'), subname: t('desc_fast'), color: '#F44336', modeKey: 'fast' },
-  { name: t('mode_fas'), subname: t('desc_fas'), color: '#E91E63', modeKey: 'fas' },
+  // { name: t('mode_fas'), subname: t('desc_fas'), color: '#E91E63', modeKey: 'fas' }, // FAS 暂禁用
   { name: t('delete_rule'), color: '#FF0000', isDelete: true }
 ]);
 const languageActions = computed(() => [

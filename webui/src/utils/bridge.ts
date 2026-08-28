@@ -86,19 +86,17 @@ const RealBridge = {
        rules.app_modes[packageName] = mode;
      }
 
-     // 如果设为 fas 模式，同步初始化 per_app_profiles
-     if (mode === 'fas') {
-       if (!rules.fas_rules) rules.fas_rules = {};
-       if (!rules.fas_rules.per_app_profiles) rules.fas_rules.per_app_profiles = {};
-       
-       // 仅在不存在时初始化，防止覆盖用户已修改的帧率配置
-       if (!rules.fas_rules.per_app_profiles[packageName]) {
-         rules.fas_rules.per_app_profiles[packageName] = {
-           target_fps: [30, 60, 90, 120], // 默认覆盖常用帧率
-           fps_margin: 3.0
-         };
-       }
-     }
+     // ==== FAS 暂禁用：设为 fas 时同步初始化 per_app_profiles 的逻辑注释 ====
+     // if (mode === 'fas') {
+     //   if (!rules.fas_rules) rules.fas_rules = {};
+     //   if (!rules.fas_rules.per_app_profiles) rules.fas_rules.per_app_profiles = {};
+     //   if (!rules.fas_rules.per_app_profiles[packageName]) {
+     //     rules.fas_rules.per_app_profiles[packageName] = {
+     //       target_fps: [30, 60, 90, 120], // 默认覆盖常用帧率
+     //       fps_margin: 3.0
+     //     };
+     //   }
+     // }
      
      await this.saveRulesConfig(rules);
      toast(i18n.global.t('app_rules_saved') as string);
