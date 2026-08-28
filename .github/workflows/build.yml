@@ -44,24 +44,34 @@ jobs:
           targets: aarch64-linux-android
           components: rust-src # build-std 需要用到 (含 bpfel-unknown-none)
 
-      # 5. 安装 Android NDK
+      # 5. 安装 LLVM（build.rs 中的 `cargo install bpf-linker` 依赖系统 LLVM，
+      #    缺少时 llvm-sys 构建失败且原代码未检查退出状态，导致
+      #    "linker bpf-linker not found"，此步骤必须位于 cargo xtask build 之前）
+      - name: Install LLVM (for bpf-linker)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y llvm-18-dev libclang-18-dev clang-18
+          # 统一 llvm-config 命名，兼容 llvm-sys 的探测逻辑
+          sudo update-alternatives --install /usr/bin/llvm-config llvm-config /usr/bin/llvm-config-18 100
+
+      # 6. 安装 Android NDK
       - name: Setup Android NDK
         uses: nttld/setup-ndk@v1
         id: setup-ndk
         with:
           ndk-version: r29
 
-      # 6. 配置 NDK 环境变量并安装 cargo-ndk
+      # 7. 配置 NDK 环境变量并安装 cargo-ndk
       - name: Setup cargo-ndk
         run: |
           echo "ANDROID_NDK_HOME=${{ steps.setup-ndk.outputs.ndk-path }}" >> $GITHUB_ENV
           cargo install cargo-ndk
 
-      # 7. 运行 xtask 构建脚本
+      # 8. 运行 xtask 构建脚本
       - name: Run xtask build
         run: cargo xtask build
 
-      # 8. 动态获取 xtask 生成的 zip 文件名
+      # 9. 动态获取 xtask 生成的 zip 文件名
       - name: Get Artifact Name
         id: artifact-name
         run: |

@@ -114,6 +114,11 @@ pub async fn start_cpu_loop(tx: Sender<DaemonEvent>) -> Result<(), anyhow::Error
         let mut last_busy_times = vec![0u64; max_cpu_id + 1];
         let mut last_check_time = get_ktime_ns();
 
+        debug!("{}", t_with_args("cpu-monitor-baseline", &fluent_args!(
+            "cpus" => format!("{:?}", online_cpus_list),
+            "max_cpu" => max_cpu_id.to_string()
+        )));
+
         // TGID 级聚合数据：per-PID 的历史值
         let mut last_tgid_run: u64 = 0;
         let mut last_tgid_pid: u32 = 0; // 上一次采样时的前台 PID
@@ -139,9 +144,12 @@ pub async fn start_cpu_loop(tx: Sender<DaemonEvent>) -> Result<(), anyhow::Error
             let per_cpu_current_tid = core_current_tid_map.get(&zero_key, 0);
             let per_cpu_current_tgid = core_current_tgid_map.get(&zero_key, 0);
 
-            let mut core_utils = Vec::with_capacity(online_cpus_list.len());
+            let mut core_utils = vec![0.0_f32; max_cpu_id + 1];
 
             // 1. 全局单核利用率计算（带有实时状态补偿）
+            //    注意：core_utils 按「真实 CPU ID」索引（长度 max_cpu_id + 1），
+            //    与 CLG 端 core_utils.get(cpu_id) 保持一致；若按在线列表顺序 push，
+            //    在线核不连续（如 [0,2,4,6]）时 CLG 会取到错误的核/取不到，负载归零。
             for &cpu_id in &online_cpus_list {
                 let idx = cpu_id as usize;
                 
@@ -175,7 +183,7 @@ pub async fn start_cpu_loop(tx: Sender<DaemonEvent>) -> Result<(), anyhow::Error
                     0.0
                 };
 
-                core_utils.push(util);
+                core_utils[idx] = util;
                 last_idle_times[idx] = adj_idle;
                 last_busy_times[idx] = adj_busy;
             }
@@ -190,6 +198,10 @@ pub async fn start_cpu_loop(tx: Sender<DaemonEvent>) -> Result<(), anyhow::Error
                 } else {
                     // PID 切换时重置 TGID 基线，避免跨进程的累计值比较
                     if fg_pid != last_tgid_pid {
+                        debug!("{}", t_with_args("cpu-monitor-fg-baseline-reset", &fluent_args!(
+                            "old" => last_tgid_pid.to_string(),
+                            "new" => fg_pid.to_string()
+                        )));
                         last_tgid_run = 0;
                         last_tgid_pid = fg_pid;
                         // 同时清空线程级缓存（PID 变了，旧 TID 无意义）
@@ -212,6 +224,10 @@ pub async fn start_cpu_loop(tx: Sender<DaemonEvent>) -> Result<(), anyhow::Error
                         util
                     } else {
                         // ── 降级路径: 逐 TID 遍历 (原始逻辑，作为 fallback) ──
+                        debug!("{}", t_with_args("cpu-monitor-util-fallback", &fluent_args!(
+                            "pid" => fg_pid.to_string(),
+                            "raw" => tgid_run_map.get(&fg_pid, 0).unwrap_or(0).to_string()
+                        )));
                         compute_thread_level_util(
                             fg_pid,
                             &thread_run_map,

@@ -76,6 +76,7 @@ impl ClusterState {
 
     fn write_freq(&mut self, freq: u32) {
         if freq == self.current_freq { return; }
+        let old_freq = self.current_freq;
         let ok = if freq >= self.current_freq {
             // 升频：先拉高 max 再拉高 min
             let ok_max = self.max_writer.write_value_force(freq);
@@ -90,6 +91,17 @@ impl ClusterState {
         // 仅在两端均写入成功时更新缓存，失败则下次 tick 自动重试
         if ok {
             self.current_freq = freq;
+            debug!("{}", t_with_args("clg-freq-set", &fluent_args!(
+                "pid" => self.policy_id.to_string(),
+                "old_khz" => (old_freq / 1000).to_string(),
+                "new_khz" => (freq / 1000).to_string()
+            )));
+        } else {
+            debug!("{}", t_with_args("clg-freq-write-failed-cached", &fluent_args!(
+                "pid" => self.policy_id.to_string(),
+                "target_khz" => (freq / 1000).to_string(),
+                "cached_khz" => (self.current_freq / 1000).to_string()
+            )));
         }
     }
 

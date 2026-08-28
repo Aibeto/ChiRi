@@ -34,7 +34,7 @@ use crate::i18n::{t, t_with_args};
 
 // 启动函数
 pub fn start_monitor(tx: Sender<DaemonEvent>) -> Result<(), Box<dyn Error>> {
-    info!("{}", t("monitor-starting"));
+    log::debug!("{}", t("monitor-starting"));
 
     // ===== 解除内核 eBPF Map 内存锁定限制 =====
     unsafe {
@@ -70,6 +70,7 @@ pub fn start_monitor(tx: Sender<DaemonEvent>) -> Result<(), Box<dyn Error>> {
     let force_refresh_clone_for_watcher = Arc::clone(&force_refresh_arc);
 
     // 3. 启动屏幕状态监控线程
+    log::debug!("{}", t("monitor-thread-start-screen"));
     thread::Builder::new()
         .name("screen_watcher".to_string())
         .spawn(move || {
@@ -79,6 +80,7 @@ pub fn start_monitor(tx: Sender<DaemonEvent>) -> Result<(), Box<dyn Error>> {
         })?;
 
     // 4. 启动配置监控线程
+    log::debug!("{}", t("monitor-thread-start-config-watch"));
     let tx_config = tx.clone();
     thread::Builder::new()
         .name("config_watcher".to_string())
@@ -93,6 +95,7 @@ pub fn start_monitor(tx: Sender<DaemonEvent>) -> Result<(), Box<dyn Error>> {
         })?;
 
     // 5. 启动 eBPF FPS 监控线程 (带有独立的 Tokio 运行时)
+    log::debug!("{}", t("monitor-thread-start-fps"));
     let tx_fps = tx.clone();
     thread::Builder::new()
         .name("fps_monitor_ebpf".to_string())
@@ -109,6 +112,7 @@ pub fn start_monitor(tx: Sender<DaemonEvent>) -> Result<(), Box<dyn Error>> {
         })?;
 
     // 6. 启动 eBPF CPU 负载监控线程
+    log::debug!("{}", t("monitor-thread-start-cpu"));
     let tx_cpu = tx.clone();
     thread::Builder::new()
         .name("cpu_monitor_ebpf".to_string())
@@ -125,6 +129,7 @@ pub fn start_monitor(tx: Sender<DaemonEvent>) -> Result<(), Box<dyn Error>> {
         })?;
 
     // 7. 启动应用检测主循环 (阻塞)
+    log::debug!("{}", t("monitor-thread-start-app-detect"));
     app_detect::app_detection_loop(
         config_arc,
         screen_state_clone_for_app_detect,

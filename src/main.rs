@@ -25,21 +25,22 @@ pub mod fas_types;
 use std::sync::mpsc;
 use std::thread;
 use anyhow::Result;
-use log::{info, error};
+use log::{info, error, debug};
 use crate::i18n::{t, t_with_args, load_language};
+use crate::fluent_args;
 use crate::scheduler::config::Config;
 
 fn main() -> Result<()> {
     // 1. 环境初始化
-    if let Some(path) = std::env::args().nth(1) {
+    let chdir_path = std::env::args().nth(1);
+    if let Some(path) = &chdir_path {
         nix::unistd::chdir(path.as_str())?;
     }
 
     let root = common::get_module_root();
     let log_dir = root.join("logs");
     std::fs::create_dir_all(&log_dir)?;
-    
-    
+
     // 2. 提前读取配置
     let config_path: std::path::PathBuf = root.join("config/config.yaml");
     let config = Config::from_file(config_path.to_str().unwrap()).unwrap_or_default();
@@ -48,8 +49,18 @@ fn main() -> Result<()> {
     load_language(&config.meta.language);
 
     // 4. 初始化日志
-    logger::init(&config.meta.loglevel)?; 
-    
+    logger::init(&config.meta.loglevel)?;
+
+    // 日志系统就绪后再输出调试信息（init 前的 log 会被静默丢弃）
+    if let Some(path) = &chdir_path {
+        debug!("{}", t_with_args("main-chdir", &fluent_args!("dir" => path.as_str())));
+    }
+    debug!("{}", t_with_args("main-module-root", &fluent_args!("path" => root.to_string_lossy().to_string())));
+    debug!("{}", t_with_args("main-config-loaded", &fluent_args!(
+        "path" => config_path.to_string_lossy().to_string(),
+        "loglevel" => config.meta.loglevel.clone(),
+        "language" => config.meta.language.clone()
+    )));
     info!("{}", t("yumi-module-starting"));
 
     // 3. 创建通信通道

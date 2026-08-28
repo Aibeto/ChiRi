@@ -278,10 +278,18 @@ pub fn app_detection_loop(
                 pending_package = detected_pkg.clone();
                 pending_pid = detected_pid;
                 debounce_start = Instant::now();
+                debug!("{}", t_with_args("app-detect-debounce-start", &fluent_args!(
+                    "pkg" => pending_package.as_str(),
+                    "pid" => pending_pid.to_string()
+                )));
             } else if debounce_start.elapsed() >= Duration::from_millis(500) {
                 final_pkg = pending_package.clone();
                 final_pid = pending_pid;
                 pending_package.clear();
+                debug!("{}", t_with_args("app-detect-debounce-confirmed", &fluent_args!(
+                    "pkg" => final_pkg.as_str(),
+                    "pid" => final_pid.to_string()
+                )));
             }
         } else {
             pending_package.clear();
@@ -293,6 +301,12 @@ pub fn app_detection_loop(
         
         if last_package != final_pkg || force_refresh {
             if !final_pkg.is_empty() {
+                debug!("{}", t_with_args("app-detect-pkg-change", &fluent_args!(
+                    "pkg" => final_pkg.as_str(),
+                    "pid" => final_pid.to_string(),
+                    "temp" => format!("{:.1}", current_temp),
+                    "force" => force_refresh.to_string()
+                )));
                 set_current_package(&final_pkg, final_pid);
                 // 使用已获取的 config_snapshot，不再重复加锁
                 let new_mode = determine_mode(&config_snapshot, &final_pkg);
@@ -313,6 +327,8 @@ pub fn app_detection_loop(
                     last_mode = new_mode;
                 }
                 last_package = final_pkg;
+            } else {
+                debug!("{}", t("app-detect-no-app"));
             }
         }
 

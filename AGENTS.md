@@ -51,16 +51,18 @@ cd webui && npm run type-check
 
 - 本地开发通常只做 `cargo check` / WebUI `type-check` 验证；完整产物由云端 CI（GitHub Actions）生成。
 - 不要随意执行 `cargo build`（需要 NDK 环境），优先静态检查。
+- 完整构建的隐藏依赖：`build.rs` 会 `cargo install bpf-linker`（需要系统 LLVM 18，见 CI workflow 的 Install LLVM 步骤），且每次干净 checkout 都会重装——本地调试 eBPF 相关改动前需先装好 `llvm-18-dev libclang-18-dev clang-18`。
 
 ## 代码约定
 
 1. **架构**：Monitor 线程组通过 mpsc 事件通道（`DaemonEvent`）解耦数据采集与调度决策，新增监控/调度能力遵循此模式。
-2. **配置**：运行时配置走 `module/config/config.yaml`（CLG/模式参数）与 `rules.yaml`（FAS 参数），支持热重载；新增配置项需同步更新反序列化结构体与默认值。
-3. **i18n**：守护进程日志基于 Fluent（`module/config/i18n/en.ftl` / `zh.ftl`），WebUI 基于 `webui/src/i18n/locales/`；新增用户可见文案必须同时提供中英文。
-4. **Rust 风格**：release profile 为极致体积优化（`opt-level = "z"`, lto, strip），避免引入重依赖；优先复用现有依赖（serde/anyhow/log/tokio/nix 等），新增第三方库选择社区高星、维护活跃的 crate。
-5. **资源占用敏感**：守护进程运行于 Android 后台，注意内存分配（避免频繁 Vec 分配）、锁粒度和线程唤醒次数。
-6. **版本同步**：发版时同步更新 `module/module.prop`（version/versionCode）、根 `Cargo.toml`（version）、`updateInformation/update.json` 与 `changelog.md`。
-7. **WebUI**：与守护进程通过 kernelsu bridge 交互（见 `webui/src/utils/bridge.ts`），勿直接硬编码路径。
+2. **日志**：调试与排障优先使用 `debug!`（勿全部用 info 污染信息日志）；频率控制/帧处理等高频路径用 25-tick / 60-frame 周期摘要，状态变化（模式、PID、屏幕、attach、档位）即时打点。新增日志 key 必须同时补充 `module/config/i18n/zh.ftl` 与 `en.ftl`，key 命名 `模块-描述`。
+3. **配置**：运行时配置走 `module/config/config.yaml`（CLG/模式参数）与 `rules.yaml`（FAS 参数），支持热重载；新增配置项需同步更新反序列化结构体与默认值。
+4. **i18n**：守护进程日志基于 Fluent（`module/config/i18n/en.ftl` / `zh.ftl`），WebUI 基于 `webui/src/i18n/locales/`；新增用户可见文案必须同时提供中英文。
+5. **Rust 风格**：release profile 为极致体积优化（`opt-level = "z"`, lto, strip），避免引入重依赖；优先复用现有依赖（serde/anyhow/log/tokio/nix 等），新增第三方库选择社区高星、维护活跃的 crate。
+6. **资源占用敏感**：守护进程运行于 Android 后台，注意内存分配（避免频繁 Vec 分配）、锁粒度和线程唤醒次数。
+7. **版本同步**：发版时同步更新 `module/module.prop`（version/versionCode）、根 `Cargo.toml`（version）、`updateInformation/update.json` 与 `changelog.md`。
+8. **WebUI**：与守护进程通过 kernelsu bridge 交互（见 `webui/src/utils/bridge.ts`），勿直接硬编码路径。
 
 ## 硬性约束
 

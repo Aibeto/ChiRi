@@ -218,6 +218,10 @@ pub fn start_scheduler_thread(rx: mpsc::Receiver<DaemonEvent>) -> Result<()> {
                 match msg {
                     // --- 1. 屏幕状态事件 (息屏深度睡眠) ---
                     DaemonEvent::ScreenStateChange(screen_on) => {
+                        log::debug!("{}", t_with_args("scheduler-event-screen", &fluent_args!(
+                            "on" => screen_on.to_string(),
+                            "last" => is_screen_on.to_string()
+                        )));
                         is_screen_on = screen_on;
                         let current_mode = mode_clone.lock().unwrap().clone();
 
@@ -268,6 +272,12 @@ pub fn start_scheduler_thread(rx: mpsc::Receiver<DaemonEvent>) -> Result<()> {
                     DaemonEvent::ModeChange { package_name, _pid, mode, temperature } => {
                         let mut current_mode_lock = mode_clone.lock().unwrap();
                         let old_mode = current_mode_lock.clone();
+                        log::debug!("{}", t_with_args("scheduler-event-mode-change", &fluent_args!(
+                            "pkg" => package_name.as_str(),
+                            "old" => old_mode.clone(),
+                            "new" => mode.as_str(),
+                            "temp" => temperature
+                        )));
                         
                         if old_mode != mode {
                             log::info!("{}", t_with_args("scheduler-mode-change-request", &fluent_args!(
@@ -337,6 +347,10 @@ pub fn start_scheduler_thread(rx: mpsc::Receiver<DaemonEvent>) -> Result<()> {
 
                     // --- 3. CPU 负载事件 (eBPF 驱动) ---
                     DaemonEvent::SystemLoadUpdate { core_utils, _foreground_max_util } => {
+                        // 该事件每 200ms 一次，仅在 DEBUG 时输出摘要便于排查
+                        log::debug!("{}", t_with_args("scheduler-event-load", &fluent_args!(
+                            "cores" => core_utils.iter().map(|u| format!("{:.0}", u * 100.0)).collect::<Vec<_>>().join(",")
+                        )));
                         // let current_mode = mode_clone.lock().unwrap().clone(); // FAS 暂禁用
                         // ==== FAS 暂禁用：不再向 FAS 投喂 CPU 负载 ====
                         // if is_screen_on && current_mode == "fas" && fas_suspended_at.is_none() {
@@ -350,7 +364,7 @@ pub fn start_scheduler_thread(rx: mpsc::Receiver<DaemonEvent>) -> Result<()> {
                     },
 
                     // --- 4. 帧率事件 (eBPF 驱动) ---
-                    DaemonEvent::FrameUpdate { _frame_delta_ns } => {
+                    DaemonEvent::FrameUpdate { frame_delta_ns } => {
                         // ==== FAS 暂禁用：帧率事件不再参与调频 ====
                         // if !is_screen_on { continue; } // 息屏不处理渲染帧
                         // let current_mode = mode_clone.lock().unwrap().clone();
@@ -363,6 +377,10 @@ pub fn start_scheduler_thread(rx: mpsc::Receiver<DaemonEvent>) -> Result<()> {
                         //     }
                         //     fas_controller.update_frame(frame_delta_ns);
                         // }
+                        // 帧事件在 FAS 禁用期间不参与调频，仅在 DEBUG 时周期性输出
+                        log::debug!("{}", t_with_args("scheduler-event-frame", &fluent_args!(
+                            "delta_ms" => format!("{:.2}", frame_delta_ns as f64 / 1_000_000.0)
+                        )));
                     }
 
                     // --- 5. 热重载配置事件 ---
@@ -370,6 +388,10 @@ pub fn start_scheduler_thread(rx: mpsc::Receiver<DaemonEvent>) -> Result<()> {
                         let _ = new_rules; // FAS 暂禁用：原用于重载 current_rules.fas_rules
                         // current_rules = new_rules;
                         let current_mode = mode_clone.lock().unwrap().clone();
+                        log::debug!("{}", t_with_args("scheduler-event-config-reload", &fluent_args!(
+                            "mode" => current_mode.clone(),
+                            "screen_on" => is_screen_on.to_string()
+                        )));
                         
                         // ==== FAS 暂禁用：FAS 模式下不再重载 fas_rules ====
                         // if current_mode == "fas" {

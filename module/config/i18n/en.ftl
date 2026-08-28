@@ -14,6 +14,14 @@ monitor-fps-tokio-failed = [Main] Failed to create Tokio runtime for FPS monitor
 monitor-cpu-crashed = [Main] CPU Load Monitor crashed: { $error }
 monitor-cpu-tokio-failed = [Main] Failed to create Tokio runtime for CPU monitor
 monitor-rlimit-memlock-failed = [Main] Failed to raise RLIMIT_MEMLOCK. eBPF maps might fail to load.
+main-chdir = [Main] Changed working directory to: { $dir }
+main-module-root = [Main] Module root: { $path }
+main-config-loaded = [Main] Config loaded: { $path } (loglevel={ $loglevel }, language={ $language })
+monitor-thread-start-screen = [Main] Starting screen state watcher thread...
+monitor-thread-start-config-watch = [Main] Starting config watcher thread...
+monitor-thread-start-fps = [Main] Starting eBPF FPS monitor thread...
+monitor-thread-start-cpu = [Main] Starting eBPF CPU load monitor thread...
+monitor-thread-start-app-detect = [Main] Starting app detection loop...
 
 # --- AppDetect ---
 app-detect-config-watch = [AppDetect] Started watching config file: { $path }
@@ -26,17 +34,29 @@ app-detect-screen-changed = [AppDetect] Screen state changed: { $old } -> { $new
 app-detect-mode-change-pkg = [AppDetect] Mode change: { $old } -> { $new } ({ $pkg })
 app-detect-ime-auto = [AppDetect] Auto-detected IME: { $pkg }
 app-detect-ime-fallback = [AppDetect] Failed to auto-detect IME, using fallback list.
+app-detect-debounce-start = [AppDetect] Debounce started: new app { $pkg } (pid={ $pid })
+app-detect-debounce-confirmed = [AppDetect] Debounce confirmed: app { $pkg } (pid={ $pid }) is stable
+app-detect-pkg-change = [AppDetect] Foreground app state: { $pkg } (pid={ $pid }, temp={ $temp }°C, force={ $force })
+app-detect-no-app = [AppDetect] No valid foreground app detected (system process or unknown package)
 
 # --- ScreenDetect ---
 screen-state-change-detected = [Screen] State change detected via '{ $source }'.
 screen-state-changed-value = [Screen] Screen state changed: { $state }
 screen-netlink-started = [Screen] Started netlink-sys socket listener.
+screen-state-detect-detail = [Screen] State evaluate: { $old } -> { $new } (src: { $source })
+screen-uevent-received = [Screen] uevent received: subsystem={ $subsystem } devpath={ $devpath }
+screen-uevent-power-action = [Screen] power action: { $action }
+screen-uevent-backlight = [Screen] backlight event: { $dev } -> state={ $state }
+screen-uevent-backlight-unreadable = [Screen] backlight state unreadable: { $dev }
 
 # --- Monitors ---
 cpu-monitor-started = [CPU Monitor] eBPF System Load monitor started (Long-task blind spot fixed).
 cpu-monitor-online-cpus-failed = [CPU Monitor] Failed to get online CPUs: { $error }
 cpu-monitor-online-cpus = [CPU Monitor] Detected online CPU core IDs: { $cpus }
 cpu-monitor-fg-pid-updated = [CPU Monitor] Foreground PID updated { $old } -> { $new }
+cpu-monitor-baseline = [CPU Monitor] baseline init | online_cpus={ $cpus } max_cpu_id={ $max_cpu }
+cpu-monitor-fg-baseline-reset = [CPU Monitor] foreground PID changed, util baseline reset: { $old } -> { $new }
+cpu-monitor-util-fallback = [CPU Monitor] TGID map missing, falling back to thread-level (pid={ $pid }, raw_tgid={ $raw })
 cpu-monitor-tick-log = [CPU Monitor] cores=[{ $cores }] fg_pid={ $pid } fg_max_util={ $util }% threads_tracked={ $threads } delta={ $delta }ms
 cpu-monitor-channel-closed = [CPU Monitor] Channel closed, exiting loop.
 fps-monitor-init = [FPS Monitor] Initializing eBPF FPS monitor...
@@ -49,6 +69,9 @@ fps-monitor-pid-switching = [FPS Monitor] Switching target PID: { $pid }
 fps-monitor-pid-switched = [FPS Monitor] Switched to target PID: { $pid }
 fps-monitor-pid-switch-failed = [FPS Monitor] PID switch failed: { $error }
 fps-monitor-started = [FPS Monitor] eBPF FPS monitor started (per-PID uprobe mode)
+fps-monitor-symbol-short-miss = [FPS Monitor] short symbol attach failed, trying long symbol...
+fps-monitor-attach-symbol = [FPS Monitor] attached with symbol: { $lib } (pid={ $pid })
+fps-monitor-frame-summary = [FPS Monitor] frame summary | pid={ $pid } window={ $window } latest={ $latest_ms }ms avg={ $avg_ms }ms
 
 # --- Scheduler ---
 scheduler-ipc-started = [Scheduler] IPC Channel listener started.
@@ -59,6 +82,11 @@ scheduler-ipc-panic = [Scheduler] IPC thread panicked, releasing CPU control.
 scheduler-doze-enable = [Scheduler] Screen OFF: Enabling Extreme Doze mode (Restricting CPU max performance).
 scheduler-doze-restore = [Scheduler] Screen ON: Restoring previous performance constraints.
 scheduler-clg-init = [Scheduler] CPU Load Governor: initialized at startup (mode={ $mode })
+scheduler-event-screen = [Scheduler] screen event received: on={ $on } (last={ $last })
+scheduler-event-mode-change = [Scheduler] mode change event: pkg={ $pkg } { $old } -> { $new } (temp={ $temp })
+scheduler-event-load = [Scheduler] load event: core_utils=[{ $cores }]
+scheduler-event-frame = [Scheduler] frame event: delta={ $delta_ms }ms
+scheduler-event-config-reload = [Scheduler] config reload event: mode={ $mode }, screen_on={ $screen_on }
 
 # --- Scheduler: Config Watcher ---
 config-reloading = [Config] Config file change detected, reloading...
@@ -83,6 +111,8 @@ clg-perf-clamped = [CLG] config perf_floor > perf_ceil ({ $floor } > { $ceil }),
 clg-restore = [CLG] P{ $pid } restored | governor={ $governor } min={ $min } kHz max={ $max } kHz
 clg-tick-log = [CLG] P{ $pid } util={ $util }% perf={ $perf } freq={ $freq }kHz boost={ $boost }kHz
 clg-writer-invalid = [CLG] P{ $pid } sysfs writer invalid (max_valid: { $max_valid }, min_valid: { $min_valid }), skipping.
+clg-freq-set = [CLG] P{ $pid } freq change: { $old_khz }MHz -> { $new_khz }MHz
+clg-freq-write-failed-cached = [CLG] P{ $pid } freq write failed, keeping cached { $cached_khz }MHz (target { $target_khz }MHz)
 
 # --- FAS ---
 fas-freq-mismatch = [FAS] P{ $pid }: freq mismatch! expected { $min }-{ $max }, actual { $actual } -> emergency reapply

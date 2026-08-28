@@ -13,6 +13,14 @@ monitor-fps-tokio-failed = [Main] 无法为 FPS 监控创建 Tokio 运行时
 monitor-cpu-crashed = [Main] CPU 负载监控崩溃: { $error }
 monitor-cpu-tokio-failed = [Main] 无法为 CPU 监控创建 Tokio 运行时
 monitor-rlimit-memlock-failed = [Main] 提升 RLIMIT_MEMLOCK 失败，eBPF Map 可能无法加载。
+main-chdir = [Main] 切换工作目录到: { $dir }
+main-module-root = [Main] 模块根目录: { $path }
+main-config-loaded = [Main] 已读取配置: { $path } (loglevel={ $loglevel }, language={ $language })
+monitor-thread-start-screen = [Main] 启动屏幕状态监控线程...
+monitor-thread-start-config-watch = [Main] 启动配置监控线程...
+monitor-thread-start-fps = [Main] 启动 eBPF FPS 监控线程...
+monitor-thread-start-cpu = [Main] 启动 eBPF CPU 负载监控线程...
+monitor-thread-start-app-detect = [Main] 启动应用检测主循环...
 
 # --- AppDetect ---
 app-detect-config-watch = [AppDetect] 开始监控配置文件: { $path }
@@ -25,17 +33,29 @@ app-detect-screen-changed = [AppDetect] 屏幕状态变更: { $old } -> { $new }
 app-detect-mode-change-pkg = [AppDetect] 模式变更: { $old } -> { $new } ({ $pkg })
 app-detect-ime-auto = [AppDetect] 自动检测到输入法: { $pkg }
 app-detect-ime-fallback = [AppDetect] 自动检测输入法失败，使用后备列表。
+app-detect-debounce-start = [AppDetect] 防抖开始: 检测到新应用 { $pkg } (pid={ $pid })
+app-detect-debounce-confirmed = [AppDetect] 防抖确认: 应用 { $pkg } (pid={ $pid }) 保持稳定
+app-detect-pkg-change = [AppDetect] 前台应用状态变化: { $pkg } (pid={ $pid }, temp={ $temp }°C, force={ $force })
+app-detect-no-app = [AppDetect] 未检测到有效前台应用 (可能为系统进程或未知包)
 
 # --- ScreenDetect ---
 screen-state-change-detected = [Screen] 通过 '{ $source }' 检测到状态变更
 screen-state-changed-value = [Screen] 屏幕状态已变更: { $state }
 screen-netlink-started = [Screen] 已启动 netlink-sys 套接字监听器
+screen-state-detect-detail = [Screen] 状态判定: { $old } -> { $new } (来源: { $source })
+screen-uevent-received = [Screen] 收到 uevent: subsystem={ $subsystem } devpath={ $devpath }
+screen-uevent-power-action = [Screen] 电源动作: { $action }
+screen-uevent-backlight = [Screen] 背光事件: { $dev } -> state={ $state }
+screen-uevent-backlight-unreadable = [Screen] 背光状态不可读: { $dev }
 
 # --- Monitors ---
 cpu-monitor-started = [CPU Monitor] eBPF 系统负载监控已启动 (修复长任务盲区)。
 cpu-monitor-online-cpus-failed = [CPU Monitor] 获取在线 CPU 失败: { $error }
 cpu-monitor-online-cpus = [CPU Monitor] 检测到在线 CPU 核心 ID: { $cpus }
 cpu-monitor-fg-pid-updated = [CPU Monitor] 前台 PID 已更新 { $old } -> { $new }
+cpu-monitor-baseline = [CPU Monitor] 基线初始化 | 在线核心={ $cpus } 最大核心ID={ $max_cpu }
+cpu-monitor-fg-baseline-reset = [CPU Monitor] 前台 PID 变化，重置利用率基线: { $old } -> { $new }
+cpu-monitor-util-fallback = [CPU Monitor] TGID map 无数据，降级到线程级计算 (pid={ $pid }, raw_tgid={ $raw })
 cpu-monitor-tick-log = [CPU Monitor] 核心=[{ $cores }] 前台pid={ $pid } 前台最大利用率={ $util }% 跟踪线程数={ $threads } 耗时={ $delta }ms
 cpu-monitor-channel-closed = [CPU Monitor] 通道已关闭，退出循环。
 fps-monitor-init = [FPS Monitor] 正在初始化 eBPF FPS 监控...
@@ -48,6 +68,9 @@ fps-monitor-pid-switching = [FPS Monitor] 正在切换目标 PID: { $pid }
 fps-monitor-pid-switched = [FPS Monitor] 已切换到目标 PID: { $pid }
 fps-monitor-pid-switch-failed = [FPS Monitor] PID 切换失败: { $error }
 fps-monitor-started = [FPS Monitor] eBPF FPS 监控启动成功（per-PID uprobe 模式）
+fps-monitor-symbol-short-miss = [FPS Monitor] 短签名符号 attach 失败，尝试长签名符号...
+fps-monitor-attach-symbol = [FPS Monitor] 使用符号 attach: { $lib } (pid={ $pid })
+fps-monitor-frame-summary = [FPS Monitor] 帧摘要 | pid={ $pid } 窗口={ $window } 最新={ $latest_ms }ms 平均={ $avg_ms }ms
 
 # --- Scheduler ---
 scheduler-ipc-started = [Scheduler] IPC 通道监听器已启动
@@ -58,6 +81,11 @@ scheduler-ipc-panic = [Scheduler] IPC 线程发生 panic，正在释放 CPU 控�
 scheduler-doze-enable = [Scheduler] 息屏: 启用极致深度睡眠模式 (限制 CPU 最高性能)。
 scheduler-doze-restore = [Scheduler] 亮屏: 恢复之前的性能限制。
 scheduler-clg-init = [Scheduler] CPU 负载调频器: 在启动时初始化 (模式={ $mode })
+scheduler-event-screen = [Scheduler] 收到屏幕状态事件: on={ $on } (此前 last={ $last })
+scheduler-event-mode-change = [Scheduler] 收到模式切换事件: 包={ $pkg } { $old } -> { $new } (温度={ $temp })
+scheduler-event-load = [Scheduler] 收到负载事件: 核心利用率=[{ $cores }]
+scheduler-event-frame = [Scheduler] 收到帧事件: 帧间隔={ $delta_ms }ms
+scheduler-event-config-reload = [Scheduler] 收到配置重载事件: 当前模式={ $mode }, 亮屏={ $screen_on }
 
 # --- Scheduler: Config Watcher ---
 config-reloading = [Config] 检测到配置文件变更，正在重载...
@@ -82,6 +110,8 @@ clg-perf-clamped = [CLG] 配置 perf_floor > perf_ceil ({ $floor } > { $ceil })�
 clg-restore = [CLG] P{ $pid } 已恢复 | governor={ $governor } min={ $min } kHz max={ $max } kHz
 clg-tick-log = [CLG] P{ $pid } 利用率={ $util }% perf={ $perf } 频率={ $freq }kHz boost={ $boost }kHz
 clg-writer-invalid = [CLG] P{ $pid } sysfs 写入器无效 (max_valid: { $max_valid }, min_valid: { $min_valid })，已跳过。
+clg-freq-set = [CLG] P{ $pid } 频率调整: { $old_khz }MHz -> { $new_khz }MHz
+clg-freq-write-failed-cached = [CLG] P{ $pid } 频率写入失败，保持缓存值 { $cached_khz }MHz (目标 { $target_khz }MHz)
 
 # --- FAS ---
 fas-freq-mismatch = [FAS] P{ $pid }: 频率不匹配！预期 { $min }-{ $max }，实际 { $actual } -> 正在紧急重写

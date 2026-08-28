@@ -159,6 +159,7 @@ impl FpsManager {
                 scope,
             )
             .or_else(|_| {
+                debug!("{}", t("fps-monitor-symbol-short-miss"));
                 program.attach(
                     UProbeAttachPoint::from(UProbeAttachLocation::from(SYMBOL_LONG)),
                     LIBGUI_PATH,
@@ -169,6 +170,11 @@ impl FpsManager {
         self.links.insert(new_pid, link);
         self.states.entry(new_pid).or_insert_with(ProbeState::new);
         self.current_pid = new_pid;
+
+        debug!("{}", t_with_args("fps-monitor-attach-symbol", &fluent_args!(
+            "pid" => pid_i32.to_string(),
+            "lib" => LIBGUI_PATH
+        )));
 
         info!(
             "{}",
@@ -275,6 +281,8 @@ pub async fn start_fps_loop(tx: Sender<DaemonEvent>) -> Result<(), anyhow::Error
             let mut poll = Poll::new().expect("mio Poll::new");
             let mut events = Events::with_capacity(64);
             let token = Token(0);
+            // 帧事件统计（周期性输出 debug 摘要）
+            let mut frame_counter: u32 = 0;
 
             // 注册 RingBuf fd（只注册一次，不会变）
             if manager.has_active_probe() {
@@ -318,6 +326,19 @@ pub async fn start_fps_loop(tx: Sender<DaemonEvent>) -> Result<(), anyhow::Error
                 manager.poll_frames();
 
                 if let Some(delta) = manager.latest_frametime() {
+                    frame_counter += 1;
+                    if frame_counter % 60 == 0 {
+                        let avg_ns = manager.states.get(&manager.current_pid)
+                            .and_then(|s| s.frametimes.iter().map(|d| d.as_nanos()).sum::<u128>().checked_div(s.frametimes.len() as u128))
+                            .unwrap_or(0);
+                        debug!("{}", t_with_args("fps-monitor-frame-summary", &fluent_args!(
+                            "pid" => manager.current_pid.to_string(),
+                            "window" => manager.states.get(&manager.current_pid).map(|s| s.frametimes.len().to_string()).unwrap_or_default(),
+                            "latest_ms" => format!("{:.2}", delta.as_secs_f64() * 1000.0),
+                            "avg_ms" => format!("{:.2}", avg_ns as f64 / 1_000_000.0)
+                        )));
+                    }
+
                     if tx_clone
                         .send(DaemonEvent::FrameUpdate {
                             frame_delta_ns: delta.as_nanos() as u64,

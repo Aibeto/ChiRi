@@ -17,7 +17,7 @@
 
 use std::error::Error;
 use std::sync::{Arc, Mutex};
-use log::{info};
+use log::{info, debug};
 use std::process; 
 use std::thread;
 use std::time::Duration;
@@ -30,6 +30,11 @@ use crate::fluent_args;
 fn update_state_if_changed(state_arc: &Arc<Mutex<bool>>, new_state: bool, source: &str) {
     let mut state_lock = state_arc.lock().unwrap();
     if *state_lock != new_state {
+        debug!("{}", t_with_args("screen-state-detect-detail", &fluent_args!(
+            "source" => source,
+            "old" => state_lock.to_string(),
+            "new" => new_state.to_string()
+        )));
         info!("{}", t_with_args("screen-state-change-detected", &fluent_args!("source" => source)));
         *state_lock = new_state;
         let state_str = if new_state { "ON" } else { "OFF" };
@@ -48,8 +53,13 @@ pub fn monitor_screen_state_uevent(state_arc: Arc<Mutex<bool>>) -> Result<(), Bo
         match socket.recv_from_full() {
             Ok((buf, _)) => {
                 if let Ok(event) = UEvent::from_netlink_packet(&buf) {
+                    debug!("{}", t_with_args("screen-uevent-received", &fluent_args!(
+                        "subsystem" => event.subsystem.as_str(),
+                        "devpath" => event.devpath.to_string_lossy().to_string()
+                    )));
                     if event.subsystem == "power" {
                          if let Some(action) = event.env.get("POWER_ACTION") {
+                            debug!("{}", t_with_args("screen-uevent-power-action", &fluent_args!("action" => action.as_str())));
                             if action == "early_suspend" { update_state_if_changed(&state_arc, false, "power"); }
                             else if action == "late_resume" { update_state_if_changed(&state_arc, true, "power"); }
                          }
@@ -63,7 +73,15 @@ pub fn monitor_screen_state_uevent(state_arc: Arc<Mutex<bool>>) -> Result<(), Bo
                             .or_else(|_| crate::utils::read_i32_from_file(&actual).map(|v| v > 0)).ok();
                         
                         if let Some(state) = new_state {
+                            debug!("{}", t_with_args("screen-uevent-backlight", &fluent_args!(
+                                "dev" => dev.to_string(),
+                                "state" => state.to_string()
+                            )));
                             update_state_if_changed(&state_arc, state, "backlight");
+                        } else {
+                            debug!("{}", t_with_args("screen-uevent-backlight-unreadable", &fluent_args!(
+                                "dev" => dev.to_string()
+                            )));
                         }
                     }
                 }
