@@ -86,11 +86,11 @@ fn build_ebpf() -> Result<PathBuf, Box<dyn std::error::Error>> {
         .current_dir(&ebpf_dir)
         .env_remove("RUSTUP_TOOLCHAIN")
         .env("PATH", add_path(linker_bin.parent().unwrap())?)
-        // LLVM 20+ 移除了 -Oz 优化级别；workspace 根 [profile.release] 的
-        // opt-level="z" 会让 bpf-linker 以 -Oz 调用 LLVM 报
-        // 'The optimization level "Oz" is no longer supported'。
-        // eBPF 目标局部覆盖为 "s"（-Os，尺寸优先，LLVM 仍支持）。
-        .env("CARGO_PROFILE_RELEASE_OPT_LEVEL", "s")
+        // 新版 bpf-linker 内嵌的 LLVM 已移除 -Oz 与 -Os，仅支持 -O0~O3；
+        // workspace 根 [profile.release] 的 opt-level="z" 会导致链接失败
+        // （报 'The optimization level "Oz" is no longer supported'）。
+        // eBPF 目标局部覆盖为 "2"（-O2，稳定且无 size 级别兼容问题）。
+        .env("CARGO_PROFILE_RELEASE_OPT_LEVEL", "2")
         .status()?;
 
     if !status.success() {
