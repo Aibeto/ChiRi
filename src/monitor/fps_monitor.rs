@@ -148,8 +148,18 @@ impl FpsManager {
 
         // attach 新 PID
         let pid_i32 = new_pid as i32;
-        let scope =
-            UProbeScope::OneProcess(NonZeroU32::new(new_pid).expect("pid must be > 0"));
+        // 防御：PID 为 0（进程已退出/尚未检测到前台应用）时跳过 attach，
+        // 避免 NonZeroU32::new(0).expect() panic 导致帧监控线程静默死亡。
+        let Some(scope) = NonZeroU32::new(new_pid).map(UProbeScope::OneProcess) else {
+            warn!(
+                "{}",
+                t_with_args(
+                    "fps-monitor-pid-switch-failed",
+                    &fluent_args!("error" => format!("invalid pid {new_pid}"))
+                )
+            );
+            return Ok(());
+        };
 
         let program: &mut UProbe = self.bpf.program_mut("handle_frame").unwrap().try_into()?;
         let link = program

@@ -59,8 +59,9 @@ jobs:
           sudo ln -sf /usr/lib/llvm-18/lib/libLLVM.so /usr/lib64/libLLVM.so
           sudo ln -sf /usr/lib/llvm-18/lib/libclang.so /usr/lib64/libclang.so
           # 官方推荐的预编译安装（build.rs 检测到 PATH 即有，跳过 cargo install）
+          # 注：-y 即 --no-confirm，二者不可同时使用
           cargo install cargo-binstall --locked
-          cargo binstall -y --no-confirm bpf-linker
+          cargo binstall -y bpf-linker
           which bpf-linker
 
       # 6. 安装 Android NDK
