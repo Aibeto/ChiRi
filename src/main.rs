@@ -27,7 +27,8 @@ use std::thread;
 use anyhow::Result;
 use log::{info, error, debug};
 use crate::i18n::{t, t_with_args, load_language};
-use crate::fluent_args;
+// 注意：fluent_args 由 i18n.rs 的 #[macro_export] 注入 crate 根宏命名空间，
+// main.rs 即 root 模块，可直接使用，不能再用 use crate::fluent_args 重复导入（E0255）。
 use crate::scheduler::config::Config;
 
 fn main() -> Result<()> {

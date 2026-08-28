@@ -269,7 +269,7 @@ pub fn start_scheduler_thread(rx: mpsc::Receiver<DaemonEvent>) -> Result<()> {
                     },
 
                     // --- 2. 前台模式切换事件 ---
-                    DaemonEvent::ModeChange { package_name, _pid, mode, temperature } => {
+                    DaemonEvent::ModeChange { package_name, pid: _, mode, temperature } => {
                         let mut current_mode_lock = mode_clone.lock().unwrap();
                         let old_mode = current_mode_lock.clone();
                         log::debug!("{}", t_with_args("scheduler-event-mode-change", &fluent_args!(
@@ -346,7 +346,7 @@ pub fn start_scheduler_thread(rx: mpsc::Receiver<DaemonEvent>) -> Result<()> {
                     },
 
                     // --- 3. CPU 负载事件 (eBPF 驱动) ---
-                    DaemonEvent::SystemLoadUpdate { core_utils, _foreground_max_util } => {
+                    DaemonEvent::SystemLoadUpdate { core_utils, foreground_max_util: _ } => {
                         // 该事件每 200ms 一次，仅在 DEBUG 时输出摘要便于排查
                         log::debug!("{}", t_with_args("scheduler-event-load", &fluent_args!(
                             "cores" => core_utils.iter().map(|u| format!("{:.0}", u * 100.0)).collect::<Vec<_>>().join(",")

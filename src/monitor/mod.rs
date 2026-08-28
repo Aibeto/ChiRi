@@ -20,7 +20,7 @@ use std::thread;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::Sender;
-use log::{error, info};
+use log::error;
 
 pub mod config;
 pub mod app_detect;
