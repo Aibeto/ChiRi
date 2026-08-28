@@ -1,0 +1,80 @@
+# AGENTS.md
+
+本文件为 AI 编程助手（Cursor / Claude Code / Trae 等）在本仓库工作时提供指导。
+
+## 项目概述
+
+**yumi** 是一个 Android CPU 智能调度控制系统（Magisk/KernelSU 模块），核心为 Rust 守护进程，通过 eBPF 内核探针采集 CPU 调度事件与渲染帧数据，结合 PID 控制 FAS 帧感知调度与 CPU 负载调速器（CLG）动态调频。
+
+- 目标平台：Android 8.0+ / AArch64 / 需要 Root
+- 许可证：GPL-3.0-or-later
+- 版本：见 `module/module.prop` 与 `Cargo.toml`（需保持同步）
+
+## 目录结构
+
+```
+src/                  # Rust 守护进程主代码
+  monitor/            # 监控层：app_detect / fps_monitor / cpu_monitor / screen_detect
+  scheduler/          # 调度层：FAS 引擎、CLG 负载调速器
+    fas/              # FAS 核心：PID 控制器、帧率档位、frame_pipeline
+  common.rs / fas_types.rs / i18n.rs / logger.rs
+yumi-ebpf/            # eBPF 探针（bpfel-unknown-none，build-std 编译）
+xtask/                # 构建脚本（cargo xtask build 完成编译打包 zip）
+module/               # Magisk/KernelSU 模块载体（module.prop、customize.sh、service.sh）
+  config/             # config.yaml / rules.yaml / i18n (en.ftl / zh.ftl)
+webui/                # Vue 3 + TypeScript + Vite + Pinia + Vant 管理界面
+updateInformation/    # 更新.json 与 changelog
+.github/workflows/    # CI：Node 24 + Rust nightly + NDK r29 + cargo-ndk
+```
+
+## 技术栈
+
+| 层       | 技术                                                                              |
+| -------- | --------------------------------------------------------------------------------- |
+| 守护进程 | Rust (edition 2024, nightly), tokio, aya (eBPF), serde_yaml, inotify, netlink     |
+| eBPF     | aya 框架，`sched_switch` tracepoint + `queueBuffer` uprobe                        |
+| WebUI    | Vue 3, TypeScript, Vite, Pinia, Vant, vue-i18n, kernelsu                          |
+| 构建     | cargo xtask build（Rust aarch64-linux-android 交叉编译 + webui npm build + 打包） |
+
+## 常用命令
+
+```bash
+# 完整构建（编译 eBPF + 守护进程 + WebUI 并打包模块 zip）
+cargo xtask build
+
+# WebUI 开发
+cd webui && npm install && npm run dev
+
+# WebUI 类型检查
+cd webui && npm run type-check
+```
+
+- 本地开发通常只做 `cargo check` / WebUI `type-check` 验证；完整产物由云端 CI（GitHub Actions）生成。
+- 不要随意执行 `cargo build`（需要 NDK 环境），优先静态检查。
+
+## 代码约定
+
+1. **架构**：Monitor 线程组通过 mpsc 事件通道（`DaemonEvent`）解耦数据采集与调度决策，新增监控/调度能力遵循此模式。
+2. **配置**：运行时配置走 `module/config/config.yaml`（CLG/模式参数）与 `rules.yaml`（FAS 参数），支持热重载；新增配置项需同步更新反序列化结构体与默认值。
+3. **i18n**：守护进程日志基于 Fluent（`module/config/i18n/en.ftl` / `zh.ftl`），WebUI 基于 `webui/src/i18n/locales/`；新增用户可见文案必须同时提供中英文。
+4. **Rust 风格**：release profile 为极致体积优化（`opt-level = "z"`, lto, strip），避免引入重依赖；优先复用现有依赖（serde/anyhow/log/tokio/nix 等），新增第三方库选择社区高星、维护活跃的 crate。
+5. **资源占用敏感**：守护进程运行于 Android 后台，注意内存分配（避免频繁 Vec 分配）、锁粒度和线程唤醒次数。
+6. **版本同步**：发版时同步更新 `module/module.prop`（version/versionCode）、根 `Cargo.toml`（version）、`updateInformation/update.json` 与 `changelog.md`。
+7. **WebUI**：与守护进程通过 kernelsu bridge 交互（见 `webui/src/utils/bridge.ts`），勿直接硬编码路径。
+
+## 硬性约束
+
+- 不修改 CI 配置的构建流程（`.github/workflows/build.yml`），除非明确要求。
+- eBPF 程序目标为 `bpfel-unknown-none`，改动需确保可在 CI 环境交叉编译通过。
+- 保持与 KernelSU/Magisk 模块规范的兼容（`module/` 目录结构、`service.sh` 启动流程）。
+
+## AGENTS.md 维护要求（重要）
+
+**每次对话结束前，必须回顾本次会话内容，评估是否需要更新本文件：**
+
+- 新增/删除/重构了模块、目录或关键文件 → 更新「目录结构」
+- 引入了新的依赖、工具链或构建命令 → 更新「技术栈」「常用命令」
+- 确立了新的代码约定、架构决策或踩坑经验 → 更新「代码约定」（可新增「经验教训」小节）
+- 发现本文件描述与实际代码不符 → 立即修正
+
+若本次对话未产生需要沉淀的变化，可不更新，但必须经过此评估步骤。

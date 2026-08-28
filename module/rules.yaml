@@ -8,7 +8,7 @@ global_mode: "powersave"
 #  恢复方法：取消 app_modes 中相应 "fas" 映射、恢复 fas_rules 配置段即可。
 # ════════════════════════════════════════════════════════════════
 
-app_modes: {}
+app_modes:
   # com.miHoYo.GenshinImpact: "fas"   # FAS 暂禁用
   # com.tencent.tmgp.sgame: "fas"     # FAS 暂禁用
   # com.tencent.tmgp.speedmobile: "fas" # FAS 暂禁用
