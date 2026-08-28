@@ -44,25 +44,23 @@ jobs:
           targets: aarch64-linux-android
           components: rust-src # build-std 需要用到 (含 bpfel-unknown-none)
 
-      # 5. 安装 bpf-linker。
-      #    首选官方推荐方式：cargo-binstall 下载预编译二进制（秒级、免编译、无语义依赖）。
-      #    同时保留系统 LLVM 18 + libLLVM.so 链接修复，作为 build.rs 内
-      #    `cargo install bpf-linker` 的兜底（bpf-linker 官方警告 cargo install 需匹配
-      #    特定 LLVM 版本；此前 llvm-sys 在 /usr/lib64 找不到 -lLLVM 导致链接失败）。
-      #    build.rs 会检测 PATH 中已有 bpf-linker 后跳过安装。
-      - name: Install bpf-linker
+      # 5. 安装 bpf-linker（官方预编译二进制，静态链接 LLVM，无系统依赖）。
+      #    背景：bpf-linker 0.11 依赖 LLVM 21+，源码编译需要系统 LLVM 21+
+      #    （ubuntu runner 无可用包）；cargo-binstall 因 asset 平台匹配问题回退到
+      #    cargo install 而失败。因此直接经 GitHub API 解析官方 release asset 下载。
+      #    build.rs 检测到 PATH 中已有 bpf-linker 后会跳过其内置安装逻辑。
+      - name: Install bpf-linker (prebuilt)
         run: |
           sudo apt-get update
-          sudo apt-get install -y llvm-18-dev libclang-18-dev clang-18
-          sudo update-alternatives --install /usr/bin/llvm-config llvm-config /usr/bin/llvm-config-18 100
-          # llvm-sys 探测到 /usr/lib64，需补 libLLVM.so 软链以满足 -lLLVM 链接
-          sudo ln -sf /usr/lib/llvm-18/lib/libLLVM.so /usr/lib64/libLLVM.so
-          sudo ln -sf /usr/lib/llvm-18/lib/libclang.so /usr/lib64/libclang.so
-          # 官方推荐的预编译安装（build.rs 检测到 PATH 即有，跳过 cargo install）
-          # 注：-y 即 --no-confirm，二者不可同时使用
-          cargo install cargo-binstall --locked
-          cargo binstall -y bpf-linker
-          which bpf-linker
+          sudo apt-get install -y zstd
+          ASSET=$(curl -s https://api.github.com/repos/aya-rs/bpf-linker/releases/tags/v0.11.0 | \
+            python3 -c "import sys,json;d=json.load(sys.stdin);print(next(a['browser_download_url'] for a in d['assets'] if 'x86_64-unknown-linux' in a['name'] and 'debuginfo' not in a['name']))")
+          echo "Downloading $ASSET"
+          curl -L -o /tmp/bpf-linker.tar.zst "$ASSET"
+          mkdir -p /tmp/bpf-linker
+          tar --use-compress-program=zstd -xf /tmp/bpf-linker.tar.zst -C /tmp/bpf-linker
+          sudo find /tmp/bpf-linker -type f -name bpf-linker -exec install -m 755 {} /usr/local/bin/bpf-linker \;
+          bpf-linker --version
 
       # 6. 安装 Android NDK
       - name: Setup Android NDK
