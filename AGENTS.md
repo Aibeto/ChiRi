@@ -51,7 +51,7 @@ cd webui && npm run type-check
 
 - 本地开发通常只做 `cargo check` / WebUI `type-check` 验证；完整产物由云端 CI（GitHub Actions）生成。
 - 不要随意执行 `cargo build`（需要 NDK 环境），优先静态检查。
-- 完整构建的隐藏依赖：`build.rs` 会 `cargo install bpf-linker`（需要系统 LLVM 18，见 CI workflow 的 Install LLVM 步骤），且每次干净 checkout 都会重装——本地调试 eBPF 相关改动前需先装好 `llvm-18-dev libclang-18-dev clang-18`。
+- 完整构建的隐藏依赖：`build.rs` 的 `ensure_bpf_linker` 依次复用「PATH 中已有 bpf-linker」→「OUT_DIR 缓存」→ `cargo install bpf-linker` 兜底。CI 采用官方推荐的 `cargo-binstall` 预编译安装并在步骤中补 `libLLVM.so` 软链（修复 llvm-sys 在 `/usr/lib64` 找不到 `-lLLVM`）；本地若走 cargo install 兜底需预装 `llvm-18-dev libclang-18-dev clang-18`。
 
 ## 代码约定
 

@@ -44,15 +44,24 @@ jobs:
           targets: aarch64-linux-android
           components: rust-src # build-std 需要用到 (含 bpfel-unknown-none)
 
-      # 5. 安装 LLVM（build.rs 中的 `cargo install bpf-linker` 依赖系统 LLVM，
-      #    缺少时 llvm-sys 构建失败且原代码未检查退出状态，导致
-      #    "linker bpf-linker not found"，此步骤必须位于 cargo xtask build 之前）
-      - name: Install LLVM (for bpf-linker)
+      # 5. 安装 bpf-linker。
+      #    首选官方推荐方式：cargo-binstall 下载预编译二进制（秒级、免编译、无语义依赖）。
+      #    同时保留系统 LLVM 18 + libLLVM.so 链接修复，作为 build.rs 内
+      #    `cargo install bpf-linker` 的兜底（bpf-linker 官方警告 cargo install 需匹配
+      #    特定 LLVM 版本；此前 llvm-sys 在 /usr/lib64 找不到 -lLLVM 导致链接失败）。
+      #    build.rs 会检测 PATH 中已有 bpf-linker 后跳过安装。
+      - name: Install bpf-linker
         run: |
           sudo apt-get update
           sudo apt-get install -y llvm-18-dev libclang-18-dev clang-18
-          # 统一 llvm-config 命名，兼容 llvm-sys 的探测逻辑
           sudo update-alternatives --install /usr/bin/llvm-config llvm-config /usr/bin/llvm-config-18 100
+          # llvm-sys 探测到 /usr/lib64，需补 libLLVM.so 软链以满足 -lLLVM 链接
+          sudo ln -sf /usr/lib/llvm-18/lib/libLLVM.so /usr/lib64/libLLVM.so
+          sudo ln -sf /usr/lib/llvm-18/lib/libclang.so /usr/lib64/libclang.so
+          # 官方推荐的预编译安装（build.rs 检测到 PATH 即有，跳过 cargo install）
+          cargo install cargo-binstall --locked
+          cargo binstall -y --no-confirm bpf-linker
+          which bpf-linker
 
       # 6. 安装 Android NDK
       - name: Setup Android NDK

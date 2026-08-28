@@ -2,12 +2,25 @@ use std::process::Command;
 use std::env;
 use std::path::{Path, PathBuf};
 
+/// 检查 bpf-linker 是否已存在于 PATH（CI 预装 / 系统已装则跳过安装）
+fn bpf_linker_on_path() -> bool {
+    env::var_os("PATH")
+        .map(|p| env::split_paths(&p).any(|d| d.join("bpf-linker").is_file()))
+        .unwrap_or(false)
+}
+
 /// 确保 bpf-linker 可用：已存在则跳过，否则安装并严格检查结果。
 /// 之前版本用 `.status()?` 直接透传（只检查进程能否启动，不检查 exit code），
 /// install 静默失败后 yumi-ebpf 链接阶段才会暴露 "linker bpf-linker not found"。
 fn ensure_bpf_linker(tools_dir: &Path) -> Result<PathBuf, Box<dyn std::error::Error>> {
     let tools_bin = tools_dir.join("bin");
     let linker = tools_bin.join("bpf-linker");
+    // 1) PATH 中已有 bpf-linker（如 CI 已用 cargo-binstall 安装预编译版）直接复用
+    if bpf_linker_on_path() {
+        println!("cargo:warning=✅ bpf-linker 已存在于 PATH，跳过安装");
+        return Ok(linker);
+    }
+    // 2) 之前的构建已安装过
     if linker.exists() {
         println!("cargo:warning=✅ bpf-linker 已就绪: {}", linker.display());
         return Ok(linker);
