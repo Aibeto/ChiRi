@@ -84,6 +84,11 @@ cd webui && npm run type-check
 - eBPF 程序目标为 `bpfel-unknown-none`，改动需确保可在 CI 环境交叉编译通过。
 - 保持与 KernelSU/Magisk 模块规范的兼容（`module/` 目录结构、`service.sh` 启动流程）。
 
+## 经验教训
+
+- **日志文件被删不能崩**：`src/logger.rs` 用自实现 `SelfHealingAppender`（替换 log4rs `RollingFileAppender`），每次写入都按路径 `create+append` 重新打开，`daemon.log` 被外部删除会自动重建；循环轮转与锁上锁全程 `Result`/剥除 poison，绝不 `unwrap`，杜绝日志路径 panic 打崩守护进程。勿改回 log4rs 滚动追加器。
+- **WebUI 手动重启必须 `setsid`**：`bridge.ts::restartDaemon` 用 `killall -9 yumi; sleep 1; setsid "$MODDIR/service.sh" </dev/null >/dev/null 2>&1 &` 拉起。因 `ksu.exec` 返回会清理执行 shell 的进程组，过去直接 `nohup ... &` 后台拉起的守护进程会被一并杀掉（“只杀没起”）。`setsid` 新开会话 + 重定向标准流后脱离 exec 进程组存活，等效手动执行 service.sh。
+
 ## AGENTS.md 维护要求（重要）
 
 **每次对话结束前，必须回顾本次会话内容，评估是否需要更新本文件：**

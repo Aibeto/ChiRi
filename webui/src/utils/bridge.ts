@@ -79,12 +79,15 @@ const RealBridge = {
   async getMainConfig(): Promise<any> { try { return yaml.load(await this.readFile(await resolveConfigPath())) || {}; } catch (e) { return {}; } },
   async saveMainConfig(config: any): Promise<void> { await this.writeFile(await resolveConfigPath(), yaml.dump(config)); toast(i18n.global.t('core_config_saved') as string); },
 
-  // 手动热重启守护进程：杀掉旧进程后用与 service.sh 相同的循环包装拉起新二进制，
-  // 保留崩溃自动重启语义；模块更新后无需重启设备即可让新代码生效。
+  // 手动热重启守护进程：先杀掉旧进程，再重新执行 module 的 service.sh 拉起守护进程。
+  // 关键点：ksu.exec 返回时会清理执行 shell 所在的进程组，若像之前那样直接
+  // `nohup ... &` 后台拉起，新守护进程会作为该 shell 的子进程被一并杀掉（表现为
+  // “只杀死了、没启动起来”）。这里用 `setsid` 把 service.sh 开成一个全新会话，
+  // 并重定向全部标准流，使其脱离 exec 的进程组存活，等效于手动执行 service.sh 重启。
   async restartDaemon(): Promise<void> {
     const { errno } = await exec(
       `killall -9 yumi 2>/dev/null; sleep 1; ` +
-      `(nohup sh -c 'while :; do "$1" || exit 0; sleep 3; done' sh "${PATHS.MODULE}/core/bin/yumi" >/dev/null 2>&1 &)`
+      `setsid "${PATHS.MODULE}/service.sh" </dev/null >/dev/null 2>&1 &`
     );
     if (errno !== 0) throw new Error(i18n.global.t('restart_failed') as string);
   },
