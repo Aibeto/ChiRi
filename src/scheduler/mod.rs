@@ -104,15 +104,15 @@ pub(super) fn auto_compute_capacity_weights(policies: &[CpuPolicy]) -> Option<Ve
     }).collect())
 }
 
-pub fn start_scheduler_thread(rx: mpsc::Receiver<DaemonEvent>) -> Result<()> {
+pub fn start_scheduler_thread(
+    rx: mpsc::Receiver<DaemonEvent>,
+    shared_config: Arc<RwLock<Config>>,
+) -> Result<()> {
     let root = common::get_module_root();
     let config_path = root.join("config/config.yaml");
-    let config_dir = root.join("config"); 
+    let config_dir = root.join("config");
 
-    let config = Config::from_file(config_path.to_str().unwrap()).unwrap_or_default();
-
-    let shared_config = Arc::new(RwLock::new(config));
-    let shared_mode_name = Arc::new(Mutex::new("balance".to_string())); 
+    let shared_mode_name = Arc::new(Mutex::new("balance".to_string()));
     let sys_path_exist = Arc::new(utils::SysPathExist::new());
 
     // ==========================================

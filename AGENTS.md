@@ -55,14 +55,14 @@ cd webui && npm run type-check
 
 ## 代码约定
 
-1. **架构**：Monitor 线程组通过 mpsc 事件通道（`DaemonEvent`）解耦数据采集与调度决策，新增监控/调度能力遵循此模式。
+1. **架构**：Monitor 线程组通过有界 mpsc 事件通道（`DaemonEvent`，`sync_channel` 容量 64，满时 send 阻塞形成背压）解耦数据采集与调度决策，新增监控/调度能力遵循此模式。前台 PID 由 `monitor/mod.rs` 的单一 `pid_watcher` 线程经 `tokio::sync::watch` 广播，FPS/CPU 监控共享消费，不要各自重复轮询。FPS 帧监控（`fps_monitor`）仅服务于 FAS 调频，FAS 禁用期间不启动（见 `mod.rs` 中注释块）。
 2. **日志**：调试与排障优先使用 `debug!`（勿全部用 info 污染信息日志）；频率控制/帧处理等高频路径用 25-tick / 60-frame 周期摘要，状态变化（模式、PID、屏幕、attach、档位）即时打点。新增日志 key 必须同时补充 `module/config/i18n/zh.ftl` 与 `en.ftl`，key 命名 `模块-描述`。
-3. **配置**：运行时配置走 `module/config/config.yaml`（CLG/模式参数）与 `rules.yaml`（FAS 参数），支持热重载；新增配置项需同步更新反序列化结构体与默认值。
+3. **配置**：运行时配置走 `module/config/config.yaml`（CLG/模式参数）与 `rules.yaml`（FAS 参数），支持热重载；新增配置项需同步更新反序列化结构体与默认值。config.yaml 由 main 启动时解析一次并以 `Arc<RwLock<Config>>` 共享给 scheduler（勿重复读取），热重载由 scheduler 的 config_watcher 覆写同一共享实例。
 4. **i18n**：守护进程日志基于 Fluent（`module/config/i18n/en.ftl` / `zh.ftl`），WebUI 基于 `webui/src/i18n/locales/`；新增用户可见文案必须同时提供中英文。
 5. **Rust 风格**：release profile 为极致体积优化（`opt-level = "z"`, lto, strip），避免引入重依赖；优先复用现有依赖（serde/anyhow/log/tokio/nix 等），新增第三方库选择社区高星、维护活跃的 crate。
 6. **资源占用敏感**：守护进程运行于 Android 后台，注意内存分配（避免频繁 Vec 分配）、锁粒度和线程唤醒次数。
 7. **版本同步**：发版时同步更新 `module/module.prop`（version/versionCode）、根 `Cargo.toml`（version）、`updateInformation/update.json` 与 `changelog.md`。
-8. **WebUI**：与守护进程通过 kernelsu bridge 交互（见 `webui/src/utils/bridge.ts`），勿直接硬编码路径。
+8. **WebUI**：与守护进程通过 kernelsu bridge 交互（见 `webui/src/utils/bridge.ts`），勿直接硬编码路径。文件写入统一用 base64 管道（`echo '<b64>' | base64 -d > path`）规避 shell 特殊字符解释，不要用 `echo "${content}"` 拼接。
 
 ## 硬性约束
 

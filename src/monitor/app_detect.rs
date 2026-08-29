@@ -15,22 +15,22 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
+use inotify::{Inotify, WatchMask};
+use log::{debug, info, warn};
 use std::collections::{HashMap, HashSet};
+use std::error::Error;
+use std::process::Command;
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
+use std::sync::mpsc::SyncSender;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
-use log::{info, warn, debug};
-use inotify::{Inotify, WatchMask};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering, AtomicI32};
-use std::error::Error;
-use std::process::Command;
-use std::sync::mpsc::Sender;
 
-use crate::common::DaemonEvent;
-use crate::i18n::{t, t_with_args};
-use crate::fluent_args;
-use crate::utils;
 use super::config::{self, RulesConfig};
+use crate::common::DaemonEvent;
+use crate::fluent_args;
+use crate::i18n::{t, t_with_args};
+use crate::utils;
 
 // 缓存有效的 Cgroup 路径索引，避免每次循环都去探测无效路径
 static VALID_CGROUP_IDX: AtomicUsize = AtomicUsize::new(usize::MAX);
@@ -40,7 +40,7 @@ static CURRENT_PID: AtomicI32 = AtomicI32::new(0);
 // 获取系统已启用的输入法列表
 fn get_system_ime_packages() -> HashSet<String> {
     let mut imes = HashSet::new();
-    
+
     let output = Command::new("settings")
         .arg("get")
         .arg("secure")
@@ -54,12 +54,15 @@ fn get_system_ime_packages() -> HashSet<String> {
                 let clean_pkg = pkg.trim();
                 if !clean_pkg.is_empty() {
                     imes.insert(clean_pkg.to_string());
-                    debug!("{}", t_with_args("app-detect-ime-auto", &fluent_args!("pkg" => clean_pkg)));
+                    debug!(
+                        "{}",
+                        t_with_args("app-detect-ime-auto", &fluent_args!("pkg" => clean_pkg))
+                    );
                 }
             }
         }
     }
-    
+
     if imes.is_empty() {
         warn!("{}", t("app-detect-ime-fallback"));
         imes.insert("com.sohu.inputmethod.sogou.xiaomi".to_string());
@@ -68,12 +71,12 @@ fn get_system_ime_packages() -> HashSet<String> {
         imes.insert("com.baidu.input_mi".to_string());
         imes.insert("com.iflytek.inputmethod.miui".to_string());
     }
-    
+
     imes
 }
 
 lazy_static::lazy_static! {
-    static ref CURRENT_PACKAGE: Arc<Mutex<String>> = Arc::new(Mutex::new("".to_string()));    
+    static ref CURRENT_PACKAGE: Arc<Mutex<String>> = Arc::new(Mutex::new("".to_string()));
     static ref IME_BLOCKLIST: HashSet<String> = get_system_ime_packages();
 }
 
@@ -91,13 +94,21 @@ fn set_current_package(pkg: &str, pid: i32) {
 
 /// 判断是否为有效的用户应用包名
 fn is_valid_user_app(pkg: &str, ignored_apps: &[String]) -> bool {
-    if pkg.is_empty() || !pkg.contains('.') || pkg.starts_with('/') || pkg.starts_with('.') || pkg.contains(':') {
+    if pkg.is_empty()
+        || !pkg.contains('.')
+        || pkg.starts_with('/')
+        || pkg.starts_with('.')
+        || pkg.contains(':')
+    {
         return false;
     }
     if IME_BLOCKLIST.contains(pkg) {
-        return false; 
+        return false;
     }
-    if ignored_apps.iter().any(|ignored| pkg == ignored || pkg.contains(ignored)) {
+    if ignored_apps
+        .iter()
+        .any(|ignored| pkg == ignored || pkg.contains(ignored))
+    {
         return false;
     }
     match pkg {
@@ -113,9 +124,15 @@ fn is_valid_user_app(pkg: &str, ignored_apps: &[String]) -> bool {
         "com.google.android.gms.ui" => false,
         "com.xiaomi.mibrain.speech" => false,
         _ => {
-            if pkg.contains("magisk") || pkg.contains("mtiodaemon") { return false; }
-            if pkg.contains("ads_monitor") { return false; }
-            if pkg.contains("inputmethod") { return false; }
+            if pkg.contains("magisk") || pkg.contains("mtiodaemon") {
+                return false;
+            }
+            if pkg.contains("ads_monitor") {
+                return false;
+            }
+            if pkg.contains("inputmethod") {
+                return false;
+            }
             true
         }
     }
@@ -144,24 +161,26 @@ fn get_focused_app_from_cgroup(ignored_apps: &[String]) -> Result<(String, i32),
     let paths = [
         "/dev/cpuset/top-app/cgroup.procs",
         "/sys/fs/cgroup/cpuset/top-app/cgroup.procs",
-        "/dev/stune/top-app/cgroup.procs"
+        "/dev/stune/top-app/cgroup.procs",
     ];
 
     let cached = VALID_CGROUP_IDX.load(Ordering::Relaxed);
     if cached < paths.len() {
         if let Some(res) = check_cgroup_path(paths[cached], ignored_apps) {
-            return Ok(res); 
+            return Ok(res);
         }
     }
 
     for (i, path) in paths.iter().enumerate() {
-        if i == cached { continue; }
+        if i == cached {
+            continue;
+        }
         if let Some(res) = check_cgroup_path(path, ignored_apps) {
             VALID_CGROUP_IDX.store(i, Ordering::Relaxed);
             return Ok(res);
         }
     }
-    
+
     Err("No valid app found".into())
 }
 
@@ -171,7 +190,11 @@ fn determine_mode(config: &RulesConfig, current_package: &str) -> String {
     if !config.dynamic_enabled {
         return config.global_mode.clone();
     }
-    config.app_modes.get(current_package).cloned().unwrap_or_else(|| config.global_mode.clone())
+    config
+        .app_modes
+        .get(current_package)
+        .cloned()
+        .unwrap_or_else(|| config.global_mode.clone())
 }
 
 pub fn get_default_rules() -> RulesConfig {
@@ -188,34 +211,54 @@ pub fn get_default_rules() -> RulesConfig {
 pub fn watch_config_file(
     config_arc: Arc<Mutex<RulesConfig>>,
     force_refresh_arc: Arc<AtomicBool>,
-    tx: Sender<DaemonEvent>
+    tx: SyncSender<DaemonEvent>,
 ) -> Result<(), Box<dyn Error>> {
     let mut inotify = Inotify::init()?;
     let rules_path = config::get_rules_path();
-    if !rules_path.exists() { let _ = utils::try_write_file(&rules_path, ""); }
-    inotify.watches().add(&rules_path, WatchMask::MODIFY | WatchMask::CLOSE_WRITE)?;
-    info!("{}", t_with_args("app-detect-config-watch", &fluent_args!("path" => format!("{:?}", rules_path))));
+    if !rules_path.exists() {
+        let _ = utils::try_write_file(&rules_path, "");
+    }
+    inotify
+        .watches()
+        .add(&rules_path, WatchMask::MODIFY | WatchMask::CLOSE_WRITE)?;
+    info!(
+        "{}",
+        t_with_args(
+            "app-detect-config-watch",
+            &fluent_args!("path" => format!("{:?}", rules_path))
+        )
+    );
     let mut buffer = [0u8; 1024];
     loop {
         let events = inotify.read_events_blocking(&mut buffer)?;
         if events.peekable().peek().is_some() {
             info!("{}", t("app-detect-change-detected"));
             thread::sleep(Duration::from_millis(100));
-            while let Ok(events) = inotify.read_events(&mut buffer) { if events.peekable().peek().is_none() { break; } }
+            while let Ok(events) = inotify.read_events(&mut buffer) {
+                if events.peekable().peek().is_none() {
+                    break;
+                }
+            }
             info!("{}", t("app-detect-reloading"));
-            
+
             let new_config = crate::utils::read_config::<RulesConfig, _>(&rules_path)
-                                .unwrap_or_else(|e| { 
-                                    warn!("{}", t_with_args("app-detect-load-failed", &fluent_args!("error" => e.to_string()))); 
-                                    get_default_rules() 
-                                });
-            
+                .unwrap_or_else(|e| {
+                    warn!(
+                        "{}",
+                        t_with_args(
+                            "app-detect-load-failed",
+                            &fluent_args!("error" => e.to_string())
+                        )
+                    );
+                    get_default_rules()
+                });
+
             *config_arc.lock().unwrap() = new_config.clone();
-            
+
             if let Err(e) = tx.send(DaemonEvent::ConfigReload(new_config)) {
                 warn!("[Config] Failed to send ConfigReload event: {}", e);
             }
-            
+
             info!("{}", t("app-detect-reload-success"));
             force_refresh_arc.store(true, Ordering::SeqCst);
         }
@@ -223,29 +266,35 @@ pub fn watch_config_file(
 }
 
 pub fn app_detection_loop(
-    config_arc: Arc<Mutex<RulesConfig>>, 
+    config_arc: Arc<Mutex<RulesConfig>>,
     screen_state_arc: Arc<Mutex<bool>>,
     force_refresh_arc: Arc<AtomicBool>,
-    tx: Sender<DaemonEvent>
+    tx: SyncSender<DaemonEvent>,
 ) -> Result<(), Box<dyn Error>> {
     info!("{}", t("app-detect-loop-started"));
-    
+
     let temp_sensor_path = utils::find_cpu_temp_path().unwrap_or_default();
     let mut last_package = String::new();
     let mut last_mode = String::new();
-    let mut last_screen_state = true; 
-    
+    let mut last_screen_state = true;
+
     // 状态机变量：用于无阻塞防抖
     let mut pending_package = String::new();
     let mut pending_pid = 0;
     let mut debounce_start = Instant::now();
-    
+
     loop {
         let force_refresh = force_refresh_arc.swap(false, Ordering::SeqCst);
         let current_screen_state = { *screen_state_arc.lock().unwrap() };
-        
+
         if current_screen_state != last_screen_state {
-            info!("{}", t_with_args("app-detect-screen-changed", &fluent_args!("old" => last_screen_state.to_string(), "new" => current_screen_state.to_string())));
+            info!(
+                "{}",
+                t_with_args(
+                    "app-detect-screen-changed",
+                    &fluent_args!("old" => last_screen_state.to_string(), "new" => current_screen_state.to_string())
+                )
+            );
             last_screen_state = current_screen_state;
             let _ = tx.send(DaemonEvent::ScreenStateChange(current_screen_state));
 
@@ -257,11 +306,11 @@ pub fn app_detection_loop(
             }
         }
 
-        if !current_screen_state { 
+        if !current_screen_state {
             thread::sleep(Duration::from_secs(1));
             continue;
         }
-                
+
         // 合并锁获取：一次拿完所有需要的数据
         let config_snapshot = config_arc.lock().unwrap().clone();
         let ignored_apps = config_snapshot.ignored_apps.clone();
@@ -278,18 +327,30 @@ pub fn app_detection_loop(
                 pending_package = detected_pkg.clone();
                 pending_pid = detected_pid;
                 debounce_start = Instant::now();
-                debug!("{}", t_with_args("app-detect-debounce-start", &fluent_args!(
-                    "pkg" => pending_package.as_str(),
-                    "pid" => pending_pid.to_string()
-                )));
+                debug!(
+                    "{}",
+                    t_with_args(
+                        "app-detect-debounce-start",
+                        &fluent_args!(
+                            "pkg" => pending_package.as_str(),
+                            "pid" => pending_pid.to_string()
+                        )
+                    )
+                );
             } else if debounce_start.elapsed() >= Duration::from_millis(500) {
                 final_pkg = pending_package.clone();
                 final_pid = pending_pid;
                 pending_package.clear();
-                debug!("{}", t_with_args("app-detect-debounce-confirmed", &fluent_args!(
-                    "pkg" => final_pkg.as_str(),
-                    "pid" => final_pid.to_string()
-                )));
+                debug!(
+                    "{}",
+                    t_with_args(
+                        "app-detect-debounce-confirmed",
+                        &fluent_args!(
+                            "pkg" => final_pkg.as_str(),
+                            "pid" => final_pid.to_string()
+                        )
+                    )
+                );
             }
         } else {
             pending_package.clear();
@@ -297,16 +358,24 @@ pub fn app_detection_loop(
 
         let current_temp = if !temp_sensor_path.is_empty() {
             utils::read_f64_from_file(&temp_sensor_path).unwrap_or(0.0) / 1000.0
-        } else { 0.0 };
-        
+        } else {
+            0.0
+        };
+
         if last_package != final_pkg || force_refresh {
             if !final_pkg.is_empty() {
-                debug!("{}", t_with_args("app-detect-pkg-change", &fluent_args!(
-                    "pkg" => final_pkg.as_str(),
-                    "pid" => final_pid.to_string(),
-                    "temp" => format!("{:.1}", current_temp),
-                    "force" => force_refresh.to_string()
-                )));
+                debug!(
+                    "{}",
+                    t_with_args(
+                        "app-detect-pkg-change",
+                        &fluent_args!(
+                            "pkg" => final_pkg.as_str(),
+                            "pid" => final_pid.to_string(),
+                            "temp" => format!("{:.1}", current_temp),
+                            "force" => force_refresh.to_string()
+                        )
+                    )
+                );
                 set_current_package(&final_pkg, final_pid);
                 // 使用已获取的 config_snapshot，不再重复加锁
                 let new_mode = determine_mode(&config_snapshot, &final_pkg);
@@ -316,7 +385,13 @@ pub fn app_detection_loop(
                 // 注意：同模式应用切换不发事件对 scheduler 无影响——CLG 按模式调频，
                 // FAS 是独立模式（进入必然伴随模式变化），温度刷新走 FrameUpdate。
                 if last_mode != new_mode {
-                    info!("{}", t_with_args("app-detect-mode-change-pkg", &fluent_args!("old" => last_mode.clone(), "new" => new_mode.as_str(), "pkg" => final_pkg.as_str())));
+                    info!(
+                        "{}",
+                        t_with_args(
+                            "app-detect-mode-change-pkg",
+                            &fluent_args!("old" => last_mode.clone(), "new" => new_mode.as_str(), "pkg" => final_pkg.as_str())
+                        )
+                    );
                     // ModeChange 事件现在携带 pid 字段
                     let _ = tx.send(DaemonEvent::ModeChange {
                         package_name: final_pkg.clone(),

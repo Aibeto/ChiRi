@@ -20,6 +20,17 @@ const PATHS = {
 
 const isDev = import.meta.env.DEV || typeof window.ksu === 'undefined';
 
+// UTF-8 安全的字符串 → base64（TextEncoder 兼容中文/特殊字符，分块避免栈溢出）
+function utf8ToBase64(str: string): string {
+  const bytes = new TextEncoder().encode(str);
+  let bin = '';
+  const CHUNK = 0x8000;
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    bin += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
+  }
+  return btoa(bin);
+}
+
 const RealBridge = {
   async isDaemonRunning(): Promise<boolean> {
     try {
@@ -36,8 +47,9 @@ const RealBridge = {
     return stdout;
   },
   async writeFile(path: string, content: string): Promise<void> {
-    const escapedContent = content.replace(/"/g, '\\"');
-    const { errno } = await exec(`echo "${escapedContent}" > "${path}"`);
+    // base64 传输：规避 shell 对 $、`、!、引号等字符的解释与注入风险
+    const b64 = utf8ToBase64(content);
+    const { errno } = await exec(`echo '${b64}' | base64 -d > "${path}"`);
     if (errno !== 0) throw new Error(i18n.global.t('write_failed', { path }) as string);
   },
 

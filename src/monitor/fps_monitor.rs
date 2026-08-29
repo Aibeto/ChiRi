@@ -20,7 +20,7 @@ use std::mem::size_of;
 use std::num::NonZeroU32;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::ptr;
-use std::sync::mpsc::Sender;
+use std::sync::mpsc::SyncSender;
 use std::time::Duration;
 
 use aya::Ebpf;
@@ -65,7 +65,10 @@ struct ProbeState {
 
 impl ProbeState {
     fn new() -> Self {
-        Self { last_ktime_ns: None, frametimes: VecDeque::with_capacity(FRAMETIME_WINDOW) }
+        Self {
+            last_ktime_ns: None,
+            frametimes: VecDeque::with_capacity(FRAMETIME_WINDOW),
+        }
     }
 
     fn ingest(&mut self, ktime_ns: u64) {
@@ -181,14 +184,23 @@ impl FpsManager {
         self.states.entry(new_pid).or_insert_with(ProbeState::new);
         self.current_pid = new_pid;
 
-        debug!("{}", t_with_args("fps-monitor-attach-symbol", &fluent_args!(
-            "pid" => pid_i32.to_string(),
-            "lib" => LIBGUI_PATH
-        )));
+        debug!(
+            "{}",
+            t_with_args(
+                "fps-monitor-attach-symbol",
+                &fluent_args!(
+                    "pid" => pid_i32.to_string(),
+                    "lib" => LIBGUI_PATH
+                )
+            )
+        );
 
         info!(
             "{}",
-            t_with_args("fps-monitor-attached", &fluent_args!("pid" => pid_i32.to_string()))
+            t_with_args(
+                "fps-monitor-attached",
+                &fluent_args!("pid" => pid_i32.to_string())
+            )
         );
         Ok(())
     }
@@ -202,8 +214,7 @@ impl FpsManager {
             if data.len() < size_of::<FrameTimestampEvent>() {
                 continue;
             }
-            let event =
-                unsafe { ptr::read_unaligned(data.as_ptr().cast::<FrameTimestampEvent>()) };
+            let event = unsafe { ptr::read_unaligned(data.as_ptr().cast::<FrameTimestampEvent>()) };
 
             if let Some(state) = self.states.get_mut(&event.pid) {
                 state.ingest(event.ktime_ns);
@@ -223,7 +234,7 @@ impl FpsManager {
 
 // ─── 主入口 ──────────────────────────────────────────────
 
-pub async fn start_fps_loop(tx: Sender<DaemonEvent>) -> Result<(), anyhow::Error> {
+pub async fn start_fps_loop(tx: SyncSender<DaemonEvent>) -> Result<(), anyhow::Error> {
     info!("{}", t("fps-monitor-init"));
 
     let initial_pid = app_detect::get_current_pid();
