@@ -36,8 +36,8 @@ use crate::chiri::config::SpecialTunedConfig;
 use crate::utils::FastWriter;
 use log::{debug, info, warn};
 use std::fs;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::fluent_args;
@@ -96,12 +96,7 @@ fn core_name_for(affected: &[usize]) -> Option<&'static str> {
 /// 吸附四档的 max 上限：取各档该核心组的 max_freq（>0 才写），吸附到真实频率表。
 /// 未配置（0）的档位返回 None，切到该档时不写 max（保持现状）。
 fn snap_tier_max(cfg: &SpecialTunedConfig, name: &str, freqs: &[u32]) -> [Option<u32>; TIER_COUNT] {
-    let tiers = [
-        &cfg.powersave,
-        &cfg.balance,
-        &cfg.performance,
-        &cfg.fast,
-    ];
+    let tiers = [&cfg.powersave, &cfg.balance, &cfg.performance, &cfg.fast];
     let mut arr = [None; TIER_COUNT];
     for (i, t) in tiers.iter().enumerate() {
         let f = match name {
@@ -231,7 +226,7 @@ impl AkmodeGovernor {
             };
 
             let tier_max = snap_tier_max(&self.cfg, name, &freqs);
-            let max_writer = FastWriter::new(max_path.clone());
+            let mut max_writer = FastWriter::new(max_path.clone());
             if !max_writer.is_valid() {
                 warn!(
                     "{}",
@@ -363,7 +358,8 @@ impl AkmodeGovernor {
         self.cfg = cfg.clone();
         self.cfg.normalize();
         for cluster in self.clusters.iter_mut() {
-            cluster.tier_max = snap_tier_max(&self.cfg, &cluster.core_name, &cluster.available_freqs);
+            cluster.tier_max =
+                snap_tier_max(&self.cfg, &cluster.core_name, &cluster.available_freqs);
         }
         self.current_tier = self.current_tier.clamp(1, TIER_COUNT as u32);
         // 用新配置重写当前档的 max 上限
@@ -473,7 +469,11 @@ impl AkmodeGovernor {
             // 升降档后的临时加速：刚切过档（fast_wait_until 未过期）时 wait_ms 减半执行，
             // 让连续跳档更跟手；超过 after_change_duration_ms 恢复原 wait_ms。
             let fast_wait = self.fast_wait_until.map_or(false, |until| now < until);
-            let wait = if fast_wait { tc.wait_ms / 2 } else { tc.wait_ms };
+            let wait = if fast_wait {
+                tc.wait_ms / 2
+            } else {
+                tc.wait_ms
+            };
             match self.pending_tier {
                 Some(t) if t == desired => {
                     if let Some(since) = self.pending_since {
@@ -544,9 +544,8 @@ impl AkmodeGovernor {
             }
         }
         // 切档后启动临时加速窗口：此后 after_change_duration_ms 内防抖等待减半执行
-        self.fast_wait_until = Some(
-            Instant::now() + Duration::from_millis(self.cfg.after_change_duration_ms),
-        );
+        self.fast_wait_until =
+            Some(Instant::now() + Duration::from_millis(self.cfg.after_change_duration_ms));
         info!(
             "{}",
             t_with_args(
