@@ -95,6 +95,7 @@ scheduler-event-load = [Scheduler] load event: core_utils=[{ $cores }]
 scheduler-event-frame = [Scheduler] frame event: delta={ $delta_ms }ms
 scheduler-event-config-reload = [Scheduler] config reload event: mode={ $mode }, screen_on={ $screen_on }
 scheduler-special-mode-active = [Scheduler] Special profile active: { $pkg } -> { $mode }
+scheduler-scene-mode-enter = [Scheduler] Screen off past threshold, switching to scenemode extreme power-saving.
 
 # --- Scheduler: Config Watcher ---
 config-reloading = [Config] Config file change detected, reloading...
@@ -125,6 +126,8 @@ clg-writer-invalid = [CLG] P{ $pid } sysfs writer invalid (max_valid: { $max_val
 clg-freq-set = [CLG] P{ $pid } freq change: { $old_khz }MHz -> { $new_khz }MHz
 clg-freq-write-failed-cached = [CLG] P{ $pid } freq write failed, keeping cached { $cached_khz }MHz (target { $target_khz }MHz)
 clg-watchdog-release = [CLG] WATCHDOG: no load events for { $secs }s, eBPF source failed. Releasing CPU control to system defaults.
+clg-up-skipped = [CLG] P{ $pid } actual={ $cur_khz }MHz below locked { $lock_khz }MHz, skipping this raise (schedutil headroom, on-demand up)
+clg-touch-boost = [CLG] Touch boost window open: big-core perf floor={ $floor } held { $ms }ms
 
 # --- AKMode (Arknights special tuning) ---
 akmode-init = [AKMode] Arknights special tuning take over | tier={ $mode }
@@ -137,6 +140,15 @@ akmode-tick-log = [AKMode] tier={ $mode } up={ $up } down={ $down } busy/idle: L
 akmode-max-set = [AKMode] P{ $pid } ({ $name }) tier={ $mode } max={ $max_khz }MHz
 akmode-max-skipped = [AKMode] P{ $pid } ({ $name }) tier={ $mode } actual={ $cur_khz }MHz below set max={ $max_khz }MHz, skipping max raise (schedutil headroom)
 akmode-watchdog-release = [AKMode] WATCHDOG: no load events for { $secs }s, eBPF source failed. Releasing Arknights special tuning and restoring original governor/min/max.
+
+# --- Touch (touch boost) ---
+touch-detect-started = [Touch] Touch detection thread started (reading /dev/input devices).
+touch-detect-no-devices = [Touch] No readable input devices found, retrying in 3s.
+touch-detect-poll-error = [Touch] poll on input devices failed, re-enumerating.
+touch-detect-down = [Touch] Touch down detected (type={ $type } code={ $code })
+touch-event-received = [Touch] Touch event received, boosting big cores and flushing immediately.
+touch-boost-disable-node = [TouchBoost] Wrote { $path } = 0 (disabled system touch boost)
+touch-boost-disable-applied = [TouchBoost] Android built-in touch boost (cpu_boost) disabled, now handled by ChiRi touch boost.
 
 # --- FAS ---
 fas-freq-mismatch = [FAS] P{ $pid }: freq mismatch! expected { $min }-{ $max }, actual { $actual } -> emergency reapply

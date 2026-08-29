@@ -37,9 +37,10 @@ use anyhow::Result;
 use std::fs;
 use std::sync::{Arc, RwLock};
 
-use crate::i18n::t;
+use crate::i18n::{t, t_with_args};
 use crate::utils;
 use crate::utils::SysPathExist;
+use crate::fluent_args;
 
 /// 与模式无关的一次性系统设置执行器（cpuidle / IO）。
 /// 每次配置热重载后由 config_watcher 线程调用，用于把系统参数对齐到新配置。
@@ -62,6 +63,7 @@ impl CpuScheduler {
     pub fn apply_system_tweaks(&self) -> Result<()> {
         self.apply_cpu_idle_governor()?;
         self.apply_io_settings()?;
+        self.apply_disable_touch_boost()?;
         Ok(())
     }
 
@@ -139,6 +141,36 @@ impl CpuScheduler {
         }
 
         log::info!("{}", t("apply-io-settings-start"));
+        Ok(())
+    }
+
+    /// 屏蔽 Android/内核自带的触摸升频（cpu_boost 驱动），改由 ChiRi 触摸升频统一接管：
+    /// 关闭 input_boost 与 sched_boost_on_input，避免内核一上一下互抢导致频率抖动。
+    /// 各节点按存在性逐一尝试，设备内核无对应节点时静默跳过（非 ChiRi 通用内核不报错）。
+    fn apply_disable_touch_boost(&self) -> Result<()> {
+        let targets = [
+            ("/sys/module/cpu_boost/parameters/input_boost_enabled", "0"),
+            ("/sys/module/cpu_boost/parameters/sched_boost_on_input", "0"),
+            ("/sys/module/cpu_boost/parameters/input_boost_ms", "0"),
+            ("/sys/module/cpu_boost/parameters/boost_ms", "0"),
+        ];
+        let mut any_written = false;
+        for (path, val) in targets {
+            if std::path::Path::new(path).exists() {
+                let _ = utils::try_write_file(path, val);
+                any_written = true;
+                log::debug!(
+                    "{}",
+                    t_with_args(
+                        "touch-boost-disable-node",
+                        &fluent_args!("path" => path.to_string())
+                    )
+                );
+            }
+        }
+        if any_written {
+            log::info!("{}", t("touch-boost-disable-applied"));
+        }
         Ok(())
     }
 }

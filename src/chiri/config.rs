@@ -77,10 +77,8 @@ pub struct CpuLoadGovernorConfig {
     /// 升频平滑系数：每 tick 目标性能只逼近该比例，越大响应越快，越小越省电
     #[serde(default = "d_clg_smooth_up")]
     pub smoothing_up: f32,
-    /// 降频平滑系数：同样为每 tick 逼近比例，越大降得越快
-    #[serde(default = "d_clg_smooth_down")]
-    pub smoothing_down: f32,
-    /// 降频速率限制：必须连续满足 down_wait >= 该 tick 数才执行一次降频
+    /// 降频速率限制：必须连续满足 down_wait >= 该 tick 数才执行一次降频。
+    /// 降频本身为“直接降频”一步到位（不做平滑渐变），该值仅作防抖。
     #[serde(default = "d_clg_down_rate")]
     pub down_rate_limit_ticks: u32,
     /// 升频速率限制：必须连续满足 up_wait >= 该 tick 数才执行一次升频
@@ -108,16 +106,9 @@ pub struct CpuLoadGovernorConfig {
     /// 低负载升频（负载未达 up_threshold 时）对 smoothing_up 的缩放系数
     #[serde(default = "d_clg_slow_up_scale")]
     pub slow_up_scale: f32,
-    /// 滞回带内（down_threshold..up_threshold）降频时对 smoothing_down 的缩放系数，
-    /// 用于防抖并避免高频锁定
-    #[serde(default = "d_clg_slow_down_scale")]
-    pub slow_down_scale: f32,
-    /// 极低负载阈值：util 低于此值触发快速降频
+    /// 极低负载阈值：util 低于此值时跳过降频防抖、立即直接降频
     #[serde(default = "d_clg_down_fast_thresh")]
     pub down_fast_threshold: f32,
-    /// 快速降频时对 smoothing_down 的放大倍数
-    #[serde(default = "d_clg_down_fast_mult")]
-    pub down_fast_mult: f32,
     /// 尖峰抑制：单 tick util 跳升超过此值时，其增量按 spike_decay 比例衰减，
     /// 避免孤立瞬时尖峰（如单核 0↔100%）瞬间拉满 perf
     #[serde(default = "d_clg_spike_jump")]
@@ -125,6 +116,15 @@ pub struct CpuLoadGovernorConfig {
     /// 尖峰增量保留比例（0.0=完全抑制，1.0=不抑制）
     #[serde(default = "d_clg_spike_decay")]
     pub spike_decay: f32,
+    /// 触摸升频总开关：true 时触摸屏幕将把大核（3-6）频率提前抬高一档，减少操作卡顿
+    #[serde(default = "crate::utils::default_true")]
+    pub touch_boost_enabled: bool,
+    /// 触摸升频保持时长（ms）：触摸后窗口期内大核锁定在抬高档位，窗口结束回落到负载调度
+    #[serde(default = "d_clg_touch_boost_ms")]
+    pub touch_boost_ms: u64,
+    /// 触摸升频抬高的频率档数：在可用频率表中向上移动的档数（1 档即一个频率步进）
+    #[serde(default = "d_clg_touch_boost_tiers")]
+    pub touch_boost_tiers: u32,
 }
 
 // CLG 各参数缺省值：config.yaml 省略字段时回退到此处（与 normalize 的兜底默认一致）
@@ -136,9 +136,6 @@ fn d_clg_down_thresh() -> f32 {
 }
 fn d_clg_smooth_up() -> f32 {
     0.60
-}
-fn d_clg_smooth_down() -> f32 {
-    0.30
 }
 fn d_clg_down_rate() -> u32 {
     3
@@ -167,20 +164,20 @@ fn d_clg_up_jump() -> f32 {
 fn d_clg_slow_up_scale() -> f32 {
     0.02
 }
-fn d_clg_slow_down_scale() -> f32 {
-    0.5
-}
 fn d_clg_down_fast_thresh() -> f32 {
     0.10
-}
-fn d_clg_down_fast_mult() -> f32 {
-    2.5
 }
 fn d_clg_spike_jump() -> f32 {
     0.35
 }
 fn d_clg_spike_decay() -> f32 {
     0.30
+}
+fn d_clg_touch_boost_ms() -> u64 {
+    400
+}
+fn d_clg_touch_boost_tiers() -> u32 {
+    1
 }
 
 impl Default for CpuLoadGovernorConfig {
@@ -190,7 +187,6 @@ impl Default for CpuLoadGovernorConfig {
             up_threshold: d_clg_up_thresh(),
             down_threshold: d_clg_down_thresh(),
             smoothing_up: d_clg_smooth_up(),
-            smoothing_down: d_clg_smooth_down(),
             down_rate_limit_ticks: d_clg_down_rate(),
             up_rate_limit_ticks: d_clg_up_rate(),
             headroom_factor: d_clg_headroom(),
@@ -200,11 +196,12 @@ impl Default for CpuLoadGovernorConfig {
             perf_init: d_clg_init(),
             up_jump_threshold: d_clg_up_jump(),
             slow_up_scale: d_clg_slow_up_scale(),
-            slow_down_scale: d_clg_slow_down_scale(),
             down_fast_threshold: d_clg_down_fast_thresh(),
-            down_fast_mult: d_clg_down_fast_mult(),
             spike_jump_threshold: d_clg_spike_jump(),
             spike_decay: d_clg_spike_decay(),
+            touch_boost_enabled: true,
+            touch_boost_ms: d_clg_touch_boost_ms(),
+            touch_boost_tiers: d_clg_touch_boost_tiers(),
         }
     }
 }
@@ -223,9 +220,6 @@ impl CpuLoadGovernorConfig {
         }
         if !self.smoothing_up.is_finite() {
             self.smoothing_up = d_clg_smooth_up();
-        }
-        if !self.smoothing_down.is_finite() {
-            self.smoothing_down = d_clg_smooth_down();
         }
         if !self.headroom_factor.is_finite() {
             self.headroom_factor = d_clg_headroom();
@@ -248,14 +242,8 @@ impl CpuLoadGovernorConfig {
         if !self.slow_up_scale.is_finite() {
             self.slow_up_scale = d_clg_slow_up_scale();
         }
-        if !self.slow_down_scale.is_finite() {
-            self.slow_down_scale = d_clg_slow_down_scale();
-        }
         if !self.down_fast_threshold.is_finite() {
             self.down_fast_threshold = d_clg_down_fast_thresh();
-        }
-        if !self.down_fast_mult.is_finite() {
-            self.down_fast_mult = d_clg_down_fast_mult();
         }
         if !self.spike_jump_threshold.is_finite() {
             self.spike_jump_threshold = d_clg_spike_jump();
@@ -272,17 +260,22 @@ impl CpuLoadGovernorConfig {
             self.down_threshold = self.up_threshold;
         }
         self.smoothing_up = self.smoothing_up.clamp(0.0, 1.0);
-        self.smoothing_down = self.smoothing_down.clamp(0.0, 1.0);
         self.slow_up_scale = self.slow_up_scale.clamp(0.0, 1.0);
-        self.slow_down_scale = self.slow_down_scale.clamp(0.0, 1.0);
         self.up_jump_threshold = self.up_jump_threshold.clamp(0.0, 1.0);
         self.down_fast_threshold = self.down_fast_threshold.clamp(0.0, 1.0);
         self.spike_jump_threshold = self.spike_jump_threshold.clamp(0.0, 1.0);
         self.spike_decay = self.spike_decay.clamp(0.0, 1.0);
         self.headroom_ramp = self.headroom_ramp.clamp(0.0, 1.0);
-        // headroom 语义 >= 1（余量放大），down_fast_mult 语义 >= 1（放大）
+        // headroom 语义 >= 1（余量放大）
         self.headroom_factor = self.headroom_factor.clamp(1.0, 3.0);
-        self.down_fast_mult = self.down_fast_mult.clamp(1.0, 10.0);
+
+        // 触摸升频参数限制：保持时长限制在 1s 内防误配，档数限制在 8 档内
+        self.touch_boost_ms = self.touch_boost_ms.clamp(1, 1000);
+        self.touch_boost_tiers = self.touch_boost_tiers.min(8);
+        // 触摸升频关闭时（touch_boost_enabled=false）时长置 0，避免窗口逻辑误判
+        if !self.touch_boost_enabled {
+            self.touch_boost_ms = 0;
+        }
 
         // 交叉约束（顺序保证 clamp 边界合法）
         if self.perf_floor > self.perf_ceil {
@@ -583,11 +576,24 @@ pub struct Config {
     pub performance: Mode,
     #[serde(default)]
     pub fast: Mode,
+    /// 息屏场景模式（scenemode）：屏幕熄灭超过 `scene_mode_delay_secs` 秒后切换到的
+    /// 极致省电配置（不择手段压功耗提续航），亮屏后恢复原模式。
+    /// 未定义时回退 CLG 默认参数（兜底，通常 8550 config.yaml 会显式配置）。
+    #[serde(default)]
+    pub scenemode: Mode,
+    /// 息屏进入 scenemode 的延迟（秒）：默认 300s（5 分钟），YAML 可覆盖
+    #[serde(default = "default_scene_mode_delay_secs")]
+    pub scene_mode_delay_secs: u64,
 
     /// 明日方舟特调（akmode）独立调频配置：来自处理器目录 akmode.yaml，与 CLG 完全解耦。
     /// 前台为白名单应用时由 AkmodeGovernor 接管，参数不再走 CLG。
     #[serde(default)]
     pub akmode: SpecialTunedConfig,
+}
+
+/// scenemode 延迟缺省值：5 分钟
+fn default_scene_mode_delay_secs() -> u64 {
+    300
 }
 
 impl Config {

@@ -36,6 +36,7 @@ use crate::chiri::config::CpuLoadGovernorConfig;
 use crate::utils::FastWriter;
 use log::{debug, info, warn};
 use std::fs;
+use std::time::{Duration, Instant};
 
 use crate::fluent_args;
 use crate::i18n::{t, t_with_args};
@@ -165,6 +166,14 @@ impl ClusterState {
             .copied()
             .fold(0.0_f32, f32::max)
     }
+
+    /// 频率（kHz）→ [0,1] 性能比例，与 cached_ratios 同口径：(f - fmin)/(fmax - fmin)。
+    /// 供“直接降频为当前实际频率”时同步 current_perf，避免状态与实际写入脱节。
+    fn ratio_of_freq(&self, freq: u32) -> f32 {
+        let fmin = *self.available_freqs.first().unwrap_or(&0) as f32;
+        let fmax = *self.available_freqs.last().unwrap_or(&0) as f32;
+        ((freq as f32) - fmin) / (fmax - fmin).max(1.0)
+    }
 }
 
 // ════════════════════════════════════════════════════════════════
@@ -182,10 +191,15 @@ pub struct CpuLoadGovernor {
     active: bool,
     /// 调试日志周期计数（每 25 tick 输出一次 clg-tick-log 摘要）
     log_counter: u32,
+    /// 触摸升频窗口截止时间：窗口内大核（3-6）性能下限锁定到 touch_boost_floor
+    touch_boost_until: Option<Instant>,
+    /// 触摸升频窗口内大核性能下限（由窗口开始时大核频率 + touch_boost_tiers 档换算）
+    touch_boost_floor: f32,
 }
 
 impl CpuLoadGovernor {
-    /// 创建空的控制器（未激活、未接管任何 policy）
+    /// 创建空的控制器（未激活、未接管任何 policy）。
+    /// 触摸升频由事件驱动：scheduler_ipc 收到触摸事件后调用 `on_touch()`。
     pub fn new() -> Self {
         Self {
             clusters: Vec::new(),
@@ -193,6 +207,8 @@ impl CpuLoadGovernor {
             cfg: CpuLoadGovernorConfig::default(),
             active: false,
             log_counter: 0,
+            touch_boost_until: None,
+            touch_boost_floor: 0.0,
         }
     }
 
@@ -382,6 +398,9 @@ impl CpuLoadGovernor {
         self.clusters.clear();
         self.active = false;
         self.log_counter = 0;
+        // 清空触摸升频状态，避免配置切换/释放后残留窗口继续抬大地核下限
+        self.touch_boost_until = None;
+        self.touch_boost_floor = 0.0;
     }
 
     /// 热切换配置：仅替换控制参数，不重建 cluster（用于同模式参数调整）。
@@ -477,12 +496,15 @@ impl CpuLoadGovernor {
         all_ok
     }
 
-    /// 核心调频入口：每次 SystemLoadUpdate 事件（常规 120ms / 特调 40ms）触发。
+    /// 决策入口：每次 SystemLoadUpdate（CLG 常规 160ms）触发，只计算目标性能比，不写 sysfs。
     /// 对每个 cluster：
     /// 1. 取本簇最大 util，做尖峰抑制；
     /// 2. 按 headroom 过渡带计算目标性能比并 clamp 到 floor..ceil；
-    /// 3. 根据与当前 perf 的高低差走升/降频分支（各自带速率限制与平滑）；
-    /// 4. 换算成最近频率档位并写入 sysfs。
+    /// 3. 根据与当前 perf 的高低差走升/降频分支：
+    ///    - 升频带速率限制 + schedutil 余量检查（实际频率未达当前锁定值时忽略一次升频，
+    ///      等硬件自然追平，实现按需升频）；高负载/大跳变全速升频
+    ///    - 降频为“直接降频”：防抖确认后一步到位写目标档，目标不高于当前实际频率
+    /// 写频由统一的 backset 入口 `flush()` 完成（触摸升频也经它立即写频）。
     pub fn on_load_update(&mut self, core_utils: &[f32]) {
         if !self.active {
             return;
@@ -523,49 +545,58 @@ impl CpuLoadGovernor {
                     continue;
                 }
 
-                let is_high_load = util >= self.cfg.up_threshold;
-                let is_significant_jump = target_perf > old_perf + self.cfg.up_jump_threshold;
-
-                if is_high_load || is_significant_jump {
-                    cluster.current_perf += (target_perf - old_perf) * self.cfg.smoothing_up;
+                // schedutil 余量检查（按需升频）：实际频率未追平当前锁定频率时，
+                // 忽略本次升频，等硬件/调度器自然追平后再升，避免提前抬过实际需求。
+                // 触摸升频不受此限制（由 on_touch + flush 独立提升）。
+                let cur_freq =
+                    Self::read_cur_freq(cluster.policy_id).unwrap_or(cluster.current_freq);
+                if cur_freq < cluster.current_freq {
+                    debug!(
+                        "{}",
+                        t_with_args(
+                            "clg-up-skipped",
+                            &fluent_args!(
+                                "pid" => cluster.policy_id.to_string(),
+                                "cur_khz" => (cur_freq / 1000).to_string(),
+                                "lock_khz" => (cluster.current_freq / 1000).to_string()
+                            )
+                        )
+                    );
                 } else {
-                    // 滞回带内升频：速率随 util 接近 up_threshold 线性提升——
-                    // 低 util 端用 slow_up_scale 防抖，高 util 端逼近全速，
-                    // 避免中等负载（如 73%）下 0.008/tick 的慢速爬升导致体验卡顿
-                    let span = (self.cfg.up_threshold - self.cfg.down_threshold).max(1e-6);
-                    let gap = ((util - self.cfg.down_threshold) / span).clamp(0.0, 1.0);
-                    let speed = self.cfg.smoothing_up
-                        * (self.cfg.slow_up_scale + (1.0 - self.cfg.slow_up_scale) * gap);
-                    cluster.current_perf += (target_perf - old_perf) * speed;
+                    let is_high_load = util >= self.cfg.up_threshold;
+                    let is_significant_jump = target_perf > old_perf + self.cfg.up_jump_threshold;
+
+                    if is_high_load || is_significant_jump {
+                        cluster.current_perf += (target_perf - old_perf) * self.cfg.smoothing_up;
+                    } else {
+                        // 滞回带内升频：速率随 util 接近 up_threshold 线性提升——
+                        // 低 util 端用 slow_up_scale 防抖，高 util 端逼近全速
+                        let span = (self.cfg.up_threshold - self.cfg.down_threshold).max(1e-6);
+                        let gap = ((util - self.cfg.down_threshold) / span).clamp(0.0, 1.0);
+                        let speed = self.cfg.smoothing_up
+                            * (self.cfg.slow_up_scale + (1.0 - self.cfg.slow_up_scale) * gap);
+                        cluster.current_perf += (target_perf - old_perf) * speed;
+                    }
                 }
             } else {
                 cluster.up_wait = 0;
                 cluster.down_wait += 1;
-                // 极低负载立即快速降频（跳过 down_wait 确认期），
-                // 消除尖峰消失后 perf 长时间悬停高位的滞后
+                // 极低负载立即降频（跳过 down_wait 确认期），否则连续满 down_rate_limit_ticks
                 if cluster.down_wait >= self.cfg.down_rate_limit_ticks
                     || util < self.cfg.down_fast_threshold
                 {
-                    // 降频门控：只要目标低于当前即可降，避免滞回带内锁死高位
-                    let active_smoothing_down = if util < self.cfg.down_fast_threshold {
-                        // 极低负载：快速回落
-                        self.cfg.smoothing_down * self.cfg.down_fast_mult
-                    } else if util < self.cfg.down_threshold {
-                        // 跌破降频阈值：正常速率降频
-                        self.cfg.smoothing_down
-                    } else {
-                        // 滞回带内（down_threshold..up_threshold）：慢速下探防抖
-                        self.cfg.smoothing_down * self.cfg.slow_down_scale
-                    };
-                    cluster.current_perf += (target_perf - old_perf) * active_smoothing_down;
+                    // 直接降频为当前目标频率（敢于降频，能效优先）：
+                    // 不做平滑渐变，一步到位写目标档；目标不高于当前实际频率，
+                    // 避免降频写序（min 先降）中间态反而瞬时抬升
+                    let mut target_freq = cluster.find_nearest_freq(target_perf);
+                    if let Some(actual) = Self::read_cur_freq(cluster.policy_id) {
+                        if actual < target_freq {
+                            target_freq = actual;
+                        }
+                    }
+                    cluster.current_perf = cluster.ratio_of_freq(target_freq);
                 }
             }
-
-            cluster.current_perf = cluster
-                .current_perf
-                .clamp(self.cfg.perf_floor, self.cfg.perf_ceil);
-            let target_freq = cluster.find_nearest_freq(cluster.current_perf);
-            cluster.write_freq(target_freq);
         }
 
         self.log_counter += 1;
@@ -588,6 +619,59 @@ impl CpuLoadGovernor {
         }
     }
 
+    /// backset 统一写频入口：把各 cluster 当前目标性能比换算成频率档位并写回 sysfs。
+    /// 由 scheduler_ipc 在每次 CLG 决策后调用，也在触摸事件到达时立即调用；
+    /// 写频经 FastWriter 按值去重，频率未变化时不产生 sysfs 写入。
+    pub fn flush(&mut self) {
+        if !self.active {
+            return;
+        }
+
+        // 触摸升频窗口过期清理
+        if let Some(until) = self.touch_boost_until {
+            if Instant::now() >= until {
+                self.touch_boost_until = None;
+                self.touch_boost_floor = 0.0;
+            }
+        }
+
+        for cluster in &mut self.clusters {
+            // 触摸升频窗口内：大核（3-6）性能下限锁定到提升档位（受开关约束，防残留）
+            if self.cfg.touch_boost_enabled
+                && self.touch_boost_until.is_some()
+                && Self::is_big_cluster(&cluster.affected_cpus)
+            {
+                cluster.current_perf = cluster.current_perf.max(self.touch_boost_floor);
+            }
+            cluster.current_perf = cluster
+                .current_perf
+                .clamp(self.cfg.perf_floor, self.cfg.perf_ceil);
+            let target_freq = cluster.find_nearest_freq(cluster.current_perf);
+            cluster.write_freq(target_freq);
+        }
+    }
+
+    /// 触摸事件驱动入口：收到触摸按下事件时把大核（3-6）频率下限抬高一档，
+    /// 并立即由 scheduler_ipc 调用 flush() 写频（不等待下一个 160ms 决策 tick）。
+    pub fn on_touch(&mut self) {
+        if !self.active || !self.cfg.touch_boost_enabled {
+            return;
+        }
+        self.touch_boost_floor = self.compute_touch_boost_floor();
+        self.touch_boost_until =
+            Some(Instant::now() + Duration::from_millis(self.cfg.touch_boost_ms));
+        debug!(
+            "{}",
+            t_with_args(
+                "clg-touch-boost",
+                &fluent_args!(
+                    "floor" => format!("{:.2}", self.touch_boost_floor),
+                    "ms" => self.cfg.touch_boost_ms.to_string()
+                )
+            )
+        );
+    }
+
     /// 读取 policy 的 affected_cpus，解析成 CPU id 列表（用于 max_util 取负载）
     fn read_affected_cpus(policy_id: i32) -> Vec<usize> {
         let path = format!(
@@ -599,5 +683,44 @@ impl CpuLoadGovernor {
             .split_whitespace()
             .filter_map(|s| s.parse::<usize>().ok())
             .collect()
+    }
+
+    /// 读 policy 的当前实际频率（scaling_cur_freq，kHz）
+    fn read_cur_freq(policy_id: i32) -> Option<u32> {
+        let path = format!(
+            "/sys/devices/system/cpu/cpufreq/policy{}/scaling_cur_freq",
+            policy_id
+        );
+        fs::read_to_string(&path)
+            .ok()
+            .and_then(|s| s.trim().parse::<u32>().ok())
+    }
+
+    /// 判定 cluster 是否覆盖 8550 大核（3-6）：触摸升频只作用于大核
+    fn is_big_cluster(affected: &[usize]) -> bool {
+        affected.iter().any(|&c| (3..=6).contains(&c))
+    }
+
+    /// 计算触摸升频的大核性能下限：取各覆盖大核的 cluster 当前频率在可用频率表中
+    /// 向上移动 touch_boost_tiers 档后的性能比，取最大值（一个窗口期内保持不变）
+    fn compute_touch_boost_floor(&self) -> f32 {
+        let mut floor = 0.0_f32;
+        for c in &self.clusters {
+            if !Self::is_big_cluster(&c.affected_cpus) {
+                continue;
+            }
+            let idx = c
+                .available_freqs
+                .iter()
+                .position(|&f| f == c.current_freq)
+                .unwrap_or(0);
+            let target_idx = (idx + self.cfg.touch_boost_tiers as usize)
+                .min(c.available_freqs.len().saturating_sub(1));
+            let r = c.cached_ratios[target_idx];
+            if r > floor {
+                floor = r;
+            }
+        }
+        floor
     }
 }

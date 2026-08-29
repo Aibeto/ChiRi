@@ -33,10 +33,12 @@ use crate::fluent_args;
 use crate::i18n::{t, t_with_args};
 
 // 启动函数
-/// `ak_active` 为特调（akmode）激活共享标志：cpu_monitor 据此在 120ms 与 40ms 采样间切换
+/// `ak_active` 为特调（akmode）激活共享标志：cpu_monitor 据此在常规与 40ms 采样间切换。
+/// `sample_ms_normal` 为常规采样间隔（由 main.rs 按 SoC 传入：ChiRi 160ms / Yumi 200ms）。
 pub fn start_monitor(
     tx: SyncSender<DaemonEvent>,
     ak_active: Arc<AtomicBool>,
+    sample_ms_normal: u64,
 ) -> Result<(), Box<dyn Error>> {
     log::debug!("{}", t("monitor-starting"));
 
@@ -175,8 +177,13 @@ pub fn start_monitor(
         .spawn(move || {
             if let Ok(rt) = tokio::runtime::Runtime::new() {
                 rt.block_on(async {
-                    if let Err(e) =
-                        cpu_monitor::start_cpu_loop(tx_cpu, rx_pid_cpu, ak_active_cpu).await
+                    if let Err(e) = cpu_monitor::start_cpu_loop(
+                        tx_cpu,
+                        rx_pid_cpu,
+                        ak_active_cpu,
+                        sample_ms_normal,
+                    )
+                    .await
                     {
                         error!(
                             "{}",

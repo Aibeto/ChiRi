@@ -15,21 +15,21 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-use anyhow::{anyhow, Result};
+use crate::common;
+use crate::fluent_args;
+use crate::i18n::t_with_args;
+use anyhow::{Result, anyhow};
 use log::{LevelFilter, Record};
+use log4rs::Handle;
 use log4rs::append::Append;
 use log4rs::config::{Appender, Config, Root};
-use log4rs::encode::pattern::PatternEncoder;
 use log4rs::encode::Encode;
-use log4rs::Handle;
+use log4rs::encode::pattern::PatternEncoder;
 use once_cell::sync::OnceCell;
 use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use crate::common;
-use crate::i18n::t_with_args;
-use crate::fluent_args;
 
 /// 适配 `log4rs::encode::Write` 的内存写入器：`PatternEncoder` 编码时写入
 /// 该缓冲，`append` 再把字节落盘（`set_style` 走默认空实现，无需着色）。
@@ -64,7 +64,7 @@ fn parse_level(level_str: &str) -> LevelFilter {
 /// 本模块 `daemon.log` 的相对路径（`logs/daemon.log`）
 const LOG_REL_PATH: &str = "logs/daemon.log";
 /// 单文件大小上限：达到后把 `daemon.log` 循环后移成 `daemon.{1,2,...}.log`
-const LOG_MAX_BYTES: u64 = 5 * 1024 * 1024;
+const LOG_MAX_BYTES: u64 = 50 * 1024 * 1024;
 /// 保留的备份数量（`daemon.1.log` ~ `daemon.N.log`，N = LOG_KEEP_BACKUPS）
 const LOG_KEEP_BACKUPS: u32 = 3;
 
@@ -144,7 +144,11 @@ impl Append for SelfHealingAppender {
         }
 
         // 按路径追加：文件被删会自动重建，写失败仅吞掉不影响进程
-        if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(&self.path) {
+        if let Ok(mut f) = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)
+        {
             let _ = f.write_all(&line.0);
             let _ = f.flush();
         }
@@ -162,7 +166,9 @@ fn build_config(level: LevelFilter) -> Result<Config> {
         path: log_path.clone(),
         max_bytes: LOG_MAX_BYTES,
         keep: LOG_KEEP_BACKUPS,
-        encoder: Box::new(PatternEncoder::new("[{d(%Y-%m-%d %H:%M:%S)}] [{l}] [{M}] {m}{n}")),
+        encoder: Box::new(PatternEncoder::new(
+            "[{d(%Y-%m-%d %H:%M:%S)}] [{l}] [{M}] {m}{n}",
+        )),
         lock: Mutex::new(()),
     };
 
@@ -178,7 +184,8 @@ pub fn init(level_str: &str) -> Result<()> {
     let level = parse_level(level_str);
     let config = build_config(level)?;
     let handle = log4rs::init_config(config)?;
-    LOG_HANDLE.set(Mutex::new(handle))
+    LOG_HANDLE
+        .set(Mutex::new(handle))
         .map_err(|_| anyhow!("Logger already initialized"))?;
     Ok(())
 }
@@ -191,7 +198,13 @@ pub fn update_level(level_str: &str) {
             match build_config(level) {
                 Ok(cfg) => {
                     handle.set_config(cfg);
-                    log::debug!("{}", t_with_args("log-level-updated", &fluent_args!("level" => level.to_string())));
+                    log::debug!(
+                        "{}",
+                        t_with_args(
+                            "log-level-updated",
+                            &fluent_args!("level" => level.to_string())
+                        )
+                    );
                 }
                 Err(e) => eprintln!("Failed to rebuild logger config: {}", e),
             }

@@ -39,13 +39,14 @@ use std::time::{Duration, Instant};
 use std::fs;
 use anyhow::Result;
 
-// CLG 看门狗：SystemLoadUpdate 常规 120ms / 特调 40ms 投喂一次，若超过 CLG_STALE_MAX 时长
+// CLG 看门狗：SystemLoadUpdate 常规 160ms / 特调 40ms 投喂一次，若超过 CLG_STALE_MAX 时长
 // 未收到任何事件，视为负载源失效（eBPF 加载失败/探针崩溃/通道断开），主动 release()
 // 回滚到系统原生调频，避免 CPU 永久锁频在最后写入值上（8550 balance 等 perf_init=1.0
 // 的配置下会锁满全核高频）。
 const CLG_STALE_MAX: Duration = Duration::from_secs(5);
-/// 看门狗巡检间隔：事件循环无事件时的轮询周期
-const CLG_STALE_POLL: Duration = Duration::from_secs(1);
+/// 事件轮询间隔：主事件通道无事件时的轮询周期。
+/// 兼顾触摸事件驱动即时性（≤100ms 处理触摸事件）与看门狗巡检（仍按 CLG_STALE_MAX 阈值）。
+const EVENT_POLL_MS: Duration = Duration::from_millis(100);
 
 pub mod config;
 pub mod scheduler;
@@ -54,6 +55,7 @@ pub mod scheduler;
 // pub mod fas;
 pub mod cpu_load_governor;
 pub mod akmode;
+pub mod touch_detect;
 
 use crate::i18n::{t, load_language, t_with_args};
 use crate::fluent_args; 
@@ -175,6 +177,29 @@ pub fn start_scheduler_thread(
     let shared_mode_name = Arc::new(Mutex::new(initial_mode));
     // sysfs 路径存在性缓存，避免每次 IO 调整前重复探测
     let sys_path_exist = Arc::new(utils::SysPathExist::new());
+    // 触摸事件通道（事件驱动）：触摸检测线程发送触摸事件，scheduler_ipc 即时处理并触发大核升频
+    let (touch_tx, touch_rx) = mpsc::sync_channel::<()>(8);
+
+    // 启动时立即应用一次性系统调整（cpuidle / IO / 屏蔽系统自带触摸升频），
+    // 避免首次配置变更前这些调整处于未生效状态（config_watcher 仅在配置变化后重放）
+    if let Err(e) = CpuScheduler::new(shared_config.clone(), sys_path_exist.clone())
+        .apply_system_tweaks()
+    {
+        log::error!(
+            "{}",
+            t_with_args(
+                "config-apply-tweaks-failed",
+                &fluent_args!("error" => e.to_string())
+            )
+        );
+    }
+
+    // 触摸检测线程（Chiri 专属）：读取 /dev/input 触摸事件，经事件通道驱动大核触摸升频
+    thread::Builder::new()
+        .name("touch_detect".to_string())
+        .spawn(move || {
+            crate::chiri::touch_detect::monitor_touch(touch_tx);
+        })?;
 
     // ==========================================
     // Config Watcher 线程
@@ -250,6 +275,10 @@ pub fn start_scheduler_thread(
             // const FAS_SUSPEND_GRACE_SECS: u64 = 5;               // FAS 暂禁用
             
             let mut is_screen_on = true; // 屏幕状态标记
+            // 息屏计时：屏幕熄灭时记录，超过 scene_mode_delay_secs 后切换 scenemode 极致省电
+            let mut screen_off_at: Option<Instant> = None;
+            // 是否已进入 scenemode（一次性切换，亮屏/模式变更时复位）
+            let mut scene_mode_active = false;
 
             // ==== FAS 暂禁用：CPU 温度采样仅用于 FAS 限温，暂注释 ====
             // let temp_sensor_path = crate::utils::find_cpu_temp_path().unwrap_or_default();
@@ -298,7 +327,18 @@ pub fn start_scheduler_thread(
             let mut last_load_event = Instant::now();
             let loop_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             loop {
-                let msg = match rx.recv_timeout(CLG_STALE_POLL) {
+                // 触摸事件（事件驱动）：每次醒来先处理触摸队列，立即触发大核升频并写频，
+                // 不等待下一个 160ms 负载决策 tick。窗口内的持续触摸会刷新截止时间，
+                // 触摸升频由 on_touch 设置地板 + flush 写频（FastWriter 去重）。
+                while touch_rx.try_recv().is_ok() {
+                    if cpu_governor.is_active() {
+                        cpu_governor.on_touch();
+                        cpu_governor.flush();
+                        log::debug!("{}", t("touch-event-received"));
+                    }
+                }
+
+                let msg = match rx.recv_timeout(EVENT_POLL_MS) {
                     Ok(msg) => msg,
                     Err(mpsc::RecvTimeoutError::Timeout) => {
                         // eBPF 负载源失效自愈：超过 CLG_STALE_MAX 无负载事件 → 释放当前接管的
@@ -342,7 +382,10 @@ pub fn start_scheduler_thread(
 
                         if !is_screen_on {
                             log::info!("{}", t("scheduler-doze-enable"));
-                            
+                            // 息屏计时起点：超过 scene_mode_delay_secs 后切换 scenemode 极致省电
+                            screen_off_at = Some(Instant::now());
+                            scene_mode_active = false;
+
                             // ==== FAS 暂禁用：息屏不再剥夺 FAS 频率控制权 ====
                             // if current_mode == "fas" {
                             //     fas_controller.reset_all_freqs();
@@ -369,13 +412,15 @@ pub fn start_scheduler_thread(
                                 doze_cfg.perf_floor = 0.0;
                                 doze_cfg.perf_ceil = doze_cfg.perf_ceil.min(0.40); // 锁死天花板最高只给 40% 性能
                                 doze_cfg.smoothing_up = 0.10;           // 升频极其迟钝
-                                doze_cfg.smoothing_down = 1.0;          // 瞬间降频
+                                doze_cfg.touch_boost_enabled = false;   // 息屏无触摸，关闭触摸升频
                                 
                                 cpu_governor.init_policies(&doze_cfg);
                             }
                         } else {
                             log::info!("{}", t("scheduler-doze-restore"));
-                            
+                            // 亮屏：清空息屏计时与 scenemode 状态（恢复逻辑在下方重放原模式）
+                            screen_off_at = None;
+                            scene_mode_active = false;
                             let config_lock = config_clone.read().unwrap();
                             
                             if crate::common::is_special_mode(&current_mode) {
@@ -521,7 +566,43 @@ pub fn start_scheduler_thread(
                         if ak_governor.is_active() {
                             ak_governor.on_load_update(&core_utils);
                         } else if cpu_governor.is_active() {
+                            // 决策 + backset 统一写频：CLG 决策后由 flush() 去重写回 sysfs
                             cpu_governor.on_load_update(&core_utils);
+                            cpu_governor.flush();
+                        }
+
+                        // scenemode：息屏超过 scene_mode_delay_secs 后把 CLG 切换到极致省电配置
+                        // （一次性）。特调模式由 akmode 独立接管不参与；亮屏后恢复原模式
+                        // （见 ScreenStateChange 亮屏分支）。scenemode 未启用时释放 CLG 回系统默认。
+                        if !is_screen_on && !scene_mode_active {
+                            // 先用免锁的计时预判（最低 60s），避免息屏期间每个负载 tick 都抢锁
+                            let delay_hit = screen_off_at
+                                .map_or(false, |off| off.elapsed().as_secs() >= 60);
+                            if delay_hit {
+                                let current_mode = mode_clone.lock().unwrap().clone();
+                                if !crate::common::is_special_mode(&current_mode) {
+                                    let config_read = config_clone.read().unwrap();
+                                    let delay = config_read.scene_mode_delay_secs.max(60);
+                                    let scene_cfg =
+                                        config_read.scenemode.cpu_load_governor.clone();
+                                    drop(config_read);
+                                    if screen_off_at
+                                        .map_or(false, |off| off.elapsed().as_secs() >= delay)
+                                    {
+                                        if scene_cfg.enabled {
+                                            if cpu_governor.is_active() {
+                                                cpu_governor.reload_config(&scene_cfg);
+                                            } else {
+                                                cpu_governor.init_policies(&scene_cfg);
+                                            }
+                                        } else {
+                                            cpu_governor.release();
+                                        }
+                                        log::info!("{}", t("scheduler-scene-mode-enter"));
+                                        scene_mode_active = true;
+                                    }
+                                }
+                            }
                         }
                     },
 

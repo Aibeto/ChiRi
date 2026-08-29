@@ -29,11 +29,19 @@ use tokio::sync::watch;
 use crate::fluent_args;
 use crate::i18n::{t, t_with_args};
 
-/// 常规采样周期（ms）：特调（akmode）未激活时 SystemLoadUpdate 的投喂间隔
-const SAMPLE_MS_NORMAL: u64 = 120;
+/// 常规采样周期由调用方（main.rs 按 SoC）传入：ChiRi 160ms（事件驱动重构优化值，
+/// 降低 eBPF map 读取与事件发送开销 -25%），非 Chiri（Yumi）200ms（恢复原有值）。
+/// 见 `start_cpu_loop` 的 `sample_ms_normal` 参数。
 /// 特调采样周期（ms）：明日方舟特调激活时缩短到 40ms，保证特调档位判定的响应度
 const SAMPLE_MS_TUNED: u64 = 40;
+/// 前台应用 CPU 利用率计算开关：仅 FAS（帧感知调度）消费 foreground_max_util，
+/// FAS 暂禁用期间两套调度器均忽略该字段，跳过计算省掉每 tick 的 TGID/线程级开销。
+/// 恢复 FAS 时置 true 即可（compute_tgid_util / compute_thread_level_util 仍保留）。
+const FAS_FG_UTIL_ENABLED: bool = false;
 
+/// 读取前台进程的所有线程 TID（仅供 foreground 利用率降级路径使用）。
+/// FAS 暂禁用：foreground 计算被 FAS_FG_UTIL_ENABLED 跳过，恢复 FAS 时启用。
+#[allow(dead_code)]
 fn get_thread_tids(pid: u32) -> Vec<u32> {
     let task_dir = format!("/proc/{}/task", pid);
     let mut tids = Vec::new();
@@ -53,6 +61,7 @@ pub async fn start_cpu_loop(
     tx: SyncSender<DaemonEvent>,
     rx_pid: watch::Receiver<u32>,
     ak_active: Arc<AtomicBool>,
+    sample_ms_normal: u64,
 ) -> Result<(), anyhow::Error> {
     // 与 fps_monitor 保持一致：debug 构建嵌 debug 产物，release 构建嵌 release 产物
     #[cfg(debug_assertions)]
@@ -146,11 +155,11 @@ pub async fn start_cpu_loop(
         let mut log_counter: u32 = 0;
 
         let mut interval =
-            tokio::time::interval(std::time::Duration::from_millis(SAMPLE_MS_NORMAL));
+            tokio::time::interval(std::time::Duration::from_millis(sample_ms_normal));
 
         loop {
             interval.tick().await;
-            // 消费 pid_watcher 广播的前台 PID（500ms 源 + 120ms/特调40ms 采样，足够及时）
+            // 消费 pid_watcher 广播的前台 PID（500ms 源 + 常规/特调40ms 采样，足够及时）
             if rx_pid.has_changed().unwrap_or(false) {
                 fg_pid = *rx_pid.borrow_and_update();
             }
@@ -236,7 +245,8 @@ pub async fn start_cpu_loop(
             // 2. 前台应用利用率计算
             //    主路径: 使用 tgid_run_time map (TGID 级聚合)
             //    只需查询 1 个 key，不受 thread_run_time HASH 驱逐影响
-            let foreground_max_util = {
+            // FAS 暂禁用：foreground_max_util 无消费方，跳过计算（见 FAS_FG_UTIL_ENABLED）
+            let foreground_max_util = if FAS_FG_UTIL_ENABLED {
                 if fg_pid == 0 {
                     0.0_f32
                 } else {
@@ -296,6 +306,8 @@ pub async fn start_cpu_loop(
                         )
                     }
                 }
+            } else {
+                0.0_f32
             };
 
             log_counter += 1;
@@ -332,12 +344,13 @@ pub async fn start_cpu_loop(
                 break;
             }
 
-            // 按特调状态动态切换采样周期：akmode 激活时 40ms 快速跟随负载，其余 120ms。
+            // 按特调状态动态切换采样周期：akmode 激活时 40ms 快速跟随负载，
+            // 其余用传入的常规间隔（ChiRi 160ms / Yumi 200ms）。
             // interval 周期固定，切换时按新周期重建（相位以本轮处理完成为基准，采样点间隔精确）。
             let target = if ak_active.load(Ordering::Relaxed) {
                 std::time::Duration::from_millis(SAMPLE_MS_TUNED)
             } else {
-                std::time::Duration::from_millis(SAMPLE_MS_NORMAL)
+                std::time::Duration::from_millis(sample_ms_normal)
             };
             if interval.period() != target {
                 interval = tokio::time::interval_at(tokio::time::Instant::now() + target, target);
@@ -359,6 +372,8 @@ pub async fn start_cpu_loop(
 /// 关键设计: 基线只保存 raw 值（不含 pending delta），避免 pending 累积漂移
 ///
 /// 返回 Some(util) 表示成功，None 表示需要走降级路径
+/// FAS 暂禁用：foreground 计算被 FAS_FG_UTIL_ENABLED 跳过，恢复 FAS 时启用。
+#[allow(dead_code)]
 fn compute_tgid_util(
     fg_pid: u32,
     tgid_run_map: &BpfHashMap<&mut aya::maps::MapData, u32, u64>,
@@ -433,6 +448,8 @@ fn compute_tgid_util(
 
 /// 降级路径: 逐 TID 遍历计算前台最重线程的利用率 (原始逻辑)
 /// 增加防驱逐保护：如果 map 返回值 < 上次记录值，跳过该 TID
+/// FAS 暂禁用：foreground 计算被 FAS_FG_UTIL_ENABLED 跳过，恢复 FAS 时启用。
+#[allow(dead_code)]
 fn compute_thread_level_util(
     fg_pid: u32,
     thread_run_map: &BpfHashMap<&mut aya::maps::MapData, u32, u64>,

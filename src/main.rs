@@ -153,10 +153,13 @@ fn main() -> Result<()> {
     info!("{}", t("scheduler-module-started"));
 
     // 7. 启动 Monitor
+    // 常规采样间隔按 SoC 参数化（满足"只动 ChiRi"）：Chiri 目标 SoC 用 160ms（事件驱动
+    // 重构后的优化值），其余（Yumi）恢复原有 200ms（akmode 动态采样改造前硬编码值）。
+    let sample_ms_normal: u64 = if chiri_active { 160 } else { 200 };
     let monitor_thread = thread::Builder::new()
         .name("monitor_core".to_string())
         .spawn(move || {
-            if let Err(e) = monitor::start_monitor(tx, ak_active) {
+            if let Err(e) = monitor::start_monitor(tx, ak_active, sample_ms_normal) {
                 error!(
                     "{}",
                     t_with_args(

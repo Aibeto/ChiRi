@@ -527,13 +527,30 @@ impl AkmodeGovernor {
         }
     }
 
-    /// 降 max：各 policy 在频率表中直接降一档（下限硬件最低）。
+    /// 降 max：各 policy 直接降频为当前实际频率（schedutil 已自然回落的位置），
+    /// 不做盲目逐档下探——max 一步收到实际频率对应档位，能效优先（实际频率已低于
+    /// 当前 max 说明 schedutil 余量充足，收窄上限即可省电，不越降越多）。
+    /// 实际频率不可读时回退为只降一档，避免降幅失控。
     fn lower_max(&mut self) {
         for c in &mut self.clusters {
             if c.cur_max_idx == 0 {
                 continue; // 已到硬件最低
             }
-            c.cur_max_idx -= 1;
+            let new_idx = match Self::read_cur_freq(c.policy_id) {
+                Some(f) => {
+                    // 找 <= 实际频率的最高可用档位，且不得高于当前 max（降频绝不升）
+                    let idx = c
+                        .available_freqs
+                        .partition_point(|&x| x <= f)
+                        .saturating_sub(1);
+                    idx.min(c.cur_max_idx)
+                }
+                None => c.cur_max_idx.saturating_sub(1),
+            };
+            if new_idx >= c.cur_max_idx {
+                continue; // 实际频率仍在当前 max 附近（schedutil 已跑满），无需降
+            }
+            c.cur_max_idx = new_idx;
             let max = c.available_freqs[c.cur_max_idx];
             c.current_max = max;
             if c.max_writer.write_value_force(max) {

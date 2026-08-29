@@ -94,6 +94,7 @@ scheduler-event-load = [Scheduler] 收到负载事件: 核心利用率=[{ $cores
 scheduler-event-frame = [Scheduler] 收到帧事件: 帧间隔={ $delta_ms }ms
 scheduler-event-config-reload = [Scheduler] 收到配置重载事件: 当前模式={ $mode }, 亮屏={ $screen_on }
 scheduler-special-mode-active = [Scheduler] 特调模式激活: { $pkg } -> { $mode }
+scheduler-scene-mode-enter = [Scheduler] 息屏已超过阈值，切换到 scenemode 极致省电模式
 
 # --- Scheduler: Config Watcher ---
 config-reloading = [Config] 检测到配置文件变更，正在重载...
@@ -124,6 +125,8 @@ clg-writer-invalid = [CLG] P{ $pid } sysfs 写入器无效 (max_valid: { $max_va
 clg-freq-set = [CLG] P{ $pid } 频率调整: { $old_khz }MHz -> { $new_khz }MHz
 clg-freq-write-failed-cached = [CLG] P{ $pid } 频率写入失败，保持缓存值 { $cached_khz }MHz (目标 { $target_khz }MHz)
 clg-watchdog-release = [CLG] 看门狗: 已 { $secs } 秒未收到负载事件，eBPF 负载源疑似失效，已释放 CPU 控制权恢复系统默认调频
+clg-up-skipped = [CLG] P{ $pid } 实际频率={ $cur_khz }MHz 未达当前锁定 { $lock_khz }MHz，忽略本次升频（schedutil 余量，按需升频）
+clg-touch-boost = [CLG] 触摸升频窗口开启：大核性能下限={ $floor } 保持 { $ms }ms
 
 # --- AKMode（明日方舟特调） ---
 akmode-init = [AKMode] 明日方舟特调接管 | 档位={ $mode }
@@ -136,6 +139,15 @@ akmode-tick-log = [AKMode] 档位={ $mode } 升频={ $up } 降频={ $down } 忙/
 akmode-max-set = [AKMode] P{ $pid } ({ $name }) 档位={ $mode } max={ $max_khz }MHz
 akmode-max-skipped = [AKMode] P{ $pid } ({ $name }) 档位={ $mode } 实际频率={ $cur_khz }MHz 未达设定 max={ $max_khz }MHz，跳过升频（schedutil 余量）
 akmode-watchdog-release = [AKMode] 看门狗: 已 { $secs } 秒未收到负载事件，eBPF 负载源疑似失效，已释放明日方舟特调控制权并恢复原 governor/min/max
+
+# --- Touch（触摸升频） ---
+touch-detect-started = [Touch] 触摸检测线程已启动（读取 /dev/input 输入设备）
+touch-detect-no-devices = [Touch] 未找到可读的输入设备，3 秒后重试
+touch-detect-poll-error = [Touch] poll 输入设备失败，重新枚举设备
+touch-detect-down = [Touch] 检测到触摸按下 (type={ $type } code={ $code })
+touch-event-received = [Touch] 收到触摸事件，触发大核升频并立即写频
+touch-boost-disable-node = [TouchBoost] 已写 { $path } = 0（屏蔽系统触摸升频）
+touch-boost-disable-applied = [TouchBoost] 已屏蔽 Android 自带触摸升频（cpu_boost），改由 ChiRi 触摸升频接管
 
 # --- FAS ---
 fas-freq-mismatch = [FAS] P{ $pid }: 频率不匹配！预期 { $min }-{ $max }，实际 { $actual } -> 正在紧急重写
