@@ -28,15 +28,15 @@ akmode:
       down_util_percent: 60
 
   balance:
-    wait_ms: 180
+    wait_ms: 80
     little:
       up_core_count: 2
       up_util_percent: 80
-      down_core_count: 1
+      down_core_count: 2
       down_util_percent: 60
     big:
       up_core_count: 3
-      up_util_percent: 80
+      up_util_percent: 60
       down_core_count: 2
       down_util_percent: 60
     prime:
@@ -46,16 +46,16 @@ akmode:
       down_util_percent: 60
 
   performance:
-    wait_ms: 120
+    wait_ms: 60
     little:
-      up_core_count: 1
+      up_core_count: 2
       up_util_percent: 60
       down_core_count: 2
       down_util_percent: 60
     big:
       up_core_count: 3
       up_util_percent: 60
-      down_core_count: 3
+      down_core_count: 2
       down_util_percent: 60
     prime:
       up_core_count: 1
@@ -64,16 +64,16 @@ akmode:
       down_util_percent: 60
 
   fast:
-    wait_ms: 80
+    wait_ms: 40
     little:
       up_core_count: 1
       up_util_percent: 60
-      down_core_count: 2
+      down_core_count: 3
       down_util_percent: 30
     big:
       up_core_count: 3
       up_util_percent: 60
-      down_core_count: 3
+      down_core_count: 2
       down_util_percent: 30
     prime:
       up_core_count: 1

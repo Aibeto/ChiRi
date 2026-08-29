@@ -135,6 +135,7 @@ akmode-deactivated = [AKMode] Arknights special tuning deactivated
 akmode-config-reloaded = [AKMode] special config hot-reloaded | tier={ $mode }
 akmode-tick-log = [AKMode] tier={ $mode } up={ $up } down={ $down } busy/idle: L={ $l_over }/{ $l_under } B={ $b_over }/{ $b_under } P={ $p_over }/{ $p_under }
 akmode-max-set = [AKMode] P{ $pid } ({ $name }) tier={ $mode } max={ $max_khz }MHz
+akmode-max-skipped = [AKMode] P{ $pid } ({ $name }) tier={ $mode } actual={ $cur_khz }MHz below set max={ $max_khz }MHz, skipping max raise (schedutil headroom)
 akmode-watchdog-release = [AKMode] WATCHDOG: no load events for { $secs }s, eBPF source failed. Releasing Arknights special tuning and restoring original governor/min/max.
 
 # --- FAS ---

@@ -489,7 +489,22 @@ impl AkmodeGovernor {
             }
             let cur_freq = Self::read_cur_freq(c.policy_id).unwrap_or(c.current_max);
             if cur_freq < c.current_max {
-                continue; // schedutil 未跑满当前 max，先让 schedutil 自然升
+                // schedutil 未跑满当前 max，先让 schedutil 自然升，不手动抬 max
+                debug!(
+                    "{}",
+                    t_with_args(
+                        "akmode-max-skipped",
+                        &fluent_args!(
+                            "pid" => c.policy_id.to_string(),
+                            "name" => c.core_name.clone(),
+                            "mode" => crate::chiri::config::tier_to_mode(self.current_tier)
+                                .to_string(),
+                            "cur_khz" => (cur_freq / 1000).to_string(),
+                            "max_khz" => (c.current_max / 1000).to_string()
+                        )
+                    )
+                );
+                continue;
             }
             c.cur_max_idx += 1;
             let max = c.available_freqs[c.cur_max_idx];

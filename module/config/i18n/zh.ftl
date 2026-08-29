@@ -134,6 +134,7 @@ akmode-deactivated = [AKMode] 明日方舟特调已停用
 akmode-config-reloaded = [AKMode] 特调配置已热重载 | 档位={ $mode }
 akmode-tick-log = [AKMode] 档位={ $mode } 升频={ $up } 降频={ $down } 忙/闲: 小核={ $l_over }/{ $l_under } 大核={ $b_over }/{ $b_under } 超大核={ $p_over }/{ $p_under }
 akmode-max-set = [AKMode] P{ $pid } ({ $name }) 档位={ $mode } max={ $max_khz }MHz
+akmode-max-skipped = [AKMode] P{ $pid } ({ $name }) 档位={ $mode } 实际频率={ $cur_khz }MHz 未达设定 max={ $max_khz }MHz，跳过升频（schedutil 余量）
 akmode-watchdog-release = [AKMode] 看门狗: 已 { $secs } 秒未收到负载事件，eBPF 负载源疑似失效，已释放明日方舟特调控制权并恢复原 governor/min/max
 
 # --- FAS ---
