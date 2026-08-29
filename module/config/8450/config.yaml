@@ -1,0 +1,153 @@
+# ============================================================
+# SM8450（骁龙 8 Gen 1）处理器独立配置
+# 命中 CHIRI_SOC_HINTS（"8450"）时优先加载本处理器目录下的 config.yaml，
+# 缺省字段回退到代码默认值。仅影响 8450 设备，不波及其它机型。
+# 处理器专属特调见本目录下 akmode.yaml（与处理器绑定、随本目录发布；8450 与 8998 参数相同、各自一份）。
+# 调整参数后可热重载（config_watcher 监听 config 目录）。
+# 核心分布：1×X2 超大核 + 3×A710 大核 + 4×A510 小核，CPU ID 0-3 小核 / 4-6 大核 / 7 超大核。
+# ============================================================
+
+# 元数据信息
+meta:
+  name: "config_8450"
+  author: "ChiRi"
+  language: "zh"
+  loglevel: "INFO"
+
+# 主要功能开关
+function:
+  CpuIdleScalingGovernor: false
+  IOOptimization: true
+
+# IO 设置
+IO_Settings:
+  Scheduler: ""
+  read_ahead_kb: "512"
+  nomerges: "1"
+  iostats: "0"
+
+# CPU 空闲设置
+CpuIdle:
+  current_governor: ""
+
+# 息屏进入 scenemode 的延迟（秒）：屏幕熄灭超过该时长后切换到 scenemode 极致省电配置，
+# 亮屏即恢复原模式。默认 300（5 分钟）。
+scene_mode_delay_secs: 300
+
+# --- 性能模式 ---
+# 各模式均采用统一的 CLG 机制：升频带 schedutil 余量检查（按需升频，实际频率未追平
+# 当前锁定值时忽略一次升频等硬件自然爬升），降频为"直接降频"一步到位（敢于降频）。
+# 触摸升频：触摸时把大核（4-6）频率提前抬高一档，窗口内锁定，窗口结束回落。
+
+# 省电模式（相对 balance 更保守：更高的升频门槛、更低的性能上限）
+powersave:
+  cpu_load_governor:
+    up_threshold: 0.90
+    down_threshold: 0.50
+    smoothing_up: 0.50
+    down_rate_limit_ticks: 2
+    up_rate_limit_ticks: 2
+    headroom_factor: 1.05
+    headroom_ramp: 0.12
+    perf_floor: 0.05
+    perf_ceil: 0.60
+    perf_init: 0.25
+    up_jump_threshold: 0.35
+    slow_up_scale: 0.02
+    down_fast_threshold: 0.10
+    spike_jump_threshold: 0.35
+    spike_decay: 0.30
+    touch_boost_enabled: true
+    touch_boost_ms: 350
+    touch_boost_tiers: 1
+
+# 均衡模式（基准：快速按需升频 + 直接降频，日常使用默认档）
+balance:
+  cpu_load_governor:
+    up_threshold: 0.78
+    down_threshold: 0.45
+    smoothing_up: 0.75
+    down_rate_limit_ticks: 2
+    up_rate_limit_ticks: 1
+    headroom_factor: 1.20
+    headroom_ramp: 0.12
+    perf_floor: 0.10
+    perf_ceil: 1.0
+    perf_init: 0.40
+    up_jump_threshold: 0.30
+    slow_up_scale: 0.03
+    down_fast_threshold: 0.08
+    spike_jump_threshold: 0.40
+    spike_decay: 0.25
+    touch_boost_enabled: true
+    touch_boost_ms: 400
+    touch_boost_tiers: 1
+
+# 性能模式（相对 balance 更激进：更低的升频门槛、更高的地板、更晚降频）
+performance:
+  cpu_load_governor:
+    up_threshold: 0.60
+    down_threshold: 0.40
+    smoothing_up: 0.95
+    down_rate_limit_ticks: 4
+    up_rate_limit_ticks: 1
+    headroom_factor: 1.40
+    headroom_ramp: 0.12
+    perf_floor: 0.40
+    perf_ceil: 1.0
+    perf_init: 0.60
+    up_jump_threshold: 0.25
+    slow_up_scale: 0.05
+    down_fast_threshold: 0.08
+    spike_jump_threshold: 0.40
+    spike_decay: 0.20
+    touch_boost_enabled: true
+    touch_boost_ms: 500
+    touch_boost_tiers: 1
+
+# 极速模式：所有频率锁定为硬件最高（perf_floor/ceil/init 均 1.0），触摸升频无意义
+fast:
+  cpu_load_governor:
+    up_threshold: 0.01
+    down_threshold: 0.01
+    smoothing_up: 1.0
+    down_rate_limit_ticks: 10
+    up_rate_limit_ticks: 1
+    headroom_factor: 1.0
+    headroom_ramp: 0.15
+    perf_floor: 1.0
+    perf_ceil: 1.0
+    perf_init: 1.0
+    up_jump_threshold: 0.35
+    slow_up_scale: 0.02
+    down_fast_threshold: 0.0
+    spike_jump_threshold: 0.35
+    spike_decay: 0.30
+    touch_boost_enabled: false
+    touch_boost_ms: 0
+    touch_boost_tiers: 1
+
+# 息屏场景模式（scenemode）：息屏超过 scene_mode_delay_secs 后切换，不择手段压功耗提续航：
+# up_threshold=1.0 永不主动升频，perf_ceil 极低封顶，直接降频立即回落。
+# 需要关闭时把 enabled 改为 false（届时息屏超时后释放 CLG 回系统默认调频）。
+scenemode:
+  cpu_load_governor:
+    enabled: true
+    up_threshold: 1.0
+    down_threshold: 0.01
+    smoothing_up: 0.01
+    down_rate_limit_ticks: 1
+    up_rate_limit_ticks: 10
+    headroom_factor: 1.0
+    headroom_ramp: 0.15
+    perf_floor: 0.0
+    perf_ceil: 0.15
+    perf_init: 0.15
+    up_jump_threshold: 0.50
+    slow_up_scale: 0.02
+    down_fast_threshold: 0.30
+    spike_jump_threshold: 0.30
+    spike_decay: 0.10
+    touch_boost_enabled: false
+    touch_boost_ms: 0
+    touch_boost_tiers: 1

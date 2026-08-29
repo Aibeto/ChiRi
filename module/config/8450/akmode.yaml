@@ -1,4 +1,5 @@
-# 明日方舟特调（akmode）配置：档位由 rules.yaml 生效模式决定，特调期间固定不切换，
+# 明日方舟特调（akmode）配置 —— SM8450（骁龙 8 Gen 1），随本处理器目录发布
+# 档位由 rules.yaml 生效模式决定，特调期间固定不切换，
 # 档位差异仅在升降频策略参数（所有档位都能使用硬件最高档位）。
 # 机制：激活时写 schedutil、min 压到硬件最低、max 为硬件最高；用本档策略参数按负载
 # 升降 max（内核频率表逐档移动，可升到硬件最高、降到硬件最低）：
@@ -8,6 +9,8 @@
 # 写大值如 64 = 关闭该方向判定。
 # 升频前会检查实际频率是否已达当前设定的 max（schedutil 余量），达到才升一档。
 # wait_ms 为升降频防抖；after_change_duration_ms 内升降频后 wait_ms 减半。
+# 核心组区间由代码按命中 SoC 区分（common::chiri_core_ranges）：little 0-3 / big 4-6 / prime 7。
+# 参数与 8550 基线一致（8450/8998 共用同一套参数），改参数时如无 SoC 差异请同步另两份。
 akmode:
   after_change_duration_ms: 799
 

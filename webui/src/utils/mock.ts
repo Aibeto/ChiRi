@@ -27,23 +27,12 @@ const mockRules = {
   // }
 };
 
-const mockConfig = {
-  meta: { name: "default_config", author: "yuki", language: "en", loglevel: "INFO" },
-  function: { CpuIdleScalingGovernor: false, IOOptimization: true },
-  IO_Settings: { Scheduler: "none", read_ahead_kb: "128", nomerges: "2", iostats: "0" },
-  CpuIdle: { current_governor: "" },
-  powersave: {
-    cpu_load_governor: { up_threshold: 0.85, down_threshold: 0.60, smoothing_up: 0.40, smoothing_down: 0.50, down_rate_limit_ticks: 2, headroom_factor: 1.10, headroom_ramp: 0.15, perf_floor: 0.10, perf_ceil: 0.70, perf_init: 0.30, up_jump_threshold: 0.35, slow_up_scale: 0.02, slow_down_scale: 0.5, down_fast_threshold: 0.10, down_fast_mult: 2.5, spike_jump_threshold: 0.35, spike_decay: 0.30 }
-  },
-  balance: {
-    cpu_load_governor: { up_threshold: 0.80, down_threshold: 0.50, smoothing_up: 0.60, smoothing_down: 0.30, down_rate_limit_ticks: 3, headroom_factor: 1.25, headroom_ramp: 0.15, perf_floor: 0.15, perf_ceil: 1.0, perf_init: 0.50, up_jump_threshold: 0.35, slow_up_scale: 0.02, slow_down_scale: 0.5, down_fast_threshold: 0.10, down_fast_mult: 2.5, spike_jump_threshold: 0.35, spike_decay: 0.30 }
-  },
-  performance: {
-    cpu_load_governor: { up_threshold: 0.65, down_threshold: 0.40, smoothing_up: 0.80, smoothing_down: 0.20, down_rate_limit_ticks: 5, headroom_factor: 1.40, headroom_ramp: 0.15, perf_floor: 0.35, perf_ceil: 1.0, perf_init: 0.60, up_jump_threshold: 0.35, slow_up_scale: 0.02, slow_down_scale: 0.5, down_fast_threshold: 0.10, down_fast_mult: 2.5, spike_jump_threshold: 0.35, spike_decay: 0.30 }
-  },
-  fast: {
-    cpu_load_governor: { up_threshold: 0.01, down_threshold: 0.01, smoothing_up: 1.0, smoothing_down: 0.01, down_rate_limit_ticks: 10, headroom_factor: 2.0, headroom_ramp: 0.15, perf_floor: 1.0, perf_ceil: 1.0, perf_init: 1.0, up_jump_threshold: 0.35, slow_up_scale: 0.02, slow_down_scale: 0.5, down_fast_threshold: 0.10, down_fast_mult: 2.5, spike_jump_threshold: 0.35, spike_decay: 0.30 }
-  }
+// 生效配置文件抬头信息（meta 段）mock：配置文件信息页展示用
+const mockMeta: Record<string, any> = {
+  name: "config_8550",
+  author: "ChiRi",
+  language: "zh",
+  loglevel: "INFO"
 };
 
 const mockApps = ['com.android.chrome', 'com.tencent.mm', 'com.miHoYo.GenshinImpact', 'com.hypergryph.arknights'];
@@ -72,19 +61,8 @@ export const MockBridge = {
     } else {
       (mockRules.app_modes as any)[pkg] = mode; 
     }
-
-    // ==== FAS 暂禁用：设为 fas 时同步初始化 per_app_profiles 的逻辑注释 ====
-    // if (mode === 'fas') {
-    //   if (!mockRules.fas_rules) (mockRules.fas_rules as any) = {};
-    //   if (!mockRules.fas_rules.per_app_profiles) (mockRules.fas_rules.per_app_profiles as any) = {};
-    //   if (!(mockRules.fas_rules.per_app_profiles as any)[pkg]) {
-    //     (mockRules.fas_rules.per_app_profiles as any)[pkg] = {
-    //       target_fps: [30, 60, 90, 120],
-    //       fps_margin: 3.0
-    //     };
-    //   }
-    // }
-  },  async getRulesConfig(): Promise<any> { await delay(300); return JSON.parse(JSON.stringify(mockRules)); },
+  },
+  async getRulesConfig(): Promise<any> { await delay(300); return JSON.parse(JSON.stringify(mockRules)); },
   async saveRulesConfig(config: any): Promise<void> { await delay(400); Object.assign(mockRules, config); },
   // 清理 rules.yaml 中非白名单/非法的特调映射（扫描完成后调用）
   async pruneSpecialTunedRules(specialTuned: Record<string, { modes: string[]; fallback: string }>): Promise<number> {
@@ -105,14 +83,12 @@ export const MockBridge = {
     });
     return removed;
   },
-  async getMainConfig(): Promise<any> { await delay(300); return JSON.parse(JSON.stringify(mockConfig)); },
-  async saveMainConfig(config: any): Promise<void> { await delay(400); Object.assign(mockConfig, config); },
+  async getActiveConfigName(): Promise<string> { await delay(100); return '8550/config.yaml'; },
+  async getConfigMeta(): Promise<Record<string, any>> { await delay(200); return { ...mockMeta }; },
+  async setLogLevel(level: string): Promise<void> { await delay(200); mockMeta.loglevel = level; },
   async restartDaemon(): Promise<void> { await delay(300); },
   async getDaemonLog(): Promise<string> {
     await delay(300);
     return `[2026-02-23 02:31:07] [INFO] [yumi] daemon is running smoothly.\n[2026-02-23 02:48:18] [INFO] [Scheduler] Active mode: ${simulatedModeTxt}`;
-  },
-  async getCpuPolicies(): Promise<number[]> { return []; },
-  async getAvailableFreqs(policyNum: number): Promise<string[]> { return []; },
-  async getAvailableGovernors(policyNum: number): Promise<string[]> { return []; }
+  }
 };

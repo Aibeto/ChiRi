@@ -187,9 +187,14 @@ fn get_focused_app_from_cgroup(ignored_apps: &[String]) -> Result<(String, i32),
 // ==================== [辅助函数] ====================
 
 fn determine_mode(config: &RulesConfig, current_package: &str) -> String {
+    // 特调可用性：仅 Chiri SoC 且 akmode.yaml 成功加载时特调才生效。
+    // 缺 akmode.yaml 的机型白名单应用回退 CLG（按 app_modes / global_mode 普通模式调度）。
+    let chiri = crate::common::is_chiri_soc();
+    let special_enabled = chiri && crate::common::is_akmode_available();
+
     // 白名单应用始终进特调（ChiRi 专属），不管 rules.yaml 配了什么。
     // 给该应用配的普通模式只作为特调起始档，scheduler 侧（get_ak_initial_tier）识别。
-    if crate::common::is_chiri_soc() {
+    if special_enabled {
         if let Some(entry) = crate::common::SPECIAL_TUNED_MODES
             .iter()
             .find(|e| e.package == current_package)
@@ -209,13 +214,12 @@ fn determine_mode(config: &RulesConfig, current_package: &str) -> String {
     }
     // 特调体系为 ChiRi 专属：仅命中 CHIRI_SOC_HINTS 的 SoC 上白名单/特调模式才生效，
     // 非 ChiRi SoC 上特调映射一律回退全局模式（Yumi 调度器未注册特调模式）。
-    let chiri = crate::common::is_chiri_soc();
     // 优先级：用户自定义 app_modes > 特调白名单的优先回退模式 > 全局模式。
     // 门控：特调模式只允许白名单应用；非白名单包名映射到特调模式时回退全局模式并告警
     // （WebUI 侧在扫描完成后会同步清理这类非法条目）。
     if let Some(mode) = config.app_modes.get(current_package) {
         if crate::common::is_special_mode(mode) {
-            if chiri && crate::common::is_special_mode_allowed(current_package, mode) {
+            if special_enabled && crate::common::is_special_mode_allowed(current_package, mode) {
                 debug!(
                     "{}",
                     t_with_args(
@@ -225,19 +229,29 @@ fn determine_mode(config: &RulesConfig, current_package: &str) -> String {
                 );
                 return mode.clone();
             }
-            warn!(
-                "{}",
-                t_with_args(
-                    "app-detect-special-rejected",
-                    &fluent_args!("pkg" => current_package, "mode" => mode.as_str())
-                )
-            );
-            // 非法特调映射：回退到全局模式
+            // 特调不可用（Chiri SoC 缺 akmode.yaml）与非白名单非法映射区分告警，均回退全局模式
+            if chiri && !crate::common::is_akmode_available() {
+                warn!(
+                    "{}",
+                    t_with_args(
+                        "app-detect-special-unavailable",
+                        &fluent_args!("pkg" => current_package, "mode" => mode.as_str())
+                    )
+                );
+            } else {
+                warn!(
+                    "{}",
+                    t_with_args(
+                        "app-detect-special-rejected",
+                        &fluent_args!("pkg" => current_package, "mode" => mode.as_str())
+                    )
+                );
+            }
             return config.global_mode.clone();
         }
         return mode.clone();
     }
-    if chiri {
+    if special_enabled {
         if let Some(mode) = crate::common::special_tuned_mode(current_package) {
             debug!(
                 "{}",
@@ -252,7 +266,7 @@ fn determine_mode(config: &RulesConfig, current_package: &str) -> String {
     let global = config.global_mode.clone();
     // 全局模式本身不允许直接指定特调：非白名单应用回退 balance（默认模式）
     if crate::common::is_special_mode(&global)
-        && !(chiri && crate::common::is_special_mode_allowed(current_package, &global))
+        && !(special_enabled && crate::common::is_special_mode_allowed(current_package, &global))
     {
         warn!(
             "{}",

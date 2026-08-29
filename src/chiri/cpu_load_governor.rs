@@ -191,7 +191,7 @@ pub struct CpuLoadGovernor {
     active: bool,
     /// 调试日志周期计数（每 25 tick 输出一次 clg-tick-log 摘要）
     log_counter: u32,
-    /// 触摸升频窗口截止时间：窗口内大核（3-6）性能下限锁定到 touch_boost_floor
+    /// 触摸升频窗口截止时间：窗口内大核性能下限锁定到 touch_boost_floor
     touch_boost_until: Option<Instant>,
     /// 触摸升频窗口内大核性能下限（由窗口开始时大核频率 + touch_boost_tiers 档换算）
     touch_boost_floor: f32,
@@ -636,7 +636,7 @@ impl CpuLoadGovernor {
         }
 
         for cluster in &mut self.clusters {
-            // 触摸升频窗口内：大核（3-6）性能下限锁定到提升档位（受开关约束，防残留）
+            // 触摸升频窗口内：大核性能下限锁定到提升档位（受开关约束，防残留）
             if self.cfg.touch_boost_enabled
                 && self.touch_boost_until.is_some()
                 && Self::is_big_cluster(&cluster.affected_cpus)
@@ -651,7 +651,7 @@ impl CpuLoadGovernor {
         }
     }
 
-    /// 触摸事件驱动入口：收到触摸按下事件时把大核（3-6）频率下限抬高一档，
+    /// 触摸事件驱动入口：收到触摸按下事件时把大核频率下限抬高一档，
     /// 并立即由 scheduler_ipc 调用 flush() 写频（不等待下一个 160ms 决策 tick）。
     pub fn on_touch(&mut self) {
         if !self.active || !self.cfg.touch_boost_enabled {
@@ -696,9 +696,12 @@ impl CpuLoadGovernor {
             .and_then(|s| s.trim().parse::<u32>().ok())
     }
 
-    /// 判定 cluster 是否覆盖 8550 大核（3-6）：触摸升频只作用于大核
+    /// 判定 cluster 是否覆盖当前 SoC 的大核区间：触摸升频只作用于大核。
+    /// 大核区间随命中 SoC 变化（8550：3-6；8450：4-6；8998：4-7），
+    /// 由 common::chiri_core_ranges() 统一提供。
     fn is_big_cluster(affected: &[usize]) -> bool {
-        affected.iter().any(|&c| (3..=6).contains(&c))
+        let big = crate::common::chiri_core_ranges().big;
+        affected.iter().any(|&c| big.contains(&c))
     }
 
     /// 计算触摸升频的大核性能下限：取各覆盖大核的 cluster 当前频率在可用频率表中

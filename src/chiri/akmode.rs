@@ -71,15 +71,20 @@ struct ClusterState {
     current_max: u32,
 }
 
-/// 按 affected_cpus 的 CPU ID 判定核心组，8550 固定分布，直接写死：
-/// 0-2 小核 little，3-6 大核 big，7 超大核 prime。
+/// 按 affected_cpus 的 CPU ID 判定核心组，区间随命中 SoC 变化
+/// （8550：0-2 little / 3-6 big / 7 prime；8450：0-3 / 4-6 / 7；8998：0-3 / 4-7 / 无 prime）。
+/// 由 common::chiri_core_ranges() 统一提供区间，新增 SoC 只需在那里追加。
 fn core_name_for(affected: &[usize]) -> Option<&'static str> {
     let first = affected.iter().copied().min()?;
-    match first {
-        0..=2 => Some("little"),
-        3..=6 => Some("big"),
-        7 => Some("prime"),
-        _ => None,
+    let r = crate::common::chiri_core_ranges();
+    if r.little.contains(&first) {
+        Some("little")
+    } else if r.big.contains(&first) {
+        Some("big")
+    } else if r.prime.contains(&first) {
+        Some("prime")
+    } else {
+        None
     }
 }
 
@@ -341,8 +346,8 @@ impl AkmodeGovernor {
 
     /// 动态限频入口，每个 SystemLoadUpdate（特调 40ms）触发一次。
     /// 用当前档位的策略参数按核心组统计忙/闲核心数：
-    ///   升频 = 任一组内超过 up_core_count 个核心占用率 > up_util_percent
-    ///   降频 = 任一组内超过 down_core_count 个核心占用率 < down_util_percent
+    ///   升频 = 任一组内达到 up_core_count 个核心占用率 > up_util_percent
+    ///   降频 = 任一组内达到 down_core_count 个核心占用率 < down_util_percent
     /// 升频优先于降频；条件持续成立并等 wait_ms（升降频后临时减半）再执行：
     ///   升频：先检查实际频率（scaling_cur_freq）是否已达当前设定的 max，达到才在频率表中升一档
     ///   降频：直接在频率表中降一档
@@ -354,7 +359,9 @@ impl AkmodeGovernor {
         // 档位配置克隆成局部值，避免与 &mut self 借用冲突
         let tc = self.cfg.tier(self.current_tier).clone();
 
-        // 核心组按 CPU ID 区间硬编码（8550：0-2 小核 little、3-6 大核 big、7 超大核 prime）
+        // 核心组区间随命中 SoC 变化（8550：0-2/3-6/7；8450：0-3/4-6/7；8998：0-3/4-7 无 prime）
+        let ranges = crate::common::chiri_core_ranges();
+
         struct GroupStat<'a> {
             g: &'a SpecialTunedGroup,
             range: std::ops::Range<usize>,
@@ -365,19 +372,19 @@ impl AkmodeGovernor {
         let mut stats = [
             GroupStat {
                 g: &tc.little,
-                range: 0..3,
+                range: ranges.little.clone(),
                 over: 0,
                 under: 0,
             },
             GroupStat {
                 g: &tc.big,
-                range: 3..7,
+                range: ranges.big.clone(),
                 over: 0,
                 under: 0,
             },
             GroupStat {
                 g: &tc.prime,
-                range: 7..8,
+                range: ranges.prime.clone(),
                 over: 0,
                 under: 0,
             },
@@ -387,11 +394,12 @@ impl AkmodeGovernor {
         let mut down_hit = false;
         for s in &mut stats {
             for cpu in s.range.clone() {
-                // core_utils 按真实 CPU ID 索引，离线核心固定为 0.0，不参与统计
+                // core_utils 按真实 CPU ID 索引：离线核心预分配 0.0 且无数据，
+                // 在线整窗空闲核心 util 也恰为 0.0，二者无法区分。
+                // 升频只统计“忙”核，0.0 一律不计入 over；
+                // 降频统计“闲”核，0.0 也视为低于 down_util_percent 计入 under，
+                // 避免整窗空闲的组（如挂机/息屏）因 util 恰为 0.0 永不触发降频。
                 if let Some(&u) = core_utils.get(cpu) {
-                    if u <= 0.0 {
-                        continue;
-                    }
                     if u > s.g.up_util_percent {
                         s.over += 1;
                     }
@@ -400,10 +408,15 @@ impl AkmodeGovernor {
                     }
                 }
             }
-            if s.over as u32 > s.g.up_core_count {
+            // 核心数为组内绝对个数：达到 N 个核心命中即触发（N=0 = 组内任一核心命中即触发，
+            // 写大值如 64 = 关闭该方向判定）。用 >= 而非 >，否则实际触发数会比配置多 1
+            // （如配置 2 需 3 个核心，prime 单核组配 1 则永远无法触发）。
+            let up_need = s.g.up_core_count.max(1);
+            if s.over as u32 >= up_need {
                 up_hit = true;
             }
-            if s.under as u32 > s.g.down_core_count {
+            let down_need = s.g.down_core_count.max(1);
+            if s.under as u32 >= down_need {
                 down_hit = true;
             }
         }

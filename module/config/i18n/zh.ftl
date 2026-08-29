@@ -41,6 +41,7 @@ app-detect-pkg-change = [AppDetect] 前台应用状态变化: { $pkg } (pid={ $p
 app-detect-no-app = [AppDetect] 未检测到有效前台应用 (可能为系统进程或未知包)
 app-detect-special-override = [AppDetect] 特调模式应用: { $pkg } -> { $mode }
 app-detect-special-rejected = [AppDetect] 非白名单应用 { $pkg } 映射到特调模式 { $mode } 已拒绝，回退全局模式
+app-detect-special-unavailable = [AppDetect] 特调配置不可用（akmode.yaml 缺失/损坏），{ $pkg } 映射的 { $mode } 不生效，回退全局模式
 app-detect-special-fallback = [AppDetect] 特调白名单命中: { $pkg } 使用优先回退模式 { $mode }
 app-detect-special-global-rejected = [AppDetect] 全局模式 { $mode } 为特调模式，不适用于非白名单应用 { $pkg }，回退 balance
 
@@ -100,8 +101,8 @@ scheduler-scene-mode-enter = [Scheduler] 息屏已超过阈值，切换到 scene
 config-reloading = [Config] 检测到配置文件变更，正在重载...
 config-reloaded-success = [Config] 配置重载成功
 config-reload-fail = [Config] 配置重载失败: { $error }
-config-special-load-failed = [Config] 特调配置文件读取失败: { $path } ({ $error }) — 保留主配置现有特调参数
-config-special-parse-failed = [Config] 特调配置文件解析失败: { $path } ({ $error }) — 保留主配置现有特调参数
+config-special-load-failed = [Config] 特调配置文件读取失败: { $path } ({ $error }) — 特调不可用，白名单应用回退 CLG
+config-special-parse-failed = [Config] 特调配置文件解析失败: { $path } ({ $error }) — 特调不可用，白名单应用回退 CLG
 config-special-merged = [Config] 已合并特调配置文件: { $path }
 config-watch-error = [Config] 监控配置目录失败: { $error }
 config-apply-mode-failed = [Config] 应用重载的模式设置失败: { $error }

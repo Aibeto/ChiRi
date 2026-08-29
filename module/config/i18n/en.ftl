@@ -42,6 +42,7 @@ app-detect-pkg-change = [AppDetect] Foreground app state: { $pkg } (pid={ $pid }
 app-detect-no-app = [AppDetect] No valid foreground app detected (system process or unknown package)
 app-detect-special-override = [AppDetect] Special profile applied: { $pkg } -> { $mode }
 app-detect-special-rejected = [AppDetect] Non-whitelisted app { $pkg } mapped to special profile { $mode }, rejected, falling back to global mode
+app-detect-special-unavailable = [AppDetect] Special tuning unavailable (akmode.yaml missing/corrupt), { $pkg } mapped { $mode } not applied, falling back to global mode
 app-detect-special-fallback = [AppDetect] Special whitelist hit: { $pkg } uses fallback profile { $mode }
 app-detect-special-global-rejected = [AppDetect] Global mode { $mode } is a special profile and does not apply to non-whitelisted app { $pkg }, falling back to balance
 
@@ -101,8 +102,8 @@ scheduler-scene-mode-enter = [Scheduler] Screen off past threshold, switching to
 config-reloading = [Config] Config file change detected, reloading...
 config-reloaded-success = [Config] Config reloaded successfully.
 config-reload-fail = [Config] Config reload failed: { $error }
-config-special-load-failed = [Config] Failed to read special-tuned config: { $path } ({ $error }), keeping existing values
-config-special-parse-failed = [Config] Failed to parse special-tuned config: { $path } ({ $error }), keeping existing values
+config-special-load-failed = [Config] Failed to read special-tuned config: { $path } ({ $error }) — special tuning unavailable, whitelisted apps fall back to CLG
+config-special-parse-failed = [Config] Failed to parse special-tuned config: { $path } ({ $error }) — special tuning unavailable, whitelisted apps fall back to CLG
 config-special-merged = [Config] Merged special-tuned config: { $path }
 config-watch-error = [Config] Failed to watch config directory: { $error }
 config-apply-mode-failed = [Config] Failed to apply reloaded mode settings: { $error }

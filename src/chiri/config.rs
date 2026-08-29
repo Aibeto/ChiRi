@@ -116,7 +116,8 @@ pub struct CpuLoadGovernorConfig {
     /// 尖峰增量保留比例（0.0=完全抑制，1.0=不抑制）
     #[serde(default = "d_clg_spike_decay")]
     pub spike_decay: f32,
-    /// 触摸升频总开关：true 时触摸屏幕将把大核（3-6）频率提前抬高一档，减少操作卡顿
+    /// 触摸升频总开关：true 时触摸屏幕将把大核频率提前抬高一档（大核区间随命中 SoC
+    /// 变化，见 common::chiri_core_ranges），减少操作卡顿
     #[serde(default = "crate::utils::default_true")]
     pub touch_boost_enabled: bool,
     /// 触摸升频保持时长（ms）：触摸后窗口期内大核锁定在抬高档位，窗口结束回落到负载调度
@@ -361,16 +362,17 @@ pub struct FunctionToggles {
 }
 
 /// 单个核心组（little/big/prime）的升降频参数，组内独立配置。
-/// 核心数 yaml 里直接写整数（如 2 = 组内超过 2 个核心命中阈值才触发），0 表示关闭该方向判定。
+/// 核心数 yaml 里直接写整数（如 2 = 组内达到 2 个核心命中阈值即触发），
+/// 0 = 组内任一核心命中即触发，写大值如 64 = 关闭该方向判定。
 #[derive(Debug, Deserialize, Clone)]
 pub struct SpecialTunedGroup {
-    /// 升频核心数：组内超过这个数量的核心占用率 > up_util_percent 才考虑升 max
+    /// 升频核心数：组内达到这个数量的核心占用率 > up_util_percent 才考虑升 max
     #[serde(default = "d_ak_up_core_count")]
     pub up_core_count: u32,
     /// 升频占用率阈值（%）
     #[serde(default = "d_ak_up_util_threshold")]
     pub up_util_percent: f32,
-    /// 降频核心数：组内超过这个数量的核心占用率 < down_util_percent 才降 max
+    /// 降频核心数：组内达到这个数量的核心占用率 < down_util_percent 才降 max
     #[serde(default = "d_ak_down_core_count")]
     pub down_core_count: u32,
     /// 降频占用率阈值（%）
@@ -379,20 +381,21 @@ pub struct SpecialTunedGroup {
 }
 
 /// 单个档位的配置：按核心组（little/big/prime）的升降频参数 + 本档防抖等待。
-/// 核心组按 affected_cpus 的 CPU ID 区间硬编码判定（8550：0-2 小核、3-6 大核、7 超大核）。
+/// 核心组区间按命中 SoC 区分（common::chiri_core_ranges：8550 0-2/3-6/7、
+/// 8450 0-3/4-6/7、8998 0-3/4-7 无 prime），与 affected_cpus 的 CPU ID 对照判定。
 /// 档位由 rules.yaml 生效模式决定，特调期间固定应用、不自动切换档位。
 #[derive(Debug, Deserialize, Clone)]
 pub struct SpecialTunedTier {
     /// 升降频防抖等待（ms）：升降条件成立到真正升降 max 之间的等待
     #[serde(default = "d_ak_wait_ms")]
     pub wait_ms: u64,
-    /// 小核组（0-2）升降频参数
+    /// 小核组升降频参数
     #[serde(default)]
     pub little: SpecialTunedGroup,
-    /// 大核组（3-6）升降频参数
+    /// 大核组升降频参数
     #[serde(default)]
     pub big: SpecialTunedGroup,
-    /// 超大核组（7）升降频参数
+    /// 超大核组升降频参数（无超大核的 SoC 该组不生效）
     #[serde(default)]
     pub prime: SpecialTunedGroup,
 }
@@ -608,9 +611,12 @@ impl Config {
     }
 
     /// 合并独立特调配置文件（akmode.yaml）中的特调段：
-    /// - 读取失败（文件缺失等）→ warn 并保留主配置现有值
-    /// - 解析失败（内容损坏等）→ warn 并保留主配置现有值
+    /// - 读取失败（文件缺失等）→ warn 并置特调不可用（白名单应用回退 CLG）
+    /// - 解析失败（内容损坏等）→ warn 并置特调不可用（回退 CLG）
     /// - 成功 → debug 打点
+    ///
+    /// 特调可用性经 common::AKMODE_AVAILABLE 共享给 monitor 层：缺 akmode.yaml 的
+    /// 机型（如未随处理器发布特调文件时）不启用特调，避免用默认参数接管 CPU。
     fn merge_akmode(&mut self) {
         let path = crate::common::get_akmode_path();
         let content = match std::fs::read_to_string(&path) {
@@ -623,6 +629,7 @@ impl Config {
                         &fluent_args!("path" => path.to_string_lossy().to_string(), "error" => e.to_string())
                     )
                 );
+                crate::common::set_akmode_available(false);
                 return;
             }
         };
@@ -630,6 +637,7 @@ impl Config {
             Ok(special) => {
                 self.akmode = special.akmode;
                 self.akmode.normalize();
+                crate::common::set_akmode_available(true);
                 log::debug!(
                     "{}",
                     t_with_args(
@@ -646,6 +654,7 @@ impl Config {
                         &fluent_args!("path" => path.to_string_lossy().to_string(), "error" => e.to_string())
                     )
                 );
+                crate::common::set_akmode_available(false);
             }
         }
     }

@@ -50,6 +50,27 @@ function utf8ToBase64(str: string): string {
   return btoa(bin);
 }
 
+// 模式名 → 本地化文案：标准四档用 i18n 标签，特调（如 akmode）/未知模式回退原键名，
+// 避免 toast 直接展示裸 key。
+function modeLabel(modeKey: string): string {
+  const key = `mode_${modeKey}`;
+  const localized = i18n.global.t(key);
+  return typeof localized === 'string' && localized !== key ? localized : modeKey;
+}
+
+// 单字段 YAML 行内替换：只改首个匹配行的值，保留缩进/字段名大小写/引号风格及其余内容与注释。
+// 用于日志等级等单字段写入，避免整文件重写丢失用户手写注释。匹配不到返回 null，由调用方兜底。
+function replaceYamlFieldLine(content: string, field: string, value: string): string | null {
+  const re = new RegExp(`^(\\s*)(${field})(\\s*:\\s*)(.*)$`, 'im');
+  const m = content.match(re);
+  if (!m || m.index === undefined) return null;
+  const [, indent, name, sep, raw] = m;
+  // 原值带引号（"INFO" / 'INFO'）时保持引号风格，否则写裸值
+  const quoted = /^["']/.test(raw.trim());
+  const val = quoted ? `"${value}"` : value;
+  return content.slice(0, m.index) + `${indent}${name}${sep}${val}` + content.slice(m.index + m[0].length);
+}
+
 const RealBridge = {
   async isDaemonRunning(): Promise<boolean> {
     try {
@@ -74,10 +95,46 @@ const RealBridge = {
     if (errno !== 0) throw new Error(i18n.global.t('write_failed', { path }) as string);
   },
 
+  // 内部读取/写入 rules.yaml：仅服务于模式切换与应用性能模式，不提供整文件编辑
   async getRulesConfig(): Promise<any> { try { return yaml.load(await this.readFile(PATHS.RULES_YAML)) || {}; } catch (e) { return {}; } },
   async saveRulesConfig(config: any): Promise<void> { await this.writeFile(PATHS.RULES_YAML, yaml.dump(config)); },
-  async getMainConfig(): Promise<any> { try { return yaml.load(await this.readFile(await resolveConfigPath())) || {}; } catch (e) { return {}; } },
-  async saveMainConfig(config: any): Promise<void> { await this.writeFile(await resolveConfigPath(), yaml.dump(config)); toast(i18n.global.t('core_config_saved') as string); },
+
+  // 生效配置文件相对 config 目录的路径（如 "8550/config.yaml"，非处理器时为 "config.yaml"），
+  // 由守护进程启动时写入 active_config.txt；WebUI 只读展示，不改动文件。
+  async getActiveConfigName(): Promise<string> {
+    try {
+      const { errno, stdout } = await exec(`cat "${PATHS.ACTIVE_CONFIG}"`);
+      const name = stdout.trim();
+      if (errno === 0 && name && !name.includes('..')) return name;
+    } catch (e) { /* 回退默认 */ }
+    return 'config.yaml';
+  },
+
+  // 配置文件抬头信息（meta 段：配置名/作者/语言/日志等级），仅供查看
+  async getConfigMeta(): Promise<Record<string, any>> {
+    try {
+      const cfg = yaml.load(await this.readFile(await resolveConfigPath())) || {};
+      return (cfg as any).meta || {};
+    } catch (e) {
+      return {};
+    }
+  },
+
+  // 切换日志等级：只替换生效 config.yaml 中 meta.loglevel 行的值（保留注释与其余内容），
+  // 守护进程 config_watcher 检测到变更后热重载即时生效。
+  async setLogLevel(level: string): Promise<void> {
+    const path = await resolveConfigPath();
+    const content = await this.readFile(path);
+    // 字段缺失（异常精简的配置文件）时兜底整文件重写
+    const updated = replaceYamlFieldLine(content, 'loglevel', level) ?? (() => {
+      const cfg = yaml.load(content) || {};
+      if (!(cfg as any).meta) (cfg as any).meta = {};
+      (cfg as any).meta.loglevel = level;
+      return yaml.dump(cfg);
+    })();
+    await this.writeFile(path, updated);
+    toast(i18n.global.t('loglevel_updated') as string);
+  },
 
   // 手动热重启守护进程：先杀掉旧进程，再重新执行 module 的 service.sh 拉起守护进程。
   // 关键点：ksu.exec 返回时会清理执行 shell 所在的进程组，若像之前那样直接
@@ -110,7 +167,7 @@ const RealBridge = {
     const rules = await this.getRulesConfig();
     rules.global_mode = mode;
     await this.saveRulesConfig(rules);
-    toast(i18n.global.t('switch_success', { mode }) as string);
+    toast(i18n.global.t('switch_success', { mode: modeLabel(mode) }) as string);
   },
 
   async getInstalledApps(): Promise<string[]> {
@@ -177,34 +234,21 @@ const RealBridge = {
       return {};
     }
   },
-  
-  // ================= 修改这里 =================
-  async saveAppRule(packageName: string, mode: string): Promise<void> {
-     const rules = await this.getRulesConfig();
-     if (!rules.app_modes) rules.app_modes = {};
-     
-     if (mode === '') {
-       delete rules.app_modes[packageName];
-     } else {
-       rules.app_modes[packageName] = mode;
-     }
 
-     // ==== FAS 暂禁用：设为 fas 时同步初始化 per_app_profiles 的逻辑注释 ====
-     // if (mode === 'fas') {
-     //   if (!rules.fas_rules) rules.fas_rules = {};
-     //   if (!rules.fas_rules.per_app_profiles) rules.fas_rules.per_app_profiles = {};
-     //   if (!rules.fas_rules.per_app_profiles[packageName]) {
-     //     rules.fas_rules.per_app_profiles[packageName] = {
-     //       target_fps: [30, 60, 90, 120], // 默认覆盖常用帧率
-     //       fps_margin: 3.0
-     //     };
-     //   }
-     // }
-     
-     await this.saveRulesConfig(rules);
-     toast(i18n.global.t('app_rules_saved') as string);
+  // 设定/清除单个应用的性能模式（写 rules.yaml 的 app_modes，mode 为空串表示清除）
+  async saveAppRule(packageName: string, mode: string): Promise<void> {
+    const rules = await this.getRulesConfig();
+    if (!rules.app_modes) rules.app_modes = {};
+
+    if (mode === '') {
+      delete rules.app_modes[packageName];
+    } else {
+      rules.app_modes[packageName] = mode;
+    }
+
+    await this.saveRulesConfig(rules);
+    toast(i18n.global.t('app_rules_saved') as string);
   },
-  // ============================================
 
   async getDaemonLog(): Promise<string> {
     try {
@@ -212,39 +256,6 @@ const RealBridge = {
       return raw || '';
     } catch (e) {
       return '';
-    }
-  },
-
-  async getCpuPolicies(): Promise<number[]> {
-    try {
-      const { errno, stdout } = await exec('ls /sys/devices/system/cpu/cpufreq/');
-      if (errno !== 0) return [];
-      return stdout.trim().split(/\s+/)
-        .filter(s => /^policy\d+$/.test(s))
-        .map(s => parseInt(s.replace('policy', ''), 10))
-        .sort((a, b) => a - b);
-    } catch (e) {
-      return [];
-    }
-  },
-
-  async getAvailableFreqs(policyNum: number): Promise<string[]> {
-    try {
-      const path = `/sys/devices/system/cpu/cpufreq/policy${policyNum}/scaling_available_frequencies`;
-      const raw = await this.readFile(path);
-      return raw.trim().split(/\s+/).filter(Boolean);
-    } catch (e) {
-      return [];
-    }
-  },
-
-  async getAvailableGovernors(policyNum: number): Promise<string[]> {
-    try {
-      const path = `/sys/devices/system/cpu/cpufreq/policy${policyNum}/scaling_available_governors`;
-      const raw = await this.readFile(path);
-      return raw.trim().split(/\s+/).filter(Boolean);
-    } catch (e) {
-      return [];
     }
   }
 };

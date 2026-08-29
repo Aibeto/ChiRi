@@ -18,6 +18,7 @@
 use crate::monitor::config::RulesConfig;
 use std::env;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 
 /// 守护进程全局事件总线
@@ -76,8 +77,9 @@ fn read_first_line(path: &str) -> String {
 
 /// 触发 Chiri 专用调度的特定处理器型号片段列表。
 /// 探测到任一命中即启用 Chiri 调度器；新增机型只需在此追加片段，不要绑定单一型号。
-/// 例：SM8550（骁龙 8 Gen 2）含 "8550"
-const CHIRI_SOC_HINTS: &[&str] = &["8550"];
+/// 例：SM8550（骁龙 8 Gen 2）含 "8550"，SM8450（骁龙 8 Gen 1）含 "8450"，
+/// MSM8998（骁龙 835）含 "8998"。片段须能互相区分（8550 不含 8450，反之亦然）。
+const CHIRI_SOC_HINTS: &[&str] = &["8550", "8450", "8998"];
 
 /// 读取单个 Android 系统属性（getprop key），失败/为空返回空串
 fn getprop(key: &str) -> String {
@@ -101,21 +103,31 @@ fn getprop(key: &str) -> String {
 ///
 /// 结果统一转小写后做子串匹配，兼容 "SM8550" / "sm8550" / "8550"。
 fn soc_hint_matches(hints: &[&str]) -> bool {
-    let haystacks: Vec<String> = vec![
-        read_first_line("/sys/devices/soc0/machine"),
-        read_first_line("/sys/devices/soc0/plat_name"),
-        getprop("ro.soc.model"),
-        getprop("ro.board.platform"),
-        getprop("ro.product.board"),
-        getprop("ro.hardware"),
-        std::fs::read_to_string("/proc/cpuinfo").unwrap_or_default(),
-    ];
-    let haystack = haystacks.join("\n").to_lowercase();
-    hints.iter().any(|h| {
-        let hl = h.to_lowercase();
-        // 片段至少 3 个字符，避免过短片段在高频硬件标识中误匹配
-        hl.len() >= 3 && haystack.contains(&hl)
+    hints.iter().any(|h| hint_matches(h))
+}
+
+/// 设备硬件标识全集（小写、多源拼接）：只探测一次并缓存，供各片段子串匹配复用。
+static SOC_HINT_HAYSTACK: OnceLock<String> = OnceLock::new();
+fn soc_hint_haystack() -> &'static str {
+    SOC_HINT_HAYSTACK.get_or_init(|| {
+        let haystacks: Vec<String> = vec![
+            read_first_line("/sys/devices/soc0/machine"),
+            read_first_line("/sys/devices/soc0/plat_name"),
+            getprop("ro.soc.model"),
+            getprop("ro.board.platform"),
+            getprop("ro.product.board"),
+            getprop("ro.hardware"),
+            std::fs::read_to_string("/proc/cpuinfo").unwrap_or_default(),
+        ];
+        haystacks.join("\n").to_lowercase()
     })
+}
+
+/// 单个处理器片段是否命中设备硬件标识。
+/// 片段至少 3 个字符，避免过短片段在高频硬件标识中误匹配。
+fn hint_matches(hint: &str) -> bool {
+    let hl = hint.to_lowercase();
+    hl.len() >= 3 && soc_hint_haystack().contains(&hl)
 }
 
 /// 是否应启用 Chiri 专用调度器（检测到列表中的特定处理器时为 true）。
@@ -125,16 +137,76 @@ pub fn is_chiri_soc() -> bool {
     *CHIRI_SOC.get_or_init(|| soc_hint_matches(CHIRI_SOC_HINTS))
 }
 
-/// 命中 Chiri 目标 SoC 时，返回其处理器专属配置目录 `config/{命中片段}/`（存在则返回）。
-fn matched_soc_config_dir() -> Option<PathBuf> {
+/// 返回第一个「既命中设备硬件标识、又存在处理器专属配置目录」的片段。
+/// 顺序与 CHIRI_SOC_HINTS 一致：配置目录缺失的机型继续向后找，
+/// 防止多 SoC 并存时设备误用其它机型的配置目录（如 8450 设备读到 8550 的 config.yaml）。
+fn matched_soc_hint() -> Option<&'static str> {
     if !is_chiri_soc() {
         return None;
     }
     let config_dir = get_module_root().join("config");
     CHIRI_SOC_HINTS
         .iter()
-        .map(|hint| config_dir.join(hint))
-        .find(|dir| dir.join("config.yaml").exists())
+        .copied()
+        .find(|hint| hint_matches(hint) && config_dir.join(hint).join("config.yaml").exists())
+}
+
+/// 命中 Chiri 目标 SoC 时，返回其处理器专属配置目录 `config/{命中片段}/`（存在则返回）。
+fn matched_soc_config_dir() -> Option<PathBuf> {
+    matched_soc_hint().map(|hint| get_module_root().join("config").join(hint))
+}
+
+/// 处理器核心组区间（little/big/prime 的 CPU ID 区间，左闭右开）。
+/// akmode 按组统计忙/闲核心数、CLG 触摸升频判定大核簇时使用；
+/// 各 SoC 簇布局不同，按命中片段区分（未命中时回退 8550 布局兜底）。
+#[derive(Debug, Clone, Copy)]
+pub struct CoreGroupRanges {
+    /// 小核组
+    pub little: std::ops::Range<usize>,
+    /// 大核组
+    pub big: std::ops::Range<usize>,
+    /// 超大核组：无超大核的 SoC 为空区间（start == end），统计时自动跳过
+    pub prime: std::ops::Range<usize>,
+}
+
+/// 按命中的处理器片段返回核心组区间：
+/// - 8550（骁龙 8 Gen 2）：little 0-2 / big 3-6 / prime 7
+/// - 8450（骁龙 8 Gen 1）：little 0-3 / big 4-6 / prime 7
+/// - 8998（骁龙 835）：little 0-3 / big 4-7 / 无 prime
+/// 未命中（非 ChiRi）回退 8550 布局兜底（仅 Chiri 路径调用，正常不会发生）。
+pub fn chiri_core_ranges() -> CoreGroupRanges {
+    match matched_soc_hint() {
+        Some("8450") => CoreGroupRanges {
+            little: 0..4,
+            big: 4..7,
+            prime: 7..8,
+        },
+        Some("8998") => CoreGroupRanges {
+            little: 0..4,
+            big: 4..8,
+            prime: 7..7,
+        },
+        _ => CoreGroupRanges {
+            little: 0..3,
+            big: 3..7,
+            prime: 7..8,
+        },
+    }
+}
+
+/// 特调（akmode）可用性共享标志：chiri Config 合并 akmode.yaml 成功后置 true，
+/// 文件缺失/损坏时置 false。monitor 层 determine_mode 据此决定白名单应用
+/// 是进入特调还是回退 CLG（缺 akmode.yaml 的机型不做特调，按普通模式调度）。
+static AKMODE_AVAILABLE: AtomicBool = AtomicBool::new(false);
+
+/// 特调（akmode）是否可用（akmode.yaml 已成功加载）。
+pub fn is_akmode_available() -> bool {
+    AKMODE_AVAILABLE.load(Ordering::Acquire)
+}
+
+/// 设置特调可用性：chiri Config::from_file 合并 akmode.yaml 时调用。
+pub fn set_akmode_available(available: bool) {
+    AKMODE_AVAILABLE.store(available, Ordering::Release);
 }
 
 /// 返回当前应加载的配置文件路径：
@@ -195,9 +267,10 @@ pub fn is_special_mode_allowed(pkg: &str, mode: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// 处理器专属特调配置文件路径：与处理器主配置同目录 `config/{命中片段}/akmode.yaml`（特调与处理器绑定）。
-/// 无处理器专属特调文件时回退根 `config/akmode.yaml`（通常不存在，合并时 warn 保留旧值）。
-/// 只含白名单特调模式段（明日方舟 akmode），随模块发布，WebUI 不提供编辑。
+/// 处理器专属特调配置文件路径：与处理器主配置同目录 `config/{命中片段}/akmode.yaml`
+/// （特调与处理器绑定，各目标 SoC 子目录自带一份；8450 与 8998 参数相同、各自一份）。
+/// 命中 SoC 时必返处理器目录下的路径，文件缺失/损坏由 merge_akmode 置特调不可用、
+/// 白名单应用回退 CLG（不落到其它目录的共享文件）。非 Chiri（不会调用）兜底根 config 路径。
 pub fn get_akmode_path() -> PathBuf {
     matched_soc_config_dir()
         .map(|dir| dir.join("akmode.yaml"))

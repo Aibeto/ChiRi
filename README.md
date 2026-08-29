@@ -46,7 +46,9 @@ ChiRi 提供6种性能模式：
 
 ChiRi CLG 调度核心，使用白名单适配soc
 [已适配soc列表](/mdocs/socList.md)
-没有你的soc？请提交issue
+没有你的soc或功能适配不完全？当前处于早期测试阶段，正在增加soc适配
+完全不支持的soc会回退到 yumi 调度（微调版）
+不支持部分特调的soc会回退到CLG模式
 
 #### 核心特性
 
