@@ -46,6 +46,13 @@ pub async fn start_cpu_loop(
     tx: SyncSender<DaemonEvent>,
     rx_pid: watch::Receiver<u32>,
 ) -> Result<(), anyhow::Error> {
+    // 与 fps_monitor 保持一致：debug 构建嵌 debug 产物，release 构建嵌 release 产物
+    #[cfg(debug_assertions)]
+    let bpf = Box::leak(Box::new(Ebpf::load(include_bytes!(concat!(
+        env!("OUT_DIR"),
+        "/ebpf_target/bpfel-unknown-none/debug/yumi-ebpf"
+    )))?));
+    #[cfg(not(debug_assertions))]
     let bpf = Box::leak(Box::new(Ebpf::load(include_bytes!(concat!(
         env!("OUT_DIR"),
         "/ebpf_target/bpfel-unknown-none/release/yumi-ebpf"

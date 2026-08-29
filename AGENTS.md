@@ -22,7 +22,7 @@ src/                  # Rust 守护进程主代码
     fas/              # FAS 核心：PID 控制器、帧率档位、frame_pipeline
   chiri/              # Chiri 专用调度器（特定 SoC 触发；复制自 scheduler/，待定制）
   common.rs / fas_types.rs / i18n.rs / logger.rs
-yumi-ebpf/            # eBPF 探针（bpfel-unknown-none，build-std 编译）
+yumi-ebpf/            # eBPF 探针（bpfel-unknown-none，build-std 编译；独立 workspace，不在根 members）
 xtask/                # 构建脚本（cargo xtask build 完成编译打包 zip）
 module/               # Magisk/KernelSU 模块载体（module.prop、customize.sh、service.sh）
   config/             # config.yaml / rules.yaml / i18n (en.ftl / zh.ftl)
@@ -46,6 +46,9 @@ updateInformation/    # 更新.json 与 changelog
 # 完整构建（编译 eBPF + 守护进程 + WebUI 并打包模块 zip）
 cargo xtask build
 
+# 本地静态检查（验证 yumi crate 本身；需 nightly + aarch64-linux-android target + bpf-linker）
+cargo +nightly check -p yumi --target aarch64-linux-android
+
 # WebUI 开发
 cd webui && npm install && npm run dev
 
@@ -53,13 +56,16 @@ cd webui && npm install && npm run dev
 cd webui && npm run type-check
 ```
 
+- **本地 check 的环境依赖**：eBPF 编译用 `-Z build-std`（仅 nightly 支持），且 build.rs 会构建 yumi-ebpf，因此 `cargo check` 需要 nightly 工具链 + `aarch64-linux-android` target + 可用的 bpf-linker。yumi 为 Android/Linux 专属 crate，切勿用 Windows host 目标检查（netlink-sys/aya 无法在 Windows 编译）。bpf-linker 在 Windows 下为 `bpf-linker.exe`（build.rs 已按 `cfg!(windows)` 兼容）。
+- **yumi-ebpf 是 no_std/no_main 探针，独立 workspace**（根 `Cargo.toml` 的 members 只有 xtask，勿把 yumi-ebpf 加回）：只可用 bpfel 目标检查（`-Z build-std=core`），**禁止**在带 std 的目标（如 aarch64-linux-android 或 Windows host）下对它编译/检查——探针既无法用 std 目标编译（`unwinding panics are not supported without std`），test 剖面还会与 `#[panic_handler]` 冲突（`duplicate lang item panic_impl`）。根 build.rs 用 `current_dir=yumi-ebpf` 单独构建它。IDE（rust-analyzer）在根 workspace 下不会检查它。
+
 - 本地开发通常只做 `cargo check` / WebUI `type-check` 验证；完整产物由云端 CI（GitHub Actions）生成。
 - 不要随意执行 `cargo build`（需要 NDK 环境），优先静态检查。
 - 完整构建的隐藏依赖：`build.rs` 的 `ensure_bpf_linker` 依次复用「PATH 中已有 bpf-linker」→「OUT_DIR 缓存」→ `cargo install bpf-linker` 兜底。CI 通过 GitHub API 解析官方 release asset 直接下载静态链接 LLVM 的预编译二进制（bpf-linker 0.11 依赖 LLVM 21+，源码编译在 ubuntu runner 上不可行；cargo-binstall 的 fallback 也会回退到源码编译）。eBPF 的 release 编译在 build.rs 内用 `CARGO_PROFILE_RELEASE_OPT_LEVEL=2` 局部覆盖（新版 bpf-linker 内嵌 LLVM 已移除 `-Oz`/`-Os`，仅支持 `-O0~O3`，workspace 根的 `opt-level="z"` 会导致链接失败）。
 
 ## 代码约定
 
-1. **架构**：Monitor 线程组通过有界 mpsc 事件通道（`DaemonEvent`，`sync_channel` 容量 64，满时 send 阻塞形成背压）解耦数据采集与调度决策，新增监控/调度能力遵循此模式。前台 PID 由 `monitor/mod.rs` 的单一 `pid_watcher` 线程经 `tokio::sync::watch` 广播，FPS/CPU 监控共享消费，不要各自重复轮询。FPS 帧监控（`fps_monitor`）仅服务于 FAS 调频，FAS 禁用期间不启动（见 `mod.rs` 中注释块）。**调度器为双套架构**：默认 `scheduler/`（Yumi CLG）与 `chiri/`（Chiri 专用）二选一，main.rs 按 `common::is_chiri_soc()`（特定 SoC 列表命中）决定启动哪一套；两套互斥消费同一事件通道，Monitor 层共享。`CHIRI_SOC_HINTS` 在 common.rs 维护，新增机型只追加列表，不要绑定单一型号。
+1. **架构**：Monitor 线程组通过有界 mpsc 事件通道（`DaemonEvent`，`sync_channel` 容量 64，满时 send 阻塞形成背压）解耦数据采集与调度决策，新增监控/调度能力遵循此模式。前台 PID 由 `monitor/mod.rs` 的单一 `pid_watcher` 线程经 `tokio::sync::watch` 广播，FPS/CPU 监控共享消费，不要各自重复轮询。FPS 帧监控（`fps_monitor`）仅服务于 FAS 调频，FAS 禁用期间不启动（见 `mod.rs` 中注释块）。**调度器为双套架构**：默认 `scheduler/`（Yumi CLG）与 `chiri/`（Chiri 专用）二选一，main.rs 按 `common::is_chiri_soc()`（特定 SoC 列表命中）决定启动哪一套；两套互斥消费同一事件通道，Monitor 层共享。`CHIRI_SOC_HINTS` 在 common.rs 维护，新增机型只追加列表，不要绑定单一型号。**FAS 暂禁用期间的保留代码**（fps_monitor 整模块、`DaemonEvent` 的 `FrameUpdate`/`pid`/`foreground_max_util`、capacity 权重函数等）统一加 `#[allow(dead_code)]` 并注明"恢复 FAS 时启用"，**不要删除**——恢复时直接取消注释即可。
 2. **日志**：调试与排障优先使用 `debug!`（勿全部用 info 污染信息日志）；频率控制/帧处理等高频路径用 25-tick / 60-frame 周期摘要，状态变化（模式、PID、屏幕、attach、档位）即时打点。新增日志 key 必须同时补充 `module/config/i18n/zh.ftl` 与 `en.ftl`，key 命名 `模块-描述`。
 3. **配置**：运行时配置默认走 `module/config/config.yaml`（CLG/模式参数）与 `rules.yaml`（FAS/模式映射参数），支持热重载；新增配置项需同步更新反序列化结构体与默认值。配置由 main 启动时解析一次并以 `Arc<RwLock<Config>>` 共享给对应调度器（勿重复读取），热重载由该调度器的 config_watcher 覆写同一共享实例。两套调度各持自己的 Config 类型（`scheduler::config` 与 `chiri::config`）。**按 SoC 独立配置**：命中 `CHIRI_SOC_HINTS` 且存在 `config_{命中片段}.yaml` 时，经 `common::get_config_path()` 优先加载该独立文件，否则回退 `config.yaml`；所有加载/热重载入口（main.rs、两套 config_watcher）必须统一走 `get_config_path()`，勿硬编码路径。守护进程启动时把生效配置文件名写入 `active_config.txt`，WebUI 据此读写同一份文件。
 4. **i18n**：守护进程日志基于 Fluent（`module/config/i18n/en.ftl` / `zh.ftl`），WebUI 基于 `webui/src/i18n/locales/`；新增用户可见文案必须同时提供中英文。

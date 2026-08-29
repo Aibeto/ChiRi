@@ -1,0 +1,258 @@
+# ============================================================
+#  Yumi 配置模板示例 (example.yaml)
+#  本文件用于演示 config.yaml 的完整字段结构与各参数含义。
+#  复制后按需修改，重命名为 config.yaml 或 config_<SOC>.yaml 即可生效。
+#  调整参数后会被 config_watcher 热重载，无需重启守护进程。
+# ============================================================
+
+# ---------------------
+#  元数据信息
+# ---------------------
+meta:
+  # 配置名称，仅用于日志/展示，不参与运行时逻辑
+  name: "default_config"
+  # 配置作者，同上，仅供参考
+  author: "yuki"
+  # 日志语言：en / zh，切换后自动加载对应 .ftl 翻译文件
+  language: "zh"
+  # 日志级别：DEBUG / INFO / WARN / ERROR，热重载即时生效
+  loglevel: "INFO"
+
+# ---------------------
+#  功能总开关
+# ---------------------
+function:
+  # cpuidle governor 切换开关
+  # true  = 接管 cpuidle，按 CpuIdle.current_governor 写入 sysfs
+  # false = 跳过 cpuidle 设置
+  CpuIdleScalingGovernor: false
+  # IO 优化开关
+  # true  = 写入 I/O 调度器、预读、合并策略等参数到 sysfs
+  # false = 跳过 IO 优化
+  IOOptimization: true
+
+# ---------------------
+#  IO 优化参数
+# ---------------------
+IO_Settings:
+  # I/O 调度器名称，写入 /sys/block/*/queue/scheduler
+  # 常见值："none"（NVMe/UFS）、"mq-deadline"、"cfq"
+  # 空字符串 "" 表示不切换调度器
+  Scheduler: "none"
+  # 预读大小 (kB)，写入 /sys/block/*/queue/read_ahead_kb
+  # 顺序读场景可适当增大（256/512），随机读保持默认即可
+  # 默认值："128"
+  read_ahead_kb: "128"
+  # 请求合并策略，写入 /sys/block/*/queue/nomerges
+  # "0" = 不禁用合并（系统默认）
+  # "1" = 仅禁止简单合并
+  # "2" = 完全禁止合并（减少 CPU 开销，适合高速存储）
+  # 默认值："2"
+  nomerges: "2"
+  # IO 统计开关，写入 /sys/block/*/queue/iostats
+  # "0" = 关闭统计（减少开销）
+  # "1" = 开启统计（调试时使用）
+  # 默认值："0"
+  iostats: "0"
+
+# ---------------------
+#  CPU 空闲设置
+# ---------------------
+CpuIdle:
+  # cpuidle governor 名称，写入 /sys/devices/system/cpu/cpuidle/current_governor
+  # 常见值："menu"（交互设备默认）、"ladder"、"teo"
+  # 空字符串 "" 表示不切换 cpuidle governor（需 FunctionToggles
+  # 中 CpuIdleScalingGovernor 为 true 才生效）
+  current_governor: ""
+
+# ============================================================
+#  性能模式配置
+#
+#  Yumi 内置四档模式：powersave（省电）、balance（均衡）、
+#  performance（性能）、fast（极速），由用户通过命令切换。
+#  每档模式独立包含一组 cpu_load_governor 参数。
+#
+#  CLG (CpuLoadGovernor) 核心逻辑：
+#    每个 tick 采集各 cluster 的最大 util（归一化到 0.0~1.0），
+#    根据以下参数计算目标频率并写入 sysfs：
+#      - util >= up_threshold → 升频区间
+#      - util <= down_threshold → 降频区间
+#      - down_threshold < util < up_threshold → 滞回带（慢调）
+#
+#  以下以 "balance"（均衡模式）为例，每个字段都附带说明。
+#  powersave / performance / fast 结构完全相同，仅数值不同。
+# ============================================================
+
+# 省电模式 —— 偏向保守，延迟升频、积极降频，降低功耗
+powersave:
+  cpu_load_governor:
+    # 升频阈值 (0.0~1.0)
+    # 当 cluster 最大 util >= 此值时进入升频区间。
+    # 值越大越难触发升频，省电但响应慢。
+    # 约束：必须 > down_threshold
+    up_threshold: 0.85
+
+    # 降频阈值 (0.0~1.0)
+    # 当 util 跌破此值时进入降频区间。
+    # 值越小越难触发降频，性能维持更好但更耗电。
+    # 约束：必须 < up_threshold
+    down_threshold: 0.60
+
+    # 升频平滑系数 (0.0~1.0)
+    # 每 tick 目标性能向新值逼近的比例：
+    #   new_perf = current_perf + (target - current_perf) * smoothing_up
+    # 值越大升频越快（响应迅速），值越小越平滑（避免频率跳变）。
+    smoothing_up: 0.40
+
+    # 降频平滑系数 (0.0~1.0)
+    # 同上，控制降频速度。值越大降得越快。
+    smoothing_down: 0.50
+
+    # 降频速率限制 (tick 数)
+    # 必须连续多个 tick 都满足降频条件，才真正执行一次降频。
+    # 值越大降频越"谨慎"，防止负载短暂波动导致频繁降频。
+    down_rate_limit_ticks: 2
+
+    # 升频速率限制 (tick 数)
+    # 同上，控制升频前需要连续确认的 tick 数。
+    up_rate_limit_ticks: 2
+
+    # 性能余量因子 (>= 1.0，clamp 到 [1.0, 3.0])
+    # 当 util 达到 up_threshold 时，目标性能 = util * headroom_factor。
+    # 相当于给突发负载预留的频率余量。
+    # 值越大余量越大，响应越积极，但功耗越高。
+    headroom_factor: 1.10
+
+    # headroom 过渡带宽度 (0.0~1.0)
+    # 在 [up_threshold - headroom_ramp, up_threshold] 区间内，
+    # headroom 从 1.0 线性渐变到 headroom_factor。
+    # 避免到达 up_threshold 时性能突然阶跃，减少频率振荡。
+    headroom_ramp: 0.15
+
+    # 性能下限 (0.0~1.0)
+    # 目标性能永远不会低于此值，相当于频率下限。
+    # 值越高保底频率越高，卡顿越少但功耗越大。
+    # 约束：必须 <= perf_ceil
+    perf_floor: 0.10
+
+    # 性能上限 (0.0~1.0)
+    # 目标性能永远不会超过此值，相当于频率上限。
+    # 值为 1.0 表示允许跑到硬件最高频。
+    # 约束：必须 >= perf_floor
+    perf_ceil: 0.70
+
+    # 初始性能 (0.0~1.0)
+    # CLG 接管瞬间的初始性能值，避免从 0 缓慢爬升导致开机卡顿。
+    # 约束：必须在 [perf_floor, perf_ceil] 区间内
+    perf_init: 0.30
+
+    # 升频快速通道阈值 (0.0~1.0)
+    # 当 (target_perf - current_perf) 超过此值时，跳过平滑直接快速升频。
+    # 用于应对负载突增场景（如应用冷启动）。
+    up_jump_threshold: 0.35
+
+    # 低负载升频缩放系数 (0.0~1.0)
+    # 滞回带内（down_threshold < util < up_threshold）且负载趋势向上时，
+    # smoothing_up 会乘以 slow_up_scale 进行缩放，使升频更缓慢。
+    # 值越小升频越保守（更省电），值越大越接近正常升频速度。
+    slow_up_scale: 0.02
+
+    # 滞回带降频缩放系数 (0.0~1.0)
+    # 滞回带内降频时，smoothing_down 乘以 slow_down_scale 进行缩放。
+    # 防止在临界区间来回振荡，避免高频锁定在某个频率上反复跳动。
+    slow_down_scale: 0.5
+
+    # 极低负载阈值 (0.0~1.0)
+    # 当 util 低于此值时触发快速降频（绕过常规平滑逻辑）。
+    # 用于屏幕关闭或空闲时迅速拉低频率省电。
+    down_fast_threshold: 0.10
+
+    # 快速降频放大倍数 (>= 1.0，clamp 到 [1.0, 10.0])
+    # 触发快速降频时，smoothing_down 乘以该倍数。
+    # 值越大空闲时降频越快，越省电。
+    down_fast_mult: 2.5
+
+    # 尖峰抑制阈值 (0.0~1.0)
+    # 单 tick 内 util 跳升幅度超过此值时，认为是瞬时尖峰而非真实负载。
+    # 增量部分会乘以 spike_decay 进行衰减，防止孤立尖峰瞬间拉满频率。
+    spike_jump_threshold: 0.35
+
+    # 尖峰衰减比例 (0.0~1.0)
+    # 尖峰增量的保留比例：0.0 = 完全抑制（尖峰无效），1.0 = 不抑制。
+    # 值越小对尖峰的抑制越强，省电但可能影响短时突发响应。
+    spike_decay: 0.30
+
+# 均衡模式 —— 在功耗和性能间取平衡
+balance:
+  cpu_load_governor:
+    up_threshold: 0.80
+    down_threshold: 0.50
+    smoothing_up: 0.60
+    smoothing_down: 0.30
+    down_rate_limit_ticks: 3
+    up_rate_limit_ticks: 2
+    headroom_factor: 1.25
+    headroom_ramp: 0.15
+    perf_floor: 0.15
+    perf_ceil: 1.0
+    perf_init: 0.50
+    up_jump_threshold: 0.35
+    slow_up_scale: 0.02
+    slow_down_scale: 0.5
+    down_fast_threshold: 0.10
+    down_fast_mult: 2.5
+    spike_jump_threshold: 0.35
+    spike_decay: 0.30
+
+# 性能模式 —— 偏向响应，快速升频、延迟降频，性能释放更激进
+performance:
+  cpu_load_governor:
+    up_threshold: 0.65
+    down_threshold: 0.40
+    smoothing_up: 0.80
+    smoothing_down: 0.20
+    down_rate_limit_ticks: 5
+    up_rate_limit_ticks: 1
+    headroom_factor: 1.40
+    headroom_ramp: 0.15
+    perf_floor: 0.35
+    perf_ceil: 1.0
+    perf_init: 0.60
+    up_jump_threshold: 0.35
+    slow_up_scale: 0.02
+    slow_down_scale: 0.5
+    down_fast_threshold: 0.10
+    down_fast_mult: 2.5
+    spike_jump_threshold: 0.35
+    spike_decay: 0.30
+
+# 极速模式 —— 几乎锁在最高频，用于游戏/跑分等极致性能场景
+fast:
+  cpu_load_governor:
+    # 极低阈值 = 几乎任何负载都触发升频
+    up_threshold: 0.01
+    # 同样极低，极少触发降频
+    down_threshold: 0.01
+    # 满速升频（1.0 = 每 tick 全量逼近目标）
+    smoothing_up: 1.0
+    # 极慢降频（0.01 ≈ 几乎不降）
+    smoothing_down: 0.01
+    # 降频需要连续 10 tick 确认，极度保守
+    down_rate_limit_ticks: 10
+    # 升频立即生效（1 tick 确认）
+    up_rate_limit_ticks: 1
+    # 2 倍性能余量，即使满载也尽量撑住
+    headroom_factor: 2.0
+    headroom_ramp: 0.15
+    # 保底 100% 性能，不允许降频
+    perf_floor: 1.0
+    perf_ceil: 1.0
+    # 初始即满频
+    perf_init: 1.0
+    up_jump_threshold: 0.35
+    slow_up_scale: 0.02
+    slow_down_scale: 0.5
+    down_fast_threshold: 0.10
+    down_fast_mult: 2.5
+    spike_jump_threshold: 0.35
+    spike_decay: 0.30

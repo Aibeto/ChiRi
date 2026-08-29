@@ -15,6 +15,10 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
+// FAS 暂禁用期间本模块整体未接线（start_fps_loop 未被调用），代码为恢复 FAS 时保留，
+// 故允许 dead_code，避免编译警告噪音。
+#![allow(dead_code)]
+
 use std::collections::{HashMap, VecDeque};
 use std::mem::size_of;
 use std::num::NonZeroU32;

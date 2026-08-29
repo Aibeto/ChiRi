@@ -2,10 +2,15 @@ use std::process::Command;
 use std::env;
 use std::path::{Path, PathBuf};
 
+/// bpf-linker 可执行文件名：Windows 下带 .exe，其余平台无扩展名
+fn bpf_linker_name() -> &'static str {
+    if cfg!(windows) { "bpf-linker.exe" } else { "bpf-linker" }
+}
+
 /// 检查 bpf-linker 是否已存在于 PATH（CI 预装 / 系统已装则跳过安装）
 fn bpf_linker_on_path() -> bool {
     env::var_os("PATH")
-        .map(|p| env::split_paths(&p).any(|d| d.join("bpf-linker").is_file()))
+        .map(|p| env::split_paths(&p).any(|d| d.join(bpf_linker_name()).is_file()))
         .unwrap_or(false)
 }
 
@@ -14,7 +19,7 @@ fn bpf_linker_on_path() -> bool {
 /// install 静默失败后 yumi-ebpf 链接阶段才会暴露 "linker bpf-linker not found"。
 fn ensure_bpf_linker(tools_dir: &Path) -> Result<PathBuf, Box<dyn std::error::Error>> {
     let tools_bin = tools_dir.join("bin");
-    let linker = tools_bin.join("bpf-linker");
+    let linker = tools_bin.join(bpf_linker_name());
     // 1) PATH 中已有 bpf-linker（如 CI 已用 cargo-binstall 安装预编译版）直接复用
     if bpf_linker_on_path() {
         println!("cargo:warning=✅ bpf-linker 已存在于 PATH，跳过安装");
@@ -71,6 +76,7 @@ fn build_ebpf() -> Result<PathBuf, Box<dyn std::error::Error>> {
     let linker_bin = ensure_bpf_linker(&tools_dir)?;
 
     // 2. 编译 BPF 程序（在 yumi-ebpf 目录中，避免 workspace 干扰）
+    #[allow(unused_mut)] // 仅 release 分支 push("--release")，debug 构建下无需可变
     let mut ebpf_args = vec![
         "--target", "bpfel-unknown-none",
         "-Z", "build-std=core",

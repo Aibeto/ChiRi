@@ -20,6 +20,9 @@ use std::env;
 use std::path::PathBuf;
 
 /// 守护进程全局事件总线
+/// FAS 暂禁用：`FrameUpdate` 变体暂无生产者、`ModeChange.pid` 与 `SystemLoadUpdate.foreground_max_util`
+/// 暂无消费者，均为恢复 FAS 时保留，故允许 dead_code。
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub enum DaemonEvent {
     /// 低频事件：前台应用切换或环境温度变化引起的模式改变

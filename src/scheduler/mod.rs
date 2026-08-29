@@ -79,6 +79,8 @@ fn read_boost_frequencies(pid: i32) -> Vec<u32> {
 }
 
 /// 通过 sysfs 探测指定 policy 的 capacity 值
+/// 仅供 FAS 的 capacity 权重计算使用，FAS 禁用期间暂无调用，恢复时启用。
+#[allow(dead_code)]
 pub(super) fn probe_policy_capacity(policy_id: i32) -> Option<u32> {
     let related_str = fs::read_to_string(
         format!("/sys/devices/system/cpu/cpufreq/policy{}/related_cpus", policy_id))
@@ -91,6 +93,8 @@ pub(super) fn probe_policy_capacity(policy_id: i32) -> Option<u32> {
 }
 
 /// 根据 CPU capacity 自动计算每个 cluster 的权重
+/// 仅供 FAS 使用，FAS 禁用期间暂无调用，恢复时启用。
+#[allow(dead_code)]
 pub(super) fn auto_compute_capacity_weights(policies: &[CpuPolicy]) -> Option<Vec<(i32, f32)>> {
     let caps: Vec<(i32, u32)> = policies.iter()
         .filter(|p| p.id != -1)

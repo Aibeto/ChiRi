@@ -5,5 +5,17 @@ edition = "2021"
 license = "GPL-3.0-or-later"
 description = "eBPF probes for yumi — frame (uprobe) + CPU load (tracepoint)"
 
+# 独立 workspace：不隶属于根 workspace（no_std 探针无法用带 std 目标检查），
+# 由根 build.rs 在本目录用 `-Z build-std=core` 单独构建（目标见 .cargo/config.toml）。
+[workspace]
+
+# 探针是 no_std/no_main：test 剖面会链接 std，与 #[panic_handler] 冲突
+# （duplicate lang item panic_impl）。显式声明 bin 并关闭 test 目标，
+# 避免 cargo test / --all-targets 构建测试 harness。
+[[bin]]
+name = "yumi-ebpf"
+path = "src/main.rs"
+test = false
+
 [dependencies]
 aya-ebpf = "0.2.1"

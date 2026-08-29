@@ -1,5 +1,8 @@
 [workspace]
-members = ["xtask", "yumi-ebpf"]
+# 注意：yumi-ebpf 是 bpfel-unknown-none 的 no_std 探针，无法用带 std 的目标（如
+# aarch64-linux-android 或 Windows host）编译/检查，故从根 workspace 摘除，
+# 作为独立 workspace 由 build.rs 用 `-Z build-std` 单独构建。勿把它加回 members。
+members = ["xtask"]
 
 [package]
 name = "yumi"
