@@ -10,8 +10,9 @@ declare global {
   }
 }
 
-const MODULE_BASE_PATH = "/data/adb/modules/yumi"; 
+const MODULE_BASE_PATH = "/data/adb/modules/chiri"; 
 const PATHS = {
+  MODULE: MODULE_BASE_PATH,
   RULES_YAML: `${MODULE_BASE_PATH}/rules.yaml`,          
   CONFIG_YAML: `${MODULE_BASE_PATH}/config/config.yaml`, 
   ACTIVE_CONFIG: `${MODULE_BASE_PATH}/active_config.txt`,
@@ -77,6 +78,16 @@ const RealBridge = {
   async saveRulesConfig(config: any): Promise<void> { await this.writeFile(PATHS.RULES_YAML, yaml.dump(config)); },
   async getMainConfig(): Promise<any> { try { return yaml.load(await this.readFile(await resolveConfigPath())) || {}; } catch (e) { return {}; } },
   async saveMainConfig(config: any): Promise<void> { await this.writeFile(await resolveConfigPath(), yaml.dump(config)); toast(i18n.global.t('core_config_saved') as string); },
+
+  // 手动热重启守护进程：杀掉旧进程后用与 service.sh 相同的循环包装拉起新二进制，
+  // 保留崩溃自动重启语义；模块更新后无需重启设备即可让新代码生效。
+  async restartDaemon(): Promise<void> {
+    const { errno } = await exec(
+      `killall -9 yumi 2>/dev/null; sleep 1; ` +
+      `(nohup sh -c 'while :; do "$1" || exit 0; sleep 3; done' sh "${PATHS.MODULE}/core/bin/yumi" >/dev/null 2>&1 &)`
+    );
+    if (errno !== 0) throw new Error(i18n.global.t('restart_failed') as string);
+  },
 
   async getCurrentMode(): Promise<string> { try { return (await this.readFile(PATHS.CURRENT_MODE)).trim(); } catch (e) { return 'balance'; } },
 

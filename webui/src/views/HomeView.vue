@@ -1,8 +1,10 @@
 <script setup lang="ts">
-import { onMounted, computed } from 'vue';
+import { onMounted, computed, ref } from 'vue';
 import { useSchedulerStore } from '@/stores/scheduler';
 import { useI18n } from 'vue-i18n'; 
+import { showConfirmDialog } from 'vant'; // 原生确认框
 import { toast } from '@/kernelsu'; // 引入原生 ksu toast 替代 Vant
+import { Bridge } from '@/utils/bridge';
 
 const store = useSchedulerStore();
 const { t, locale } = useI18n(); 
@@ -42,6 +44,31 @@ const copyQQGroup = async () => {
     // 兼容性降级处理
     toast(t('qq_copy_fallback', { qq: '1036909137' }));
   }
+};
+
+// 手动热重启守护进程：确认后重启，用于模块更新后不重启设备即生效
+const restarting = ref(false);
+const handleRestart = async () => {
+  if (restarting.value) return;
+  try {
+    await showConfirmDialog({
+      title: t('restart_title'),
+      message: t('restart_confirm'),
+      confirmButtonText: t('restart_confirm_ok'),
+      cancelButtonText: t('cancel')
+    });
+  } catch (e) {
+    return; // 用户取消
+  }
+  restarting.value = true;
+  try {
+    await Bridge.restartDaemon();
+    toast(t('restart_success'));
+  } catch (e) {
+    toast(t('restart_failed'));
+  }
+  // 等待新守护进程启动后刷新状态/模式
+  setTimeout(async () => { await store.initData(); restarting.value = false; }, 2000);
 };
 </script>
 
@@ -94,7 +121,7 @@ const copyQQGroup = async () => {
       </van-grid-item>
     </van-grid>
     
-    <div class="section-title">{{ t('about') }}</div>
+    <!-- <div class="section-title">{{ t('about') }}</div>
     <div class="about-card">
       <van-cell-group inset :border="false">
         <van-cell 
@@ -119,14 +146,15 @@ const copyQQGroup = async () => {
           url="https://github.com/imacte/yumi" 
         />
       </van-cell-group>
-    </div>
+    </div> -->
 
     <div class="section-title">{{ t('more_features') }}</div>
     <div class="grid-menu">
-        <van-grid clickable :column-num="3" :gutter="12" :border="false">
+        <van-grid clickable :column-num="4" :gutter="12" :border="false">
             <van-grid-item icon="apps-o" :text="t('app_management')" to="/apps" />
             <van-grid-item icon="setting-o" :text="t('detailed_config')" to="/config" />
             <van-grid-item icon="notes-o" :text="t('view_log')" to="/log" />
+            <van-grid-item :icon="restarting ? 'loading' : 'replay'" :text="t('restart_daemon')" @click="handleRestart" />
         </van-grid>
     </div>
   </div>

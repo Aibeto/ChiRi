@@ -107,6 +107,7 @@ export const MockBridge = {
   },
   async getMainConfig(): Promise<any> { await delay(300); return JSON.parse(JSON.stringify(mockConfig)); },
   async saveMainConfig(config: any): Promise<void> { await delay(400); Object.assign(mockConfig, config); },
+  async restartDaemon(): Promise<void> { await delay(300); },
   async getDaemonLog(): Promise<string> {
     await delay(300);
     return `[2026-02-23 02:31:07] [INFO] [yumi] daemon is running smoothly.\n[2026-02-23 02:48:18] [INFO] [Scheduler] Active mode: ${simulatedModeTxt}`;

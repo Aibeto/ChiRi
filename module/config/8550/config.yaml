@@ -86,7 +86,7 @@ balance:
     up_rate_limit_ticks: 1
     headroom_factor: 1.25
     headroom_ramp: 0.2
-    perf_floor: 0.25
+    perf_floor: 0
     perf_ceil: 0.8
     perf_init: 1.0
     up_jump_threshold: 0.2

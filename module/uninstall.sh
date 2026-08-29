@@ -30,4 +30,4 @@ if pm list packages | grep -q "$PACKAGE_NAME"; then
 fi
 
 
-echo "卸载yumi调度成功完成 请重启手机"
+echo "卸载ChiRi调度成功完成 请重启手机"

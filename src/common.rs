@@ -79,16 +79,43 @@ fn read_first_line(path: &str) -> String {
 /// 例：SM8550（骁龙 8 Gen 2）含 "8550"
 const CHIRI_SOC_HINTS: &[&str] = &["8550"];
 
-/// 型号片段是否命中任一特定处理器
+/// 读取单个 Android 系统属性（getprop key），失败/为空返回空串
+fn getprop(key: &str) -> String {
+    std::process::Command::new("getprop")
+        .arg(key)
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_default()
+}
+
+/// 型号片段是否命中任一特定处理器。
+///
+/// 从多个权威来源取硬件标识统一比较，避免某台机型只暴露其中一两个来源而漏检：
+///   1. /sys/devices/soc0/machine   —— 高通直接暴露 SoC 型号（如 "SM8550"）
+///   2. /sys/devices/soc0/plat_name —— 部分内核补充的平台名
+///   3. getprop ro.soc.model        —— Android 12+ 厂商填写的 SoC 型号（如 "SM8550"）
+///   4. getprop ro.board.platform / ro.product.board / ro.hardware —— 平台代号兜底
+///   5. /proc/cpuinfo               —— 通用兜底（Hardware / model name 行）
+///
+/// 结果统一转小写后做子串匹配，兼容 "SM8550" / "sm8550" / "8550"。
 fn soc_hint_matches(hints: &[&str]) -> bool {
-    // 来源1：/sys/devices/soc0/machine（高通直接暴露型号，如 "SM8550"）
-    let machine = read_first_line("/sys/devices/soc0/machine");
-    if hints.iter().any(|h| machine.contains(h)) {
-        return true;
-    }
-    // 来源2：/proc/cpuinfo（Hardware / model name 行可能含型号）
-    let cpuinfo = std::fs::read_to_string("/proc/cpuinfo").unwrap_or_default();
-    hints.iter().any(|h| cpuinfo.contains(h))
+    let haystacks: Vec<String> = vec![
+        read_first_line("/sys/devices/soc0/machine"),
+        read_first_line("/sys/devices/soc0/plat_name"),
+        getprop("ro.soc.model"),
+        getprop("ro.board.platform"),
+        getprop("ro.product.board"),
+        getprop("ro.hardware"),
+        std::fs::read_to_string("/proc/cpuinfo").unwrap_or_default(),
+    ];
+    let haystack = haystacks.join("\n").to_lowercase();
+    hints.iter().any(|h| {
+        let hl = h.to_lowercase();
+        // 片段至少 3 个字符，避免过短片段在高频硬件标识中误匹配
+        hl.len() >= 3 && haystack.contains(&hl)
+    })
 }
 
 /// 是否应启用 Chiri 专用调度器（检测到列表中的特定处理器时为 true）。

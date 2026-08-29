@@ -1,4 +1,4 @@
-name: Build Yumi
+name: Build ChiRi
 
 # 触发条件：当推送到 main 分支，或者发布 tag 时触发。
 # workflow_dispatch 允许在 GitHub 网页端手动点击运行。

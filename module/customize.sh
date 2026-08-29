@@ -28,7 +28,7 @@ MSG_WELCOME="Welcome to Yumi Scheduler!"
 
 if echo "$CURRENT_LOCALE" | $BUSYBOX grep -qi "zh"; then
   LANG_CODE="zh"
-  MSG_WELCOME="欢迎使用 Yumi 调度！"
+  MSG_WELCOME="欢迎使用 ChiRi 调度！"
 fi
 
 # --- 仅输出欢迎信息 ---
