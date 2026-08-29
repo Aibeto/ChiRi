@@ -24,11 +24,11 @@ if [ -z "$CURRENT_LOCALE" ]; then
 fi
 
 LANG_CODE="en"
-MSG_WELCOME="Welcome to Yumi Scheduler!"
+MSG_WELCOME="Welcome to ChiRi Scheduler! (Based on Yumi Scheduler)"
 
 if echo "$CURRENT_LOCALE" | $BUSYBOX grep -qi "zh"; then
   LANG_CODE="zh"
-  MSG_WELCOME="欢迎使用 ChiRi 调度！"
+  MSG_WELCOME="欢迎使用 ChiRi 调度！（Based on Yumi Scheduler）"
 fi
 
 # --- 仅输出欢迎信息 ---

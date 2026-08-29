@@ -85,6 +85,7 @@ scheduler-apply-failed = [Scheduler] 应用设置失败: { $error }
 scheduler-channel-closed = [Scheduler] 通道已关闭！线程退出
 scheduler-ipc-panic = [Scheduler] IPC 线程发生 panic，正在释放 CPU 控制权。
 scheduler-doze-enable = [Scheduler] 息屏: 启用极致深度睡眠模式 (限制 CPU 最高性能)。
+scheduler-doze-special-keep = [Scheduler] 息屏: 特调模式保持接管，不切换 CLG doze。
 scheduler-doze-restore = [Scheduler] 亮屏: 恢复之前的性能限制。
 scheduler-clg-init = [Scheduler] CPU 负载调频器: 在启动时初始化 (模式={ $mode })
 scheduler-event-screen = [Scheduler] 收到屏幕状态事件: on={ $on } (此前 last={ $last })
@@ -123,6 +124,15 @@ clg-writer-invalid = [CLG] P{ $pid } sysfs 写入器无效 (max_valid: { $max_va
 clg-freq-set = [CLG] P{ $pid } 频率调整: { $old_khz }MHz -> { $new_khz }MHz
 clg-freq-write-failed-cached = [CLG] P{ $pid } 频率写入失败，保持缓存值 { $cached_khz }MHz (目标 { $target_khz }MHz)
 clg-watchdog-release = [CLG] 看门狗: 已 { $secs } 秒未收到负载事件，eBPF 负载源疑似失效，已释放 CPU 控制权恢复系统默认调频
+
+# --- AKMode（明日方舟特调） ---
+akmode-init = [AKMode] 明日方舟特调接管 | 起始模式={ $mode }
+akmode-activated = [AKMode] 明日方舟特调已激活（不干预频率，仅档位判定）
+akmode-deactivated = [AKMode] 明日方舟特调已停用
+akmode-config-reloaded = [AKMode] 特调配置已热重载 | 等待={ $wait }ms
+akmode-tier-change = [AKMode] 档位切换: { $old } -> { $new }
+akmode-tick-log = [AKMode] 模式={ $mode } 升档={ $up } 降档={ $down } 忙/闲: 小核={ $l_over }/{ $l_under } 大核={ $b_over }/{ $b_under } 超大核={ $p_over }/{ $p_under }
+akmode-watchdog-release = [AKMode] 看门狗: 已 { $secs } 秒未收到负载事件，eBPF 负载源疑似失效，已复位明日方舟特调档位状态
 
 # --- FAS ---
 fas-freq-mismatch = [FAS] P{ $pid }: 频率不匹配！预期 { $min }-{ $max }，实际 { $actual } -> 正在紧急重写

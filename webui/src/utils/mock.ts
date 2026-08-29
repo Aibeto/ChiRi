@@ -50,7 +50,7 @@ const mockApps = ['com.android.chrome', 'com.tencent.mm', 'com.miHoYo.GenshinImp
 
 // 内部特调白名单 mock：开发模式下预览“特调”标签与专属选项用
 const mockSpecialTuned: Record<string, { modes: string[]; fallback: string }> = {
-  'com.hypergryph.arknights': { modes: ['325mode', '799mode'], fallback: '325mode' }
+  'com.hypergryph.arknights': { modes: ['akmode'], fallback: 'akmode' }
 };
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 let simulatedModeTxt = "balance";

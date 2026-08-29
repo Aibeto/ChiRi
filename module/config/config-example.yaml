@@ -82,7 +82,7 @@ CpuIdle:
 #  以下为一组完整模板，复制后将 key 替换为对应模式名即可。
 # ============================================================
 
-# ⬇ 将此处替换为模式名：scenemode / balance / performance / fast
+# ⬇ 将此处替换为模式名：powersave / balance / performance / fast
 modename:
   cpu_load_governor:
     # 升频阈值 (0.0~1.0)
@@ -147,7 +147,7 @@ modename:
     perf_init: 0.30
 
     # 升频快速通道阈值 (0.0~1.0)
-    # 当 (target_perf - current_perf) 超过此值时，跳过平滑直接快速升频。
+    # 当 target_perf 超过 current_perf 的幅度大于此值时，直接快速升频。
     # 用于应对负载突增场景（如应用冷启动）。
     up_jump_threshold: 0.35
 

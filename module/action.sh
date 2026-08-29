@@ -4,9 +4,9 @@
 #
 
 # 1. 等待系统启动完成
-until [ "$(getprop sys.boot_completed)" = "1" ]; do
-  sleep 1
-done
+# until [ "$(getprop sys.boot_completed)" = "1" ]; do
+#   sleep 1
+# done
 
 # 2. 定义路径
 [ -z "$MODDIR" ] && MODDIR=${0%/*}
@@ -19,11 +19,11 @@ LOG_FILE="$LOG_DIR/service.log"
 # 确保日志目录存在
 mkdir -p "$LOG_DIR"
 
-# 禁用 OPPO/OnePlus/Realme 的 Oiface（已注释）
-if [ "$(getprop persist.sys.oiface.enable)" = "1" ]; then
-  setprop persist.sys.oiface.enable 0
-  echo "$(date): Oiface disabled." >> "$LOG_FILE"
-fi
+# 禁用 OPPO/OnePlus/Realme 的 Oiface
+# if [ "$(getprop persist.sys.oiface.enable)" = "1" ]; then
+#   setprop persist.sys.oiface.enable 0
+#   echo "$(date): Oiface disabled." >> "$LOG_FILE"
+# fi
 
 # 禁用小米的 Joyose 服务（已注释）
 # PACKAGE_NAME="com.xiaomi.joyose"
@@ -63,3 +63,6 @@ nohup sh -c '
 
 # 方式 B: 调试模式 (如果启动不起来，用这个看报错，输出到 logs/boot_error.log)
 # nohup sh -c 'while :; do "$1" || exit 0; sleep 3; done' sh "$DAEMON_PATH" > "$LOG_DIR/boot_error.log" 2>&1 &
+
+# 打印启动通知
+ui_print "daemon started."

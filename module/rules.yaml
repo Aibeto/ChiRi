@@ -1,6 +1,6 @@
 yumi_scheduler: true
 dynamic_enabled: true
-global_mode: "powersave"
+global_mode: "balance"
 
 # ════════════════════════════════════════════════════════════════
 #  FAS（帧感知调度）暂禁用：功能存在 bug，需关闭调试，故本文件中的

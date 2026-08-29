@@ -52,6 +52,7 @@ pub mod scheduler;
 // 恢复时：取消下行注释，并恢复下方所有 `FAS`/`fas_controller` 相关调用。
 // pub mod fas;
 pub mod cpu_load_governor;
+pub mod akmode;
 
 use crate::i18n::{t, load_language, t_with_args};
 use crate::fluent_args; 
@@ -231,6 +232,8 @@ pub fn start_scheduler_thread(
             
             // let mut fas_controller = crate::scheduler::fas::FasController::new(); // FAS 暂禁用
             let mut cpu_governor = crate::chiri::cpu_load_governor::CpuLoadGovernor::new();
+            // 明日方舟特调（akmode）：独立于 CLG 的 4 档齿轮调度器，前台为白名单应用时接管
+            let mut ak_governor = crate::chiri::akmode::AkmodeGovernor::new();
 
             // ==== FAS 暂禁用：以下变量仅服务于 FAS 调度，暂注释 ====
             // let rules_path = crate::monitor::config::get_rules_path();
@@ -256,6 +259,21 @@ pub fn start_scheduler_thread(
                 })
             };
 
+            // 特调起始档从 rules.yaml 识别：明日方舟 app_modes > global_mode，
+            // 换算成四档（powersave=1..fast=4），配了普通模式就按对应档起步
+            let get_ak_initial_tier = || -> u32 {
+                let rules = crate::utils::read_config::<crate::monitor::config::RulesConfig, _>(
+                    crate::monitor::config::get_rules_path(),
+                )
+                .unwrap_or_default();
+                let mode = rules
+                    .app_modes
+                    .get("com.hypergryph.arknights")
+                    .cloned()
+                    .unwrap_or(rules.global_mode);
+                crate::chiri::config::mode_to_tier(&mode)
+            };
+
             // 启动时初始化
             {
                 let current_mode = mode_clone.lock().unwrap().clone();
@@ -278,17 +296,30 @@ pub fn start_scheduler_thread(
                 let msg = match rx.recv_timeout(CLG_STALE_POLL) {
                     Ok(msg) => msg,
                     Err(mpsc::RecvTimeoutError::Timeout) => {
-                        // eBPF 负载源失效自愈：超过 CLG_STALE_MAX 无负载事件 → 释放 CLG，
-                        // 回滚系统原生调频，防止 CPU 永久锁频（下次 ModeChange/配置事件会重新接管）
-                        if cpu_governor.is_active() && last_load_event.elapsed() >= CLG_STALE_MAX {
-                            log::error!(
-                                "{}",
-                                t_with_args(
-                                    "clg-watchdog-release",
-                                    &fluent_args!("secs" => last_load_event.elapsed().as_secs().to_string())
-                                )
-                            );
-                            cpu_governor.release();
+                        // eBPF 负载源失效自愈：超过 CLG_STALE_MAX 无负载事件 → 释放当前接管的
+                        // 调度器（CLG 或 akmode），回滚系统原生调频，防止 CPU 永久锁频
+                        // （下次 ModeChange/配置事件会重新接管）
+                        if last_load_event.elapsed() >= CLG_STALE_MAX {
+                            if ak_governor.is_active() {
+                                log::error!(
+                                    "{}",
+                                    t_with_args(
+                                        "akmode-watchdog-release",
+                                        &fluent_args!("secs" => last_load_event.elapsed().as_secs().to_string())
+                                    )
+                                );
+                                ak_governor.release();
+                            }
+                            if cpu_governor.is_active() {
+                                log::error!(
+                                    "{}",
+                                    t_with_args(
+                                        "clg-watchdog-release",
+                                        &fluent_args!("secs" => last_load_event.elapsed().as_secs().to_string())
+                                    )
+                                );
+                                cpu_governor.release();
+                            }
                         }
                         continue;
                     }
@@ -316,23 +347,38 @@ pub fn start_scheduler_thread(
                             //     fas_suspended_package.clear();
                             // }
 
-                            // 强行让 CLG 接管，并动态生成一个极致省电配置
-                            let config_lock = config_clone.read().unwrap();
-                            let mut doze_cfg = get_clg_cfg(&config_lock, "powersave"); 
-                            doze_cfg.enabled = true;
-                            doze_cfg.perf_floor = 0.0;
-                            doze_cfg.perf_ceil = doze_cfg.perf_ceil.min(0.40); // 锁死天花板最高只给 40% 性能
-                            doze_cfg.smoothing_up = 0.10;           // 升频极其迟钝
-                            doze_cfg.smoothing_down = 1.0;          // 瞬间降频
-                            
-                            cpu_governor.init_policies(&doze_cfg);
+                            // 特调模式下息屏保持 akmode 接管，不切换到 CLG doze：
+                            // 特调为游戏专属锁频策略，息屏后用户预期快速恢复到同一状态，
+                            // 避免 release + 亮屏 re-init 的频率跳变和延迟。
+                            if crate::common::is_special_mode(&current_mode) {
+                                // akmode 继续运行，CLG 保持释放状态
+                                log::info!("{}", t("scheduler-doze-special-keep"));
+                            } else {
+                                // 非特调模式：交回 CLG 处理深度睡眠
+                                ak_governor.release();
+
+                                // 强行让 CLG 接管，并动态生成一个极致省电配置
+                                let config_lock = config_clone.read().unwrap();
+                                let mut doze_cfg = get_clg_cfg(&config_lock, "powersave"); 
+                                doze_cfg.enabled = true;
+                                doze_cfg.perf_floor = 0.0;
+                                doze_cfg.perf_ceil = doze_cfg.perf_ceil.min(0.40); // 锁死天花板最高只给 40% 性能
+                                doze_cfg.smoothing_up = 0.10;           // 升频极其迟钝
+                                doze_cfg.smoothing_down = 1.0;          // 瞬间降频
+                                
+                                cpu_governor.init_policies(&doze_cfg);
+                            }
                         } else {
                             log::info!("{}", t("scheduler-doze-restore"));
                             
                             let config_lock = config_clone.read().unwrap();
-                            let clg_cfg = get_clg_cfg(&config_lock, &current_mode);
                             
-                            if current_mode != "fas" {
+                            if crate::common::is_special_mode(&current_mode) {
+                                // 亮屏恢复特调模式：akmode 息屏期间未释放，保持接管即可。
+                                // 配置热重载已由 ConfigReload 事件处理，此处无需额外操作。
+                            } else if current_mode != "fas" {
+                                ak_governor.release();
+                                let clg_cfg = get_clg_cfg(&config_lock, &current_mode);
                                 if clg_cfg.enabled {
                                     // 息屏 doze 期间 CLG 仍持有 writer，热切换配置即可
                                     if cpu_governor.is_active() { cpu_governor.reload_config(&clg_cfg); } 
@@ -413,16 +459,27 @@ pub fn start_scheduler_thread(
                                 //     fas_suspended_package.clear();
                                 // }
 
-                                // 仅在亮屏时处理 CLG。如果息屏，Doze 配置仍在生效，这里不能覆盖它
+                                // 仅在亮屏时处理调度接管。如果息屏，Doze 配置仍在生效，这里不能覆盖它
                                 if is_screen_on {
                                     let config_lock = config_clone.read().unwrap();
-                                    let clg_cfg = get_clg_cfg(&config_lock, &mode);
-                                    if clg_cfg.enabled {
-                                        // CLG 已激活时热切换配置，避免同模式反复切换全量重建
-                                        if cpu_governor.is_active() { cpu_governor.reload_config(&clg_cfg); }
-                                        else { cpu_governor.init_policies(&clg_cfg); }
-                                    } else {
+                                    if crate::common::is_special_mode(&mode) {
+                                        // 进入特调模式：停止 CLG，改由 akmode 独立接管。
+                                        // 起始档从 rules.yaml 的生效模式识别（档位与全局统一）
                                         cpu_governor.release();
+                                        let ak_cfg = config_lock.get_akmode().clone();
+                                        let initial_tier = get_ak_initial_tier();
+                                        ak_governor.init_policies(&ak_cfg, initial_tier);
+                                    } else {
+                                        // 退出特调模式：停止 akmode，交回 CLG 接管
+                                        ak_governor.release();
+                                        let clg_cfg = get_clg_cfg(&config_lock, &mode);
+                                        if clg_cfg.enabled {
+                                            // CLG 已激活时热切换配置，避免同模式反复切换全量重建
+                                            if cpu_governor.is_active() { cpu_governor.reload_config(&clg_cfg); }
+                                            else { cpu_governor.init_policies(&clg_cfg); }
+                                        } else {
+                                            cpu_governor.release();
+                                        }
                                     }
                                 }
                             }
@@ -446,8 +503,11 @@ pub fn start_scheduler_thread(
                         //     fas_controller.update_cpu_util(foreground_max_util);
                         //     fas_controller.update_core_utils(&core_utils);
                         // }
-                        // 如果 CLG 处于活动状态（包含日常模式或息屏 Doze 模式），全权投喂
-                        if cpu_governor.is_active() {
+                        // 特调（akmode）优先：前台为白名单应用时全权投喂 akmode 调度器；
+                        // 否则若 CLG 处于活动状态（日常模式或息屏 Doze），投喂 CLG。
+                        if ak_governor.is_active() {
+                            ak_governor.on_load_update(&core_utils);
+                        } else if cpu_governor.is_active() {
                             cpu_governor.on_load_update(&core_utils);
                         }
                     },
@@ -492,12 +552,23 @@ pub fn start_scheduler_thread(
                         // } else 
                         if is_screen_on { // 息屏时不要用新配置覆盖 Doze
                             let config_lock = config_clone.read().unwrap();
-                            let clg_cfg = get_clg_cfg(&config_lock, &current_mode);
-                            if clg_cfg.enabled {
-                                if cpu_governor.is_active() { cpu_governor.reload_config(&clg_cfg); } 
-                                else { cpu_governor.init_policies(&clg_cfg); }
-                            } else if cpu_governor.is_active() {
-                                cpu_governor.release();
+                            if crate::common::is_special_mode(&current_mode) {
+                                // 特调模式：重载 akmode 配置
+                                let ak_cfg = config_lock.get_akmode().clone();
+                                if ak_governor.is_active() { ak_governor.reload_config(&ak_cfg); }
+                                else {
+                                    let initial_tier = get_ak_initial_tier();
+                                    ak_governor.init_policies(&ak_cfg, initial_tier);
+                                }
+                            } else {
+                                ak_governor.release();
+                                let clg_cfg = get_clg_cfg(&config_lock, &current_mode);
+                                if clg_cfg.enabled {
+                                    if cpu_governor.is_active() { cpu_governor.reload_config(&clg_cfg); } 
+                                    else { cpu_governor.init_policies(&clg_cfg); }
+                                } else if cpu_governor.is_active() {
+                                    cpu_governor.release();
+                                }
                             }
                         }
                     }
@@ -521,6 +592,7 @@ pub fn start_scheduler_thread(
             log::warn!("{}", t("scheduler-channel-closed"));
             // 收尾：无论 channel 关闭还是 panic，都恢复 CPU 控制状态，避免频率/governor 残留
             cpu_governor.release();
+            ak_governor.release();
             // ==== FAS 暂禁用 ====
             // fas_controller.reset_all_freqs();
             // fas_controller.clear_game();

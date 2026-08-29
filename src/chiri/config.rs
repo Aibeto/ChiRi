@@ -367,6 +367,196 @@ pub struct FunctionToggles {
     pub io_optimization: bool,
 }
 
+/// 单个核心组（little/big/prime）的升降档条件，组内独立配置。
+/// 核心数 yaml 里直接写整数（如 2 = 组内超过 2 个核心命中阈值才触发），0 表示关闭该方向判定。
+/// 升降档判定用「当前档」对应核心组的条件。
+#[derive(Debug, Deserialize, Clone)]
+pub struct SpecialTunedGroup {
+    /// 升档核心数：组内超过这个数量的核心占用率 > up_util_percent 触发升档
+    #[serde(default = "d_ak_up_core_count")]
+    pub up_core_count: u32,
+    /// 升档占用率阈值（%）
+    #[serde(default = "d_ak_up_util_threshold")]
+    pub up_util_percent: f32,
+    /// 降档核心数：组内超过这个数量的核心占用率 < down_util_percent 触发降档
+    #[serde(default = "d_ak_down_core_count")]
+    pub down_core_count: u32,
+    /// 降档占用率阈值（%）
+    #[serde(default = "d_ak_down_util_threshold")]
+    pub down_util_percent: f32,
+}
+
+/// 单个档位的配置：按核心组（little/big/prime）的升降档条件 + 本档防抖等待。
+/// 核心组按 affected_cpus 的 CPU ID 区间硬编码判定（8550：0-2 小核、3-6 大核、7 超大核）。
+/// 升降档合并规则：任一核心组满足升档条件即升一档，任一核心组满足降档条件即降一档（升档优先）。
+#[derive(Debug, Deserialize, Clone)]
+pub struct SpecialTunedTier {
+    /// 本档条件成立到真正执行升降档之间的等待（ms），防抖用
+    #[serde(default = "d_ak_wait_ms")]
+    pub wait_ms: u64,
+    /// 小核组（0-2）升降档条件
+    #[serde(default)]
+    pub little: SpecialTunedGroup,
+    /// 大核组（3-6）升降档条件
+    #[serde(default)]
+    pub big: SpecialTunedGroup,
+    /// 超大核组（7）升降档条件
+    #[serde(default)]
+    pub prime: SpecialTunedGroup,
+}
+
+/// 明日方舟特调（akmode）配置，跟 CLG 完全没关系。
+/// 四档就是全局那套模式档位 powersave/balance/performance/fast，档位是统一的，
+/// 特调当前不干预任何频率，仅按负载在四档间判定档位并打点（频率由系统原生 governor 管理）。
+#[derive(Debug, Deserialize, Clone)]
+pub struct SpecialTunedConfig {
+    /// 升降档后防抖等待临时减半的持续时间（ms）：发生一次升降档后，后续 wait_ms
+    /// 在此时长内按一半执行，让档位切换更跟手；超过此时长恢复原 wait_ms。
+    #[serde(default = "d_ak_after_change_duration_ms")]
+    pub after_change_duration_ms: u64,
+    /// 档 1（最低频）：powersave
+    #[serde(default)]
+    pub powersave: SpecialTunedTier,
+    /// 档 2：balance
+    #[serde(default)]
+    pub balance: SpecialTunedTier,
+    /// 档 3：performance
+    #[serde(default)]
+    pub performance: SpecialTunedTier,
+    /// 档 4（最高频）：fast
+    #[serde(default)]
+    pub fast: SpecialTunedTier,
+}
+
+// SpecialTunedConfig 缺省值：akmode.yaml 没写的字段回退到这里（核心数写整数，占用率百分比 normalize 会转成 0..1）
+fn d_ak_up_core_count() -> u32 {
+    2
+}
+fn d_ak_up_util_threshold() -> f32 {
+    80.0
+}
+fn d_ak_down_core_count() -> u32 {
+    2
+}
+fn d_ak_down_util_threshold() -> f32 {
+    60.0
+}
+fn d_ak_wait_ms() -> u64 {
+    300
+}
+fn d_ak_after_change_duration_ms() -> u64 {
+    3000
+}
+
+impl Default for SpecialTunedGroup {
+    fn default() -> Self {
+        Self {
+            up_core_count: d_ak_up_core_count(),
+            up_util_percent: d_ak_up_util_threshold(),
+            down_core_count: d_ak_down_core_count(),
+            down_util_percent: d_ak_down_util_threshold(),
+        }
+    }
+}
+
+impl Default for SpecialTunedTier {
+    fn default() -> Self {
+        Self {
+            wait_ms: d_ak_wait_ms(),
+            little: SpecialTunedGroup::default(),
+            big: SpecialTunedGroup::default(),
+            prime: SpecialTunedGroup::default(),
+        }
+    }
+}
+
+impl Default for SpecialTunedConfig {
+    fn default() -> Self {
+        Self {
+            after_change_duration_ms: d_ak_after_change_duration_ms(),
+            powersave: SpecialTunedTier::default(),
+            balance: SpecialTunedTier::default(),
+            performance: SpecialTunedTier::default(),
+            fast: SpecialTunedTier::default(),
+        }
+    }
+}
+
+impl SpecialTunedGroup {
+    /// 把 yaml 里写的百分比（>1 视为百分比）转成 0..1 比例并 clamp。
+    /// 写 50 还是 0.5 都认，前者按 50% 处理。
+    fn normalize_pct(v: &mut f32, dft: f32) {
+        if !v.is_finite() {
+            *v = dft;
+        }
+        if *v > 1.0 {
+            *v /= 100.0;
+        }
+        *v = v.clamp(0.0, 1.0);
+    }
+
+    /// 校验单个核心组：核心数限制在合理范围，占用率阈值转 0..1。
+    /// 核心数不设下限 0（>=0 恒真，等于关闭该方向判定），只设上限防误配。
+    fn normalize(&mut self) {
+        self.up_core_count = self.up_core_count.min(64);
+        self.down_core_count = self.down_core_count.min(64);
+        Self::normalize_pct(&mut self.up_util_percent, d_ak_up_util_threshold());
+        Self::normalize_pct(&mut self.down_util_percent, d_ak_down_util_threshold());
+    }
+}
+
+impl SpecialTunedTier {
+    /// 校验单个档位：逐核心组 normalize
+    fn normalize(&mut self) {
+        self.little.normalize();
+        self.big.normalize();
+        self.prime.normalize();
+    }
+}
+
+impl SpecialTunedConfig {
+    /// 校验配置：逐档 normalize；升降档后加速持续时间限制在合理范围（上限 60s 防误配）
+    pub fn normalize(&mut self) {
+        self.after_change_duration_ms = self.after_change_duration_ms.min(60_000);
+        self.powersave.normalize();
+        self.balance.normalize();
+        self.performance.normalize();
+        self.fast.normalize();
+    }
+
+    /// 取档位的配置（内部档位 1..4：powersave=1 balance=2 performance=3 fast=4）
+    pub fn tier(&self, tier: u32) -> &SpecialTunedTier {
+        match tier {
+            1 => &self.powersave,
+            2 => &self.balance,
+            3 => &self.performance,
+            _ => &self.fast,
+        }
+    }
+}
+
+/// 模式名 → 特调档位（1..4）。未知模式或特调自身回退 balance（档 2）。
+/// 特调的档位就是全局那套模式档位，起始档从 rules.yaml 的生效模式识别。
+pub fn mode_to_tier(mode: &str) -> u32 {
+    match mode {
+        "powersave" => 1,
+        "balance" => 2,
+        "performance" => 3,
+        "fast" => 4,
+        _ => 2,
+    }
+}
+
+/// 特调档位（1..4）→ 模式名，日志展示用
+pub fn tier_to_mode(tier: u32) -> &'static str {
+    match tier {
+        1 => "powersave",
+        2 => "balance",
+        3 => "performance",
+        _ => "fast",
+    }
+}
+
 /// 顶层配置（config.yaml 全量）
 #[derive(Debug, Deserialize, Default)]
 pub struct Config {
@@ -393,33 +583,29 @@ pub struct Config {
     #[serde(default)]
     pub fast: Mode,
 
-    /// 内部特调模式段（对应处理器特调文件 `325mode` 键，以数字开头故用 rename 映射）。
-    /// 配置文件省略该段时回退空 Mode，其 CLG 参数取 CpuLoadGovernorConfig 默认值。
-    #[serde(default, rename = "325mode")]
-    pub mode_325: Mode,
-
-    /// 高压特调模式段（`799mode`，明日方舟高压场景），参数同样来自处理器特调文件。
-    #[serde(default, rename = "799mode")]
-    pub mode_799: Mode,
+    /// 明日方舟特调（akmode）独立调频配置：来自处理器目录 akmode.yaml，与 CLG 完全解耦。
+    /// 前台为白名单应用时由 AkmodeGovernor 接管，参数不再走 CLG。
+    #[serde(default)]
+    pub akmode: SpecialTunedConfig,
 }
 
 impl Config {
     /// 从 YAML 文件加载配置；读取或反序列化失败时返回 Err。
-    /// 加载后合并处理器专属特调文件（common::get_special_tuned_path()，与主配置同目录）。
+    /// 加载后合并处理器专属特调文件（common::get_akmode_path()，与主配置同目录）。
     /// 热重载路径同样经由本函数，因此特调参数修改后触发热重载即可生效。
     pub fn from_file(path: &str) -> anyhow::Result<Self> {
         let content = std::fs::read_to_string(path)?;
         let mut config: Config = serde_yaml::from_str(&content)?;
-        config.merge_special_tuned();
+        config.merge_akmode();
         Ok(config)
     }
 
-    /// 合并独立特调配置文件中的特调模式段：
+    /// 合并独立特调配置文件（akmode.yaml）中的特调段：
     /// - 读取失败（文件缺失等）→ warn 并保留主配置现有值
     /// - 解析失败（内容损坏等）→ warn 并保留主配置现有值
     /// - 成功 → debug 打点
-    fn merge_special_tuned(&mut self) {
-        let path = crate::common::get_special_tuned_path();
+    fn merge_akmode(&mut self) {
+        let path = crate::common::get_akmode_path();
         let content = match std::fs::read_to_string(&path) {
             Ok(c) => c,
             Err(e) => {
@@ -435,8 +621,8 @@ impl Config {
         };
         match serde_yaml::from_str::<Config>(&content) {
             Ok(special) => {
-                self.mode_325 = special.mode_325;
-                self.mode_799 = special.mode_799;
+                self.akmode = special.akmode;
+                self.akmode.normalize();
                 log::debug!(
                     "{}",
                     t_with_args(
@@ -457,15 +643,19 @@ impl Config {
         }
     }
 
-    /// 按模式名取对应配置段；未知模式返回 None
+    /// 取明日方舟特调（akmode）配置段（已合并 akmode.yaml）
+    pub fn get_akmode(&self) -> &SpecialTunedConfig {
+        &self.akmode
+    }
+
+    /// 按模式名取对应 CLG 配置段；未知模式（含特调模式）返回 None。
+    /// 特调模式（akmode）不走 CLG，由 AkmodeGovernor 独立接管。
     pub fn get_mode(&self, mode_name: &str) -> Option<&Mode> {
         match mode_name {
             "powersave" => Some(&self.powersave),
             "balance" => Some(&self.balance),
             "performance" => Some(&self.performance),
             "fast" => Some(&self.fast),
-            "325mode" => Some(&self.mode_325),
-            "799mode" => Some(&self.mode_799),
             _ => None,
         }
     }

@@ -165,15 +165,13 @@ pub struct SpecialTunedEntry {
 /// 特调模式名不可用于白名单之外的包名——monitor 侧做门控（determine_mode），
 /// 非白名单包名映射到特调模式时回退 global_mode 并告警。
 /// 新增特调只需追加条目，模式名须在 chiri 的 Config::get_mode 中注册，
-/// 参数写在处理器目录 `module/config/{命中SoC}/special_tuned.yaml`（按模式名分段，与白名单条目一致）。
+/// 参数写在处理器目录 `module/config/{命中SoC}/akmode.yaml`（特调段，与白名单条目一致）。
 /// WebUI 通过守护进程启动时导出的 special_tuned.txt 展示“特调”标签与专属选项。
-pub const SPECIAL_TUNED_MODES: &[SpecialTunedEntry] = &[
-    SpecialTunedEntry {
-        package: "com.hypergryph.arknights", // 明日方舟
-        modes: &["325mode", "799mode"],
-        fallback: "325mode",
-    },
-];
+pub const SPECIAL_TUNED_MODES: &[SpecialTunedEntry] = &[SpecialTunedEntry {
+    package: "com.hypergryph.arknights", // 明日方舟
+    modes: &["akmode"],
+    fallback: "akmode",
+}];
 
 /// 查询包名是否命中特调白名单，命中返回优先回退模式
 pub fn special_tuned_mode(pkg: &str) -> Option<&'static str> {
@@ -197,11 +195,11 @@ pub fn is_special_mode_allowed(pkg: &str, mode: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// 处理器专属特调配置文件路径：与处理器主配置同目录 `config/{命中片段}/special_tuned.yaml`（特调与处理器绑定）。
-/// 无处理器专属特调文件时回退根 `config/special_tuned.yaml`（通常不存在，合并时 warn 保留旧值）。
-/// 只含白名单特调模式段，随模块发布，WebUI 不提供编辑。
-pub fn get_special_tuned_path() -> PathBuf {
+/// 处理器专属特调配置文件路径：与处理器主配置同目录 `config/{命中片段}/akmode.yaml`（特调与处理器绑定）。
+/// 无处理器专属特调文件时回退根 `config/akmode.yaml`（通常不存在，合并时 warn 保留旧值）。
+/// 只含白名单特调模式段（明日方舟 akmode），随模块发布，WebUI 不提供编辑。
+pub fn get_akmode_path() -> PathBuf {
     matched_soc_config_dir()
-        .map(|dir| dir.join("special_tuned.yaml"))
-        .unwrap_or_else(|| get_module_root().join("config").join("special_tuned.yaml"))
+        .map(|dir| dir.join("akmode.yaml"))
+        .unwrap_or_else(|| get_module_root().join("config").join("akmode.yaml"))
 }

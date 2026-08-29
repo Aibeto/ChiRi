@@ -1,0 +1,59 @@
+# akmode-example.yaml —— 明日方舟特调的参考配置
+#
+# 用法：把这份文件复制成同目录的 akmode.yaml 再改。守护进程只认 akmode.yaml，
+# 本文件不参与加载，纯粹当说明书用。
+#
+# 生效条件：命中 CHIRI_SOC_HINTS（8550）且前台是明日方舟。生效期间主调度（CLG）
+# 让位，改由 akmode 独立判定档位；退出前台就交还 CLG。
+#
+# 档位就是全局那套模式（powersave/balance/performance/fast），不另起炉灶。
+# 起始档从 rules.yaml 识别（明日方舟 app_modes > global_mode），之后按负载自动升降。
+# 白名单应用始终进特调，rules.yaml 里给明日方舟配的普通模式只决定从哪档起步。
+#
+# 特调当前不干预任何频率（固定频率锁频已关闭）：CPU 频率由系统原生 governor
+# 自行管理，本配置只决定四档之间的升降档判定与日志打点。
+
+akmode:
+  # 升降档后防抖等待临时减半的持续时间（ms）：发生一次升降档后，此后 wait_ms
+  # 在此时长内按一半执行，让档位切换更跟手；超过此时长恢复原 wait_ms。写 0 关闭该特性。
+  after_change_duration_ms: 3000
+
+  # 下面只写 balance 一档做示例，其余三档结构完全一样，复制改参数即可。
+  # 每档按核心组（little/big/prime）独立配置升降档条件 + 一个防抖等待。
+  # 核心组按 CPU ID 硬编码（8550：0-2 小核 little、3-6 大核 big、7 超大核 prime）。
+  #   powersave     = 档 1，最低档
+  #   balance       = 档 2，默认起步档
+  #   performance   = 档 3
+  #   fast          = 档 4，最高档
+
+  modename:
+    # 本档防抖等待（ms）：条件成立到真正执行升降档之间的等待。
+    # 调小反应快但可能频繁跳档，调大更稳但迟钝。每档可以不一样。
+    wait_ms: 120
+
+    little:
+      # 升档核心数：本组内超过这个数量的核心占用率 > up_util_percent 触发升档。
+      # 写 2 = 超过 2 个小核忙起来才考虑升档。调小升档更积极，调大更保守。
+      up_core_count: 2
+      # 升档占用阈值（%）：上面那批核心的占用率要超过这个值才触发。
+      # 写 80 = 占用率 > 80%。调低更容易升档。
+      up_util_percent: 80
+      # 降档核心数：本组内超过这个数量的核心占用率 < down_util_percent 触发降档。
+      # 写 1 = 超过 1 个小核闲下来才考虑降档。调大降档更保守（不容易掉档）。
+      down_core_count: 1
+      # 降档占用阈值（%）：上面那批核心的占用率要低于这个值才触发。
+      # 写 60 = 占用率 < 60%。调高更容易降档省电。
+      down_util_percent: 60
+
+    big:
+      up_core_count: 2
+      up_util_percent: 80
+      down_core_count: 2
+      down_util_percent: 60
+
+    # prime 组只有 1 个核心：想让它参与判定需把核心数写 0（任一命中即触发）。
+    prime:
+      up_core_count: 0
+      up_util_percent: 80
+      down_core_count: 0
+      down_util_percent: 60

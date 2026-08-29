@@ -53,7 +53,7 @@ const modeLabel = (modeKey: string) => {
   }
 };
 
-// 特调标签：显示具体模式内容（如“特调：325mode”）。
+// 特调标签：显示具体模式内容（如“特调：akmode”）。
 // 用户自定义过特调模式时优先显示自定义值，否则显示白名单优先回退模式。
 const specialLabel = (pkg: string) => {
   const entry = store.specialTuned[pkg];

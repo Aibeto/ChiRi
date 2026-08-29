@@ -187,6 +187,23 @@ fn get_focused_app_from_cgroup(ignored_apps: &[String]) -> Result<(String, i32),
 // ==================== [辅助函数] ====================
 
 fn determine_mode(config: &RulesConfig, current_package: &str) -> String {
+    // 白名单应用始终进特调（ChiRi 专属），不管 rules.yaml 配了什么。
+    // 给该应用配的普通模式只作为特调起始档，scheduler 侧（get_ak_initial_tier）识别。
+    if crate::common::is_chiri_soc() {
+        if let Some(entry) = crate::common::SPECIAL_TUNED_MODES
+            .iter()
+            .find(|e| e.package == current_package)
+        {
+            debug!(
+                "{}",
+                t_with_args(
+                    "app-detect-special-fallback",
+                    &fluent_args!("pkg" => current_package, "mode" => entry.fallback)
+                )
+            );
+            return entry.fallback.to_string();
+        }
+    }
     if !config.dynamic_enabled {
         return config.global_mode.clone();
     }
@@ -273,9 +290,7 @@ pub fn watch_config_file(
     // 监听 rules.yaml 所在目录而非文件本身：WebUI 通过「临时文件 + 原子 mv」替换
     // rules.yaml 时，若 watch 挂在旧 inode 上会永久失效，只有目录级 watch 才能感知
     // MOVED_TO；其余文件（active_config.txt 等）通过文件名过滤避免误触发重载。
-    let rules_dir = rules_path
-        .parent()
-        .ok_or("invalid rules.yaml path")?;
+    let rules_dir = rules_path.parent().ok_or("invalid rules.yaml path")?;
     inotify.watches().add(
         rules_dir,
         WatchMask::MODIFY | WatchMask::CLOSE_WRITE | WatchMask::MOVED_TO,

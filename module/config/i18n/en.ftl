@@ -86,6 +86,7 @@ scheduler-apply-failed = [Scheduler] Failed to apply settings: { $error }
 scheduler-channel-closed = [Scheduler] Channel closed! Thread exiting.
 scheduler-ipc-panic = [Scheduler] IPC thread panicked, releasing CPU control.
 scheduler-doze-enable = [Scheduler] Screen OFF: Enabling Extreme Doze mode (Restricting CPU max performance).
+scheduler-doze-special-keep = [Scheduler] Screen OFF: Special tuned mode keeps control, skipping CLG doze.
 scheduler-doze-restore = [Scheduler] Screen ON: Restoring previous performance constraints.
 scheduler-clg-init = [Scheduler] CPU Load Governor: initialized at startup (mode={ $mode })
 scheduler-event-screen = [Scheduler] screen event received: on={ $on } (last={ $last })
@@ -124,6 +125,15 @@ clg-writer-invalid = [CLG] P{ $pid } sysfs writer invalid (max_valid: { $max_val
 clg-freq-set = [CLG] P{ $pid } freq change: { $old_khz }MHz -> { $new_khz }MHz
 clg-freq-write-failed-cached = [CLG] P{ $pid } freq write failed, keeping cached { $cached_khz }MHz (target { $target_khz }MHz)
 clg-watchdog-release = [CLG] WATCHDOG: no load events for { $secs }s, eBPF source failed. Releasing CPU control to system defaults.
+
+# --- AKMode (Arknights special tuning) ---
+akmode-init = [AKMode] Arknights special tuning take over | start mode={ $mode }
+akmode-activated = [AKMode] Arknights special tuning activated (no freq control, tier state only)
+akmode-deactivated = [AKMode] Arknights special tuning deactivated
+akmode-config-reloaded = [AKMode] special config hot-reloaded | wait={ $wait }ms
+akmode-tier-change = [AKMode] tier change: { $old } -> { $new }
+akmode-tick-log = [AKMode] mode={ $mode } up={ $up } down={ $down } busy/idle: L={ $l_over }/{ $l_under } B={ $b_over }/{ $b_under } P={ $p_over }/{ $p_under }
+akmode-watchdog-release = [AKMode] WATCHDOG: no load events for { $secs }s, eBPF source failed. Resetting Arknights special tuning tier state.
 
 # --- FAS ---
 fas-freq-mismatch = [FAS] P{ $pid }: freq mismatch! expected { $min }-{ $max }, actual { $actual } -> emergency reapply
