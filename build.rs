@@ -31,6 +31,16 @@ fn ensure_bpf_linker(tools_dir: &Path) -> Result<PathBuf, Box<dyn std::error::Er
         return Ok(linker);
     }
 
+    // 3) Windows 本机：bpf-linker 源码编译依赖 os::unix API，无法在 Windows 构建；
+    //    且完整产物由云端 CI 生成（见 AGENTS.md），本地不承担 eBPF 构建，
+    //    直接提示跳过安装，避免每次都等待 install 失败拖慢本地静态检查。
+    if cfg!(windows) {
+        return Err(
+            "Windows 本机无现成 bpf-linker（源码编译依赖 os::unix，无法在 Windows 构建），跳过安装"
+                .into(),
+        );
+    }
+
     println!("cargo:warning=⏳ 正在安装 bpf-linker (可能需要数分钟)...");
     let install = Command::new("cargo")
         .args([
@@ -60,22 +70,28 @@ fn ensure_bpf_linker(tools_dir: &Path) -> Result<PathBuf, Box<dyn std::error::Er
     Ok(linker)
 }
 
+/// 写入 eBPF 占位产物，使 include_bytes! 可解析（纯类型检查用，产物内容无效，
+/// CI/发布不触发该路径，行为不变）。返回 OUT_DIR 下的 ebpf_target 目录。
+fn write_ebpf_stub() -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let out_dir = PathBuf::from(env::var("OUT_DIR")?);
+    for profile in ["debug", "release"] {
+        let dir = out_dir
+            .join("ebpf_target")
+            .join("bpfel-unknown-none")
+            .join(profile);
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(dir.join("yumi-ebpf"), [0u8; 64])?;
+    }
+    Ok(out_dir.join("ebpf_target"))
+}
+
 /// 构建 yumi-ebpf BPF 程序，参照 frame-analyzer 的 build_ebpf()
 fn build_ebpf() -> Result<PathBuf, Box<dyn std::error::Error>> {
     // 本地开发快速检查：YUMI_SKIP_EBPF=1 时跳过 eBPF 编译，仅写入占位产物
     // 使 include_bytes! 可解析（纯类型检查用，产物内容无效，CI/发布不设置该变量，行为不变）。
     if std::env::var_os("YUMI_SKIP_EBPF").is_some() {
         println!("cargo:warning=YUMI_SKIP_EBPF=1: skipping eBPF build (check-only stub)");
-        let out_dir = PathBuf::from(env::var("OUT_DIR")?);
-        for profile in ["debug", "release"] {
-            let dir = out_dir
-                .join("ebpf_target")
-                .join("bpfel-unknown-none")
-                .join(profile);
-            std::fs::create_dir_all(&dir)?;
-            std::fs::write(dir.join("yumi-ebpf"), [0u8; 64])?;
-        }
-        return Ok(out_dir.join("ebpf_target"));
+        return write_ebpf_stub();
     }
 
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -88,8 +104,17 @@ fn build_ebpf() -> Result<PathBuf, Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-changed={}", ebpf_dir.join("Cargo.toml").display());
     println!("cargo:rerun-if-changed={}", ebpf_dir.join("src").display());
 
-    // 1. 安装 bpf-linker（参照 frame-analyzer install_ebpf_linker），严格校验
-    let linker_bin = ensure_bpf_linker(&tools_dir)?;
+    // 1. 安装 bpf-linker（参照 frame-analyzer install_ebpf_linker），严格校验。
+    // Windows 本机无 bpf-linker 时跳过 eBPF 编译、回退占位产物，保证 IDE
+    // rust-analyzer 与本地 cargo check 不被阻塞（CI 在 Linux 上不受影响）。
+    let linker_bin = match ensure_bpf_linker(&tools_dir) {
+        Ok(l) => l,
+        Err(e) if cfg!(windows) => {
+            println!("cargo:warning=⚠ 跳过 eBPF 编译（写入占位产物，仅本地静态检查）: {e}");
+            return write_ebpf_stub();
+        }
+        Err(e) => return Err(e),
+    };
 
     // 2. 编译 BPF 程序（在 yumi-ebpf 目录中，避免 workspace 干扰）
     #[allow(unused_mut)] // 仅 release 分支 push("--release")，debug 构建下无需可变
