@@ -14,9 +14,26 @@ const MODULE_BASE_PATH = "/data/adb/modules/yumi";
 const PATHS = {
   RULES_YAML: `${MODULE_BASE_PATH}/rules.yaml`,          
   CONFIG_YAML: `${MODULE_BASE_PATH}/config/config.yaml`, 
+  ACTIVE_CONFIG: `${MODULE_BASE_PATH}/active_config.txt`,
   CURRENT_MODE: `${MODULE_BASE_PATH}/current_mode.txt`,
   DAEMON_LOG: `${MODULE_BASE_PATH}/logs/daemon.log`
 };
+
+// 解析守护进程当前实际加载的配置文件：
+// 8550 等 Chiri 目标 SoC 会使用 config_8550.yaml，守护进程启动时把文件名写入
+// active_config.txt，这里读取它以保证 WebUI 与守护进程读写同一份文件。
+// 读取失败/为空时回退到默认 config.yaml。
+async function resolveConfigPath(): Promise<string> {
+  try {
+    const { errno, stdout } = await exec(`cat "${PATHS.ACTIVE_CONFIG}"`);
+    const name = stdout.trim();
+    // 只接受合法文件名，防止路径注入
+    if (errno === 0 && name && !name.includes('/') && !name.includes('..')) {
+      return `${MODULE_BASE_PATH}/config/${name}`;
+    }
+  } catch (e) { /* 回退默认 */ }
+  return PATHS.CONFIG_YAML;
+}
 
 const isDev = import.meta.env.DEV || typeof window.ksu === 'undefined';
 
@@ -47,16 +64,18 @@ const RealBridge = {
     return stdout;
   },
   async writeFile(path: string, content: string): Promise<void> {
-    // base64 传输：规避 shell 对 $、`、!、引号等字符的解释与注入风险
+    // base64 传输规避 shell 对 $、`、!、引号等字符的解释与注入风险；
+    // 先写同目录临时文件再原子 mv：避免直接 `>` 截断原文件时，被守护进程
+    // config_watcher（inotify CLOSE_WRITE）读到半截/交错内容导致解析失败。
     const b64 = utf8ToBase64(content);
-    const { errno } = await exec(`echo '${b64}' | base64 -d > "${path}"`);
+    const { errno } = await exec(`echo '${b64}' | base64 -d > "${path}.tmp" && mv -f "${path}.tmp" "${path}"`);
     if (errno !== 0) throw new Error(i18n.global.t('write_failed', { path }) as string);
   },
 
   async getRulesConfig(): Promise<any> { try { return yaml.load(await this.readFile(PATHS.RULES_YAML)) || {}; } catch (e) { return {}; } },
   async saveRulesConfig(config: any): Promise<void> { await this.writeFile(PATHS.RULES_YAML, yaml.dump(config)); },
-  async getMainConfig(): Promise<any> { try { return yaml.load(await this.readFile(PATHS.CONFIG_YAML)) || {}; } catch (e) { return {}; } },
-  async saveMainConfig(config: any): Promise<void> { await this.writeFile(PATHS.CONFIG_YAML, yaml.dump(config)); toast(i18n.global.t('core_config_saved') as string); },
+  async getMainConfig(): Promise<any> { try { return yaml.load(await this.readFile(await resolveConfigPath())) || {}; } catch (e) { return {}; } },
+  async saveMainConfig(config: any): Promise<void> { await this.writeFile(await resolveConfigPath(), yaml.dump(config)); toast(i18n.global.t('core_config_saved') as string); },
 
   async getCurrentMode(): Promise<string> { try { return (await this.readFile(PATHS.CURRENT_MODE)).trim(); } catch (e) { return 'balance'; } },
   async setMode(mode: string): Promise<void> {

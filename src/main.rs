@@ -47,8 +47,14 @@ fn main() -> Result<()> {
     // 2. 判断是否启用 Chiri 专用调度器（检测到列表中的特定处理器时启用）
     let chiri_active = common::is_chiri_soc();
 
-    // 3. 读取配置（两套调度共用同一份 config.yaml，各自按自己的 Config 结构解析）
-    let config_path: std::path::PathBuf = root.join("config/config.yaml");
+    // 3. 解析配置文件路径：8550 等 Chiri 目标 SoC 优先加载独立配置 config_{soc}.yaml，
+    //    其余机型回退到默认 config.yaml（两套调度仍共用同一份选中的文件）
+    let config_path = common::get_config_path();
+    // 持久化当前生效的配置文件名，WebUI 读取它后读写同一份配置文件，避免改错文件
+    let _ = utils::try_write_file(
+        root.join("active_config.txt"),
+        config_path.file_name().unwrap_or_default().as_encoded_bytes(),
+    );
 
     // 4. 立即加载语言与日志（两套 Config 的 meta 结构一致，先用它初始化）
     let (language, loglevel) = if chiri_active {

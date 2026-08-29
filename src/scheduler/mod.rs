@@ -109,7 +109,8 @@ pub fn start_scheduler_thread(
     shared_config: Arc<RwLock<Config>>,
 ) -> Result<()> {
     let root = common::get_module_root();
-    let config_path = root.join("config/config.yaml");
+    // 配置路径：非 Chiri 机型回退到默认 config.yaml；若意外命中独立配置则跟随之
+    let config_path = common::get_config_path();
     let config_dir = root.join("config");
 
     let shared_mode_name = Arc::new(Mutex::new("balance".to_string()));

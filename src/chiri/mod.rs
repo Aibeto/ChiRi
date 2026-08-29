@@ -135,7 +135,8 @@ pub fn start_scheduler_thread(
     shared_config: Arc<RwLock<Config>>,
 ) -> Result<()> {
     let root = common::get_module_root();
-    let config_path = root.join("config/config.yaml");
+    // 配置路径：8550 等 Chiri 目标 SoC 使用独立配置 config_{soc}.yaml，热重载跟随该文件
+    let config_path = common::get_config_path();
     let config_dir = root.join("config");
 
     // 当前生效模式名（跨线程共享，仅在 scheduler_ipc 线程内写）

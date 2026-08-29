@@ -76,9 +76,10 @@ impl CpuScheduler {
                     "/sys/devices/system/cpu/cpuidle/current_governor",
                     &config.cpu_idle.current_governor,
                 );
+                // 仅在真正发起写入时输出"已完成"，避免开关未开启时误报
+                log::info!("{}", t("apply-cpu-idle-governor-start"));
             }
         }
-        log::info!("{}", t("apply-cpu-idle-governor-start"));
         Ok(())
     }
 

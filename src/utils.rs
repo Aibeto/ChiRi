@@ -63,8 +63,13 @@ pub fn enable_perm <P: AsRef<Path>>(path: P) -> Result<()> {
 /// 监控指定路径的文件/目录事件
 pub fn watch_path<P: AsRef<Path>>(path_to_watch: P) -> Result<()> {
     let mut inotify = Inotify::init()?;
-    inotify.watches().add(path_to_watch, WatchMask::CLOSE_WRITE)?;
-    
+    // CLOSE_WRITE 覆盖直接写入；MOVED_TO 覆盖原子替换（WebUI 用临时文件 + mv 保存配置时
+    // 是 rename 而非写打开，只有 MOVED_TO 能感知），两者任一触发即返回并触发重载
+    inotify.watches().add(
+        path_to_watch,
+        WatchMask::CLOSE_WRITE | WatchMask::MOVED_TO,
+    )?;
+
     let mut buffer = [0u8; 1024];
     inotify.read_events_blocking(&mut buffer)?;
     Ok(())

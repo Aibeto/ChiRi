@@ -91,3 +91,22 @@ fn soc_hint_matches(hints: &[&str]) -> bool {
 pub fn is_chiri_soc() -> bool {
     soc_hint_matches(CHIRI_SOC_HINTS)
 }
+
+/// 返回当前应加载的配置文件路径：
+/// - 命中 Chiri 目标 SoC 且 config 目录存在 `config_{命中片段}.yaml` 时，使用该独立文件
+/// - 否则回退到默认 `config.yaml`
+///
+/// 所有配置加载/热重载入口（main.rs 与两套调度器的 config_watcher）统一走这里，
+/// 保证 8550 等目标机型使用独立配置，其余机型不受影响。
+pub fn get_config_path() -> PathBuf {
+    let config_dir = get_module_root().join("config");
+    if is_chiri_soc() {
+        for hint in CHIRI_SOC_HINTS {
+            let candidate = config_dir.join(format!("config_{}.yaml", hint));
+            if candidate.exists() {
+                return candidate;
+            }
+        }
+    }
+    config_dir.join("config.yaml")
+}
