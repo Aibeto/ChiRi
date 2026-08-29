@@ -403,11 +403,28 @@ impl CpuLoadGovernor {
         self.touch_boost_floor = 0.0;
     }
 
-    /// 热切换配置：仅替换控制参数，不重建 cluster（用于同模式参数调整）。
+    /// 热切换配置：仅替换控制参数，不重建 cluster（用于同模式参数调整、
+    /// doze/scenemode 切换与模式变更）。
     /// 新配置同样先过 normalize，防止越界参数导致后续 clamp panic。
+    ///
+    /// 切换后把各 cluster 的 current_perf 重置为新配置的 perf_init 并立即 flush 写频：
+    /// 若只替换参数，current_perf 仍停在旧配置的档位——息屏 doze/scenemode 期间
+    /// current_perf 已掉到 ~0，亮屏恢复原模式后频率要从地板缓慢爬升数秒，
+    /// 表现为"亮屏了却还卡在 scenemode 低频"（perf_init 相当于 init_policies 的接管起点）。
     pub fn reload_config(&mut self, gov_cfg: &CpuLoadGovernorConfig) {
         self.cfg = gov_cfg.clone();
         self.normalize_cfg();
+        // 重置到新配置的初始性能档并清空旧配置残留的防抖计数，随后立即写频
+        let init_perf = self
+            .cfg
+            .perf_init
+            .clamp(self.cfg.perf_floor, self.cfg.perf_ceil);
+        for cluster in &mut self.clusters {
+            cluster.current_perf = init_perf;
+            cluster.up_wait = 0;
+            cluster.down_wait = 0;
+        }
+        self.flush();
         debug!(
             "{}",
             t_with_args(
