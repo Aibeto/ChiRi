@@ -32,13 +32,14 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, RwLock, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 use std::fs;
 use anyhow::Result;
 
-// CLG 看门狗：SystemLoadUpdate 由 eBPF 每 200ms 投喂一次，若超过 CLG_STALE_MAX 时长
+// CLG 看门狗：SystemLoadUpdate 常规 120ms / 特调 40ms 投喂一次，若超过 CLG_STALE_MAX 时长
 // 未收到任何事件，视为负载源失效（eBPF 加载失败/探针崩溃/通道断开），主动 release()
 // 回滚到系统原生调频，避免 CPU 永久锁频在最后写入值上（8550 balance 等 perf_init=1.0
 // 的配置下会锁满全核高频）。
@@ -142,10 +143,12 @@ pub(super) fn auto_compute_capacity_weights(policies: &[CpuPolicy]) -> Option<Ve
 /// - `config_watcher` 线程：监听 config 目录，热重载 Config 并重放一次性系统调整
 /// - `scheduler_ipc` 线程：消费 `DaemonEvent` 状态机，驱动 CLG 接管/释放/配置切换
 ///
-/// 参数 `rx` 为 Monitor 层与调度层间的有界事件通道，`shared_config` 为全局共享配置。
+/// 参数 `rx` 为 Monitor 层与调度层间的有界事件通道，`shared_config` 为全局共享配置，
+/// `ak_active` 为特调激活共享标志（Monitor 层据此切换采样间隔）。
 pub fn start_scheduler_thread(
     rx: mpsc::Receiver<DaemonEvent>,
     shared_config: Arc<RwLock<Config>>,
+    ak_active: Arc<AtomicBool>,
 ) -> Result<()> {
     let root = common::get_module_root();
     // 配置路径：8550 等 Chiri 目标 SoC 使用处理器子目录 config/{soc}/config.yaml，热重载跟随该文件
@@ -232,8 +235,10 @@ pub fn start_scheduler_thread(
             
             // let mut fas_controller = crate::scheduler::fas::FasController::new(); // FAS 暂禁用
             let mut cpu_governor = crate::chiri::cpu_load_governor::CpuLoadGovernor::new();
-            // 明日方舟特调（akmode）：独立于 CLG 的 4 档齿轮调度器，前台为白名单应用时接管
-            let mut ak_governor = crate::chiri::akmode::AkmodeGovernor::new();
+            // 明日方舟特调（akmode）：独立于 CLG 的 4 档齿轮调度器，前台为白名单应用时接管。
+            // 传入特调激活共享标志，接管/释放时联动 Monitor 层切换采样间隔
+            let ak_governor_flag = ak_active.clone();
+            let mut ak_governor = crate::chiri::akmode::AkmodeGovernor::new(ak_governor_flag);
 
             // ==== FAS 暂禁用：以下变量仅服务于 FAS 调度，暂注释 ====
             // let rules_path = crate::monitor::config::get_rules_path();
@@ -493,7 +498,7 @@ pub fn start_scheduler_thread(
                     DaemonEvent::SystemLoadUpdate { core_utils, foreground_max_util: _ } => {
                         // 刷新看门狗心跳：只要有负载事件到达即视为负载源存活
                         last_load_event = Instant::now();
-                        // 该事件每 200ms 一次，仅在 DEBUG 时输出摘要便于排查
+                        // 该事件常规 120ms / 特调 40ms 一次，仅在 DEBUG 时输出摘要便于排查
                         log::debug!("{}", t_with_args("scheduler-event-load", &fluent_args!(
                             "cores" => core_utils.iter().map(|u| format!("{:.0}", u * 100.0)).collect::<Vec<_>>().join(",")
                         )));

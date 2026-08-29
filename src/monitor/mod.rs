@@ -33,7 +33,11 @@ use crate::fluent_args;
 use crate::i18n::{t, t_with_args};
 
 // 启动函数
-pub fn start_monitor(tx: SyncSender<DaemonEvent>) -> Result<(), Box<dyn Error>> {
+/// `ak_active` 为特调（akmode）激活共享标志：cpu_monitor 据此在 120ms 与 40ms 采样间切换
+pub fn start_monitor(
+    tx: SyncSender<DaemonEvent>,
+    ak_active: Arc<AtomicBool>,
+) -> Result<(), Box<dyn Error>> {
     log::debug!("{}", t("monitor-starting"));
 
     // ===== 解除内核 eBPF Map 内存锁定限制 =====
@@ -165,12 +169,15 @@ pub fn start_monitor(tx: SyncSender<DaemonEvent>) -> Result<(), Box<dyn Error>> 
     // 7. 启动 eBPF CPU 负载监控线程
     log::debug!("{}", t("monitor-thread-start-cpu"));
     let tx_cpu = tx.clone();
+    let ak_active_cpu = ak_active.clone();
     thread::Builder::new()
         .name("cpu_monitor_ebpf".to_string())
         .spawn(move || {
             if let Ok(rt) = tokio::runtime::Runtime::new() {
                 rt.block_on(async {
-                    if let Err(e) = cpu_monitor::start_cpu_loop(tx_cpu, rx_pid_cpu).await {
+                    if let Err(e) =
+                        cpu_monitor::start_cpu_loop(tx_cpu, rx_pid_cpu, ak_active_cpu).await
+                    {
                         error!(
                             "{}",
                             t_with_args(

@@ -64,5 +64,5 @@ nohup sh -c '
 # 方式 B: 调试模式 (如果启动不起来，用这个看报错，输出到 logs/boot_error.log)
 # nohup sh -c 'while :; do "$1" || exit 0; sleep 3; done' sh "$DAEMON_PATH" > "$LOG_DIR/boot_error.log" 2>&1 &
 
-# 打印启动通知
-ui_print "daemon started."
+# 打印启动通知（service 阶段无 ui_print 环境，改记日志）
+echo "$(date): daemon started." >> "$LOG_FILE"

@@ -1,8 +1,8 @@
 akmode:
-  after_change_duration_ms: 3000
+  after_change_duration_ms: 799
 
   powersave:
-    wait_ms: 300
+    wait_ms: 325
     little:
       up_core_count: 2
       up_util_percent: 90

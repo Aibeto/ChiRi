@@ -476,7 +476,7 @@ impl CpuLoadGovernor {
         all_ok
     }
 
-    /// 核心调频入口：每次 SystemLoadUpdate 事件（约 200ms）触发。
+    /// 核心调频入口：每次 SystemLoadUpdate 事件（常规 120ms / 特调 40ms）触发。
     /// 对每个 cluster：
     /// 1. 取本簇最大 util，做尖峰抑制；
     /// 2. 按 headroom 过渡带计算目标性能比并 clamp 到 floor..ceil；

@@ -21,11 +21,18 @@ use aya::maps::{HashMap as BpfHashMap, PerCpuArray};
 use aya::util::online_cpus;
 use aya::{Ebpf, programs::TracePoint};
 use log::{debug, info, warn};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::SyncSender;
 use tokio::sync::watch;
 
 use crate::fluent_args;
 use crate::i18n::{t, t_with_args};
+
+/// 常规采样周期（ms）：特调（akmode）未激活时 SystemLoadUpdate 的投喂间隔
+const SAMPLE_MS_NORMAL: u64 = 120;
+/// 特调采样周期（ms）：明日方舟特调激活时缩短到 40ms，保证特调档位判定的响应度
+const SAMPLE_MS_TUNED: u64 = 40;
 
 fn get_thread_tids(pid: u32) -> Vec<u32> {
     let task_dir = format!("/proc/{}/task", pid);
@@ -45,6 +52,7 @@ fn get_thread_tids(pid: u32) -> Vec<u32> {
 pub async fn start_cpu_loop(
     tx: SyncSender<DaemonEvent>,
     rx_pid: watch::Receiver<u32>,
+    ak_active: Arc<AtomicBool>,
 ) -> Result<(), anyhow::Error> {
     // 与 fps_monitor 保持一致：debug 构建嵌 debug 产物，release 构建嵌 release 产物
     #[cfg(debug_assertions)]
@@ -137,11 +145,12 @@ pub async fn start_cpu_loop(
 
         let mut log_counter: u32 = 0;
 
-        let mut interval = tokio::time::interval(std::time::Duration::from_millis(200));
+        let mut interval =
+            tokio::time::interval(std::time::Duration::from_millis(SAMPLE_MS_NORMAL));
 
         loop {
             interval.tick().await;
-            // 消费 pid_watcher 广播的前台 PID（500ms 源 + 200ms 采样，足够及时）
+            // 消费 pid_watcher 广播的前台 PID（500ms 源 + 120ms/特调40ms 采样，足够及时）
             if rx_pid.has_changed().unwrap_or(false) {
                 fg_pid = *rx_pid.borrow_and_update();
             }
@@ -321,6 +330,17 @@ pub async fn start_cpu_loop(
             {
                 warn!("{}", t("cpu-monitor-channel-closed"));
                 break;
+            }
+
+            // 按特调状态动态切换采样周期：akmode 激活时 40ms 快速跟随负载，其余 120ms。
+            // interval 周期固定，切换时按新周期重建（相位以本轮处理完成为基准，采样点间隔精确）。
+            let target = if ak_active.load(Ordering::Relaxed) {
+                std::time::Duration::from_millis(SAMPLE_MS_TUNED)
+            } else {
+                std::time::Duration::from_millis(SAMPLE_MS_NORMAL)
+            };
+            if interval.period() != target {
+                interval = tokio::time::interval_at(tokio::time::Instant::now() + target, target);
             }
         }
     });

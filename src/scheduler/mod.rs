@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 use std::fs;
 use anyhow::Result;
 
-// CLG 看门狗：SystemLoadUpdate 由 eBPF 每 200ms 投喂一次，若超过 CLG_STALE_MAX 时长
+// CLG 看门狗：SystemLoadUpdate 常规 120ms（Chiri 特调 40ms）投喂一次，若超过 CLG_STALE_MAX 时长
 // 未收到任何事件，视为负载源失效（eBPF 加载失败/探针崩溃/通道断开），主动 release()
 // 回滚到系统原生调频，避免 CPU 永久锁频在最后写入值上（8550 balance 等 perf_init=1.0
 // 的配置下会锁满全核高频）。
@@ -399,7 +399,7 @@ pub fn start_scheduler_thread(
                     DaemonEvent::SystemLoadUpdate { core_utils, foreground_max_util: _ } => {
                         // 刷新看门狗心跳：只要有负载事件到达即视为负载源存活
                         last_load_event = Instant::now();
-                        // 该事件每 200ms 一次，仅在 DEBUG 时输出摘要便于排查
+                        // 该事件常规 120ms / 特调 40ms 一次，仅在 DEBUG 时输出摘要便于排查
                         log::debug!("{}", t_with_args("scheduler-event-load", &fluent_args!(
                             "cores" => core_utils.iter().map(|u| format!("{:.0}", u * 100.0)).collect::<Vec<_>>().join(",")
                         )));

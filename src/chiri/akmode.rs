@@ -34,6 +34,8 @@
 
 use crate::chiri::config::SpecialTunedConfig;
 use log::{debug, info};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::fluent_args;
@@ -47,6 +49,9 @@ const TIER_COUNT: usize = 4;
 /// 供日志观察特调档位判定是否合理（固定频率锁频功能已按需求关闭）。
 pub struct AkmodeGovernor {
     cfg: SpecialTunedConfig,
+    /// 特调激活共享标志：Monitor 层（cpu_monitor）据此切换采样间隔（特调 40ms / 其余 120ms）。
+    /// 接管时置 true、释放时置 false，由 init_policies / release 维护。
+    ak_active: Arc<AtomicBool>,
     active: bool,
     /// 当前档位 1..=4
     current_tier: u32,
@@ -61,9 +66,10 @@ pub struct AkmodeGovernor {
 }
 
 impl AkmodeGovernor {
-    pub fn new() -> Self {
+    pub fn new(ak_active: Arc<AtomicBool>) -> Self {
         Self {
             cfg: SpecialTunedConfig::default(),
+            ak_active,
             active: false,
             current_tier: 1,
             pending_tier: None,
@@ -88,6 +94,8 @@ impl AkmodeGovernor {
         self.pending_tier = None;
         self.pending_since = None;
         self.active = true;
+        // 特调激活通知 Monitor 层切换到 40ms 快速采样
+        self.ak_active.store(true, Ordering::Relaxed);
         info!(
             "{}",
             t_with_args(
@@ -106,6 +114,8 @@ impl AkmodeGovernor {
             info!("{}", t("akmode-deactivated"));
         }
         self.active = false;
+        // 特调退出通知 Monitor 层恢复常规采样
+        self.ak_active.store(false, Ordering::Relaxed);
         self.pending_tier = None;
         self.pending_since = None;
         self.fast_wait_until = None;
@@ -127,7 +137,7 @@ impl AkmodeGovernor {
         );
     }
 
-    /// 档位判定入口，每个 SystemLoadUpdate（约 200ms）触发一次。
+    /// 档位判定入口，每个 SystemLoadUpdate（常规 120ms / 特调 40ms）触发一次。
     /// 按核心组（little/big/prime）分别统计忙/闲核心数，每组用本组独立条件判定：
     ///   升档 = 任一组内超过 up_core_count 个核心占用率 > up_util_percent
     ///   降档 = 任一组内超过 down_core_count 个核心占用率 < down_util_percent
@@ -137,7 +147,10 @@ impl AkmodeGovernor {
             return;
         }
 
-        let tc = self.cfg.tier(self.current_tier);
+        // 档位配置克隆成局部值：`self.cfg.tier(...)` 若直接借用 self.cfg，其共享借用会
+        // 随下方 GroupStat 一直存活，之后调 self.apply_tier()（&mut self）会触发借用冲突
+        // （E0502）。克隆后 tc 只借局部变量，不占 self 的借用。
+        let tc = self.cfg.tier(self.current_tier).clone();
 
         // 核心组按 CPU ID 区间硬编码（8550：0-2 小核 little、3-6 大核 big、7 超大核 prime，
         // 同 SoC 布局固定不动态探测）。每组独立配置升降档条件。

@@ -26,6 +26,7 @@ pub mod utils;
 use crate::i18n::{load_language, t, t_with_args};
 use anyhow::Result;
 use log::{debug, error, info};
+use std::sync::atomic::AtomicBool;
 use std::sync::mpsc;
 use std::sync::{Arc, RwLock};
 use std::thread;
@@ -122,15 +123,19 @@ fn main() -> Result<()> {
     info!("{}", t("yumi-module-starting"));
 
     // 5. 创建通信通道（有界：防止高频事件在调度线程繁忙时无限积压占用内存；
-    //    容量 64 足够承载 200ms 负载事件与低频状态事件，满时 send 阻塞形成背压）
+    //    容量 64 足够承载 120ms（特调 40ms）负载事件与低频状态事件，满时 send 阻塞形成背压）
     let (tx, rx) = mpsc::sync_channel::<common::DaemonEvent>(64);
+
+    // 特调（akmode）激活共享标志：AkmodeGovernor 接管/释放时置位，
+    // cpu_monitor 据此在 120ms 与 40ms 采样间隔间切换
+    let ak_active = Arc::new(AtomicBool::new(false));
 
     // 6. 按 SoC 启动对应的调度器（两套互斥，同一事件通道只被其中一个消费）
     let start_result = if chiri_active {
         log::info!("{}", t("main-chiri-scheduler-selected"));
         let cfg =
             chiri::config::Config::from_file(config_path.to_str().unwrap()).unwrap_or_default();
-        chiri::start_scheduler_thread(rx, Arc::new(RwLock::new(cfg)))
+        chiri::start_scheduler_thread(rx, Arc::new(RwLock::new(cfg)), ak_active.clone())
     } else {
         let cfg = Config::from_file(config_path.to_str().unwrap()).unwrap_or_default();
         scheduler::start_scheduler_thread(rx, Arc::new(RwLock::new(cfg)))
@@ -151,7 +156,7 @@ fn main() -> Result<()> {
     let monitor_thread = thread::Builder::new()
         .name("monitor_core".to_string())
         .spawn(move || {
-            if let Err(e) = monitor::start_monitor(tx) {
+            if let Err(e) = monitor::start_monitor(tx, ak_active) {
                 error!(
                     "{}",
                     t_with_args(
