@@ -367,59 +367,41 @@ pub struct FunctionToggles {
     pub io_optimization: bool,
 }
 
-/// 单个核心组（little/big/prime）的升降档条件 + 本档 max 上限，组内独立配置。
-/// 核心数 yaml 里直接写整数（如 2 = 组内超过 2 个核心命中阈值才触发），0 表示关闭该方向判定。
-/// 升降档判定用「当前档」对应核心组的条件；max_freq 是该档位下本组的频率上限。
+/// 单个核心组（little/big/prime）的限频上限，组内独立配置。
+/// max_freq 是该档位下本组的频率上限（kHz）。
 #[derive(Debug, Deserialize, Clone)]
 pub struct SpecialTunedGroup {
-    /// 升档核心数：组内超过这个数量的核心占用率 > up_util_percent 触发升档
-    #[serde(default = "d_ak_up_core_count")]
-    pub up_core_count: u32,
-    /// 升档占用率阈值（%）
-    #[serde(default = "d_ak_up_util_threshold")]
-    pub up_util_percent: f32,
-    /// 降档核心数：组内超过这个数量的核心占用率 < down_util_percent 触发降档
-    #[serde(default = "d_ak_down_core_count")]
-    pub down_core_count: u32,
-    /// 降档占用率阈值（%）
-    #[serde(default = "d_ak_down_util_threshold")]
-    pub down_util_percent: f32,
-    /// 本档位下该核心组的 max 频率上限（kHz）：切到本档时写入 scaling_max_freq，
+    /// 本档位下该核心组的 max 频率上限（kHz）：应用本档时写入 scaling_max_freq，
     /// schedutil 在 min（硬件最低）..max 内按负载动态调频。0 = 不写该组 max（保持现状）。
     #[serde(default = "d_ak_max_freq")]
     pub max_freq: u32,
 }
 
-/// 单个档位的配置：按核心组（little/big/prime）的升降档条件 + 本档防抖等待。
+/// 单个档位的限频配置：按核心组（little/big/prime）的 max 上限。
 /// 核心组按 affected_cpus 的 CPU ID 区间硬编码判定（8550：0-2 小核、3-6 大核、7 超大核）。
-/// 升降档合并规则：任一核心组满足升档条件即升一档，任一核心组满足降档条件即降一档（升档优先）。
+/// 档位由 rules.yaml 生效模式决定（powersave/balance/performance/fast），特调期间固定应用，
+/// 不在运行中自动切换档位。
 #[derive(Debug, Deserialize, Clone)]
 pub struct SpecialTunedTier {
-    /// 本档条件成立到真正执行升降档之间的等待（ms），防抖用
-    #[serde(default = "d_ak_wait_ms")]
-    pub wait_ms: u64,
-    /// 小核组（0-2）升降档条件
+    /// 小核组（0-2）max 上限
     #[serde(default)]
     pub little: SpecialTunedGroup,
-    /// 大核组（3-6）升降档条件
+    /// 大核组（3-6）max 上限
     #[serde(default)]
     pub big: SpecialTunedGroup,
-    /// 超大核组（7）升降档条件
+    /// 超大核组（7）max 上限
     #[serde(default)]
     pub prime: SpecialTunedGroup,
 }
 
 /// 明日方舟特调（akmode）配置，跟 CLG 完全没关系。
 /// 四档就是全局那套模式档位 powersave/balance/performance/fast，档位是统一的。
-/// 特调机制：激活时统一内核调速器为 schedutil、min 压到硬件最低，每档把各核心组的
-/// scaling_max_freq 写到本档 max_freq 上限——schedutil 在 [硬件最低, 档位max] 内
-/// 按负载动态调频（能升能降、受档位约束）。
+/// 特调机制：特调激活时按 rules.yaml 生效模式选定档位，统一内核调速器为 schedutil、
+/// min 压到硬件最低，并把各核心组的 scaling_max_freq 写到该档 max_freq 上限——
+/// schedutil 在 [硬件最低, 档位max] 内按负载动态调频（能升能降、受档位约束）。
+/// 档位固定不自动切换；用户改 rules.yaml 模式后经热重载更新档位。
 #[derive(Debug, Deserialize, Clone)]
 pub struct SpecialTunedConfig {
-    /// 升降档后防抖等待临时减半的持续时间（ms）：发生一次升降档后，后续 wait_ms
-    /// 在此时长内按一半执行，让档位切换更跟手；超过此时长恢复原 wait_ms。
-    #[serde(default = "d_ak_after_change_duration_ms")]
-    pub after_change_duration_ms: u64,
     /// 档 1（最低频）：powersave
     #[serde(default)]
     pub powersave: SpecialTunedTier,
@@ -434,25 +416,7 @@ pub struct SpecialTunedConfig {
     pub fast: SpecialTunedTier,
 }
 
-// SpecialTunedConfig 缺省值：akmode.yaml 没写的字段回退到这里（核心数写整数，占用率百分比 normalize 会转成 0..1）
-fn d_ak_up_core_count() -> u32 {
-    2
-}
-fn d_ak_up_util_threshold() -> f32 {
-    80.0
-}
-fn d_ak_down_core_count() -> u32 {
-    2
-}
-fn d_ak_down_util_threshold() -> f32 {
-    60.0
-}
-fn d_ak_wait_ms() -> u64 {
-    300
-}
-fn d_ak_after_change_duration_ms() -> u64 {
-    3000
-}
+// SpecialTunedConfig 缺省值：akmode.yaml 没写的字段回退到这里
 fn d_ak_max_freq() -> u32 {
     0
 }
@@ -460,10 +424,6 @@ fn d_ak_max_freq() -> u32 {
 impl Default for SpecialTunedGroup {
     fn default() -> Self {
         Self {
-            up_core_count: d_ak_up_core_count(),
-            up_util_percent: d_ak_up_util_threshold(),
-            down_core_count: d_ak_down_core_count(),
-            down_util_percent: d_ak_down_util_threshold(),
             max_freq: d_ak_max_freq(),
         }
     }
@@ -472,7 +432,6 @@ impl Default for SpecialTunedGroup {
 impl Default for SpecialTunedTier {
     fn default() -> Self {
         Self {
-            wait_ms: d_ak_wait_ms(),
             little: SpecialTunedGroup::default(),
             big: SpecialTunedGroup::default(),
             prime: SpecialTunedGroup::default(),
@@ -483,7 +442,6 @@ impl Default for SpecialTunedTier {
 impl Default for SpecialTunedConfig {
     fn default() -> Self {
         Self {
-            after_change_duration_ms: d_ak_after_change_duration_ms(),
             powersave: SpecialTunedTier::default(),
             balance: SpecialTunedTier::default(),
             performance: SpecialTunedTier::default(),
@@ -492,47 +450,10 @@ impl Default for SpecialTunedConfig {
     }
 }
 
-impl SpecialTunedGroup {
-    /// 把 yaml 里写的百分比（>1 视为百分比）转成 0..1 比例并 clamp。
-    /// 写 50 还是 0.5 都认，前者按 50% 处理。
-    fn normalize_pct(v: &mut f32, dft: f32) {
-        if !v.is_finite() {
-            *v = dft;
-        }
-        if *v > 1.0 {
-            *v /= 100.0;
-        }
-        *v = v.clamp(0.0, 1.0);
-    }
-
-    /// 校验单个核心组：核心数限制在合理范围，占用率阈值转 0..1。
-    /// 核心数不设下限 0（>=0 恒真，等于关闭该方向判定），只设上限防误配。
-    fn normalize(&mut self) {
-        self.up_core_count = self.up_core_count.min(64);
-        self.down_core_count = self.down_core_count.min(64);
-        Self::normalize_pct(&mut self.up_util_percent, d_ak_up_util_threshold());
-        Self::normalize_pct(&mut self.down_util_percent, d_ak_down_util_threshold());
-    }
-}
-
-impl SpecialTunedTier {
-    /// 校验单个档位：逐核心组 normalize
-    fn normalize(&mut self) {
-        self.little.normalize();
-        self.big.normalize();
-        self.prime.normalize();
-    }
-}
-
 impl SpecialTunedConfig {
-    /// 校验配置：逐档 normalize；升降档后加速持续时间限制在合理范围（上限 60s 防误配）
-    pub fn normalize(&mut self) {
-        self.after_change_duration_ms = self.after_change_duration_ms.min(60_000);
-        self.powersave.normalize();
-        self.balance.normalize();
-        self.performance.normalize();
-        self.fast.normalize();
-    }
+    /// 校验配置：无百分比参数需转换，max_freq 为 0（不写）或正数，无需 normalize。
+    /// 保留空 normalize 以保持调用点一致（akmode 内部统一入口）。
+    pub fn normalize(&mut self) {}
 
     /// 取档位的配置（内部档位 1..4：powersave=1 balance=2 performance=3 fast=4）
     pub fn tier(&self, tier: u32) -> &SpecialTunedTier {

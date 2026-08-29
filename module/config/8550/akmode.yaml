@@ -1,88 +1,36 @@
-# max_freq：本档位下该核心组的频率上限（kHz），切到本档时写入 scaling_max_freq。
+# 明日方舟特调（akmode）：按 rules.yaml 生效模式固定应用对应档位的限频策略，
+# 运行中不自动切换档位（改 rules.yaml 模式后热重载更新档位）。
+# max_freq：本档位下该核心组的频率上限（kHz），应用本档时写入 scaling_max_freq，
 # schedutil 在 [硬件最低, 档位max] 内按负载动态调频；写 0 = 该组不写 max（保持现状）。
 akmode:
-  after_change_duration_ms: 799
-
   powersave:
-    wait_ms: 325
     little:
-      up_core_count: 2
-      up_util_percent: 90
-      down_core_count: 2
-      down_util_percent: 60
       max_freq: 403200
     big:
-      up_core_count: 3
-      up_util_percent: 90
-      down_core_count: 2
-      down_util_percent: 60
       max_freq: 806400
     prime:
-      up_core_count: 1
-      up_util_percent: 90
-      down_core_count: 1
-      down_util_percent: 60
       max_freq: 940800
 
   balance:
-    wait_ms: 120
     little:
-      up_core_count: 2
-      up_util_percent: 80
-      down_core_count: 1
-      down_util_percent: 60
       max_freq: 806400
     big:
-      up_core_count: 3
-      up_util_percent: 80
-      down_core_count: 2
-      down_util_percent: 60
       max_freq: 1305600
     prime:
-      up_core_count: 1
-      up_util_percent: 80
-      down_core_count: 1
-      down_util_percent: 60
       max_freq: 1497600
 
   performance:
-    wait_ms: 80
     little:
-      up_core_count: 1
-      up_util_percent: 60
-      down_core_count: 2
-      down_util_percent: 60
       max_freq: 1267200
     big:
-      up_core_count: 3
-      up_util_percent: 60
-      down_core_count: 3
-      down_util_percent: 60
       max_freq: 2073600
     prime:
-      up_core_count: 1
-      up_util_percent: 60
-      down_core_count: 1
-      down_util_percent: 60
       max_freq: 2323200
 
   fast:
-    wait_ms: 20
     little:
-      up_core_count: 1
-      up_util_percent: 60
-      down_core_count: 2
-      down_util_percent: 30
       max_freq: 1804800
     big:
-      up_core_count: 3
-      up_util_percent: 60
-      down_core_count: 3
-      down_util_percent: 30
       max_freq: 2803200
     prime:
-      up_core_count: 1
-      up_util_percent: 60
-      down_core_count: 1
-      down_util_percent: 30
       max_freq: 3190000

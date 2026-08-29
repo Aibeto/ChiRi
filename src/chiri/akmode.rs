@@ -38,7 +38,6 @@ use log::{debug, info, warn};
 use std::fs;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
 
 use crate::fluent_args;
 use crate::i18n::{t, t_with_args};
@@ -57,18 +56,18 @@ struct PolicyRestore {
     max_freq: Option<u32>,
 }
 
-/// 单个 policy 的运行时状态：四档 max 上限吸附值，切档时写 scaling_max_freq。
+/// 单个 policy 的运行时状态：当前生效档位的 max 上限吸附值。
 struct ClusterState {
     policy_id: i32,
     /// 核心组名：little / big / prime
     core_name: String,
     /// 可用频率（kHz，升序去重），用于吸附 max_freq
     available_freqs: Vec<u32>,
-    /// 四档 max 吸附值（下标 0..3 对应档 1..4），None = 该档该组未配置 max_freq（不写）
-    tier_max: [Option<u32>; TIER_COUNT],
+    /// 当前档位下本组的 max 吸附值（None = 该档该组未配置 max_freq，不写）
+    current_max: Option<u32>,
     max_writer: FastWriter,
     /// 当前已成功写入的 max（kHz），0 表示尚未写入
-    current_max: u32,
+    written_max: u32,
 }
 
 /// 在 available_frequencies 里找离 target 最近的档位
@@ -93,29 +92,27 @@ fn core_name_for(affected: &[usize]) -> Option<&'static str> {
     }
 }
 
-/// 吸附四档的 max 上限：取各档该核心组的 max_freq（>0 才写），吸附到真实频率表。
-/// 未配置（0）的档位返回 None，切到该档时不写 max（保持现状）。
-fn snap_tier_max(cfg: &SpecialTunedConfig, name: &str, freqs: &[u32]) -> [Option<u32>; TIER_COUNT] {
-    let tiers = [&cfg.powersave, &cfg.balance, &cfg.performance, &cfg.fast];
-    let mut arr = [None; TIER_COUNT];
-    for (i, t) in tiers.iter().enumerate() {
-        let f = match name {
-            "little" => t.little.max_freq,
-            "big" => t.big.max_freq,
-            "prime" => t.prime.max_freq,
-            _ => 0,
-        };
-        if f > 0 {
-            arr[i] = Some(nearest_freq(freqs, f));
-        }
+/// 吸附指定档位下该核心组的 max 上限到真实频率表。未配置（0）返回 None（不写 max）。
+fn snap_max(cfg: &SpecialTunedConfig, tier: u32, name: &str, freqs: &[u32]) -> Option<u32> {
+    let t = cfg.tier(tier);
+    let f = match name {
+        "little" => t.little.max_freq,
+        "big" => t.big.max_freq,
+        "prime" => t.prime.max_freq,
+        _ => 0,
+    };
+    if f > 0 {
+        Some(nearest_freq(freqs, f))
+    } else {
+        None
     }
-    arr
 }
 
-/// 明日方舟特调（akmode）控制器：schedutil 动态调频 + 档位限频。
-/// 接管时统一内核调速器为 schedutil、把 min 压到硬件最低（解决设备高 min 卡频），
-/// 并按负载在四档间升降，每档把各核心组的 scaling_max_freq 写到该档 max 上限：
-/// schedutil 在 [硬件最低, 档位max] 内按负载动态调频（能升能降，且受档位约束）。
+/// 明日方舟特调（akmode）控制器：按 rules.yaml 生效模式固定应用对应档位的限频策略。
+/// 档位由 rules.yaml 决定（powersave/balance/performance/fast），特调期间不自动切换；
+/// 激活时统一内核调速器为 schedutil、min 压到硬件最低，把各核心组 scaling_max_freq
+/// 写到该档 max_freq 上限——schedutil 在 [硬件最低, 档位max] 内按负载动态调频。
+/// 用户改 rules.yaml 模式后经热重载（reload_config）更新档位。
 pub struct AkmodeGovernor {
     cfg: SpecialTunedConfig,
     /// 特调激活共享标志：Monitor 层（cpu_monitor）据此切换采样间隔（特调 40ms / 其余 120ms）。
@@ -125,16 +122,8 @@ pub struct AkmodeGovernor {
     /// 各 policy 的 governor/min/max 快照，release 时恢复
     restore: Vec<PolicyRestore>,
     active: bool,
-    /// 当前档位 1..=4
+    /// 当前生效档位 1..=4（由 rules.yaml 模式决定，固定不自动切换）
     current_tier: u32,
-    /// 待执行的升降档目标，防抖等待中
-    pending_tier: Option<u32>,
-    /// 待执行目标第一次被检测到的时间
-    pending_since: Option<Instant>,
-    /// 升降档后防抖等待临时减半的截止时间：到点前 wait_ms 按一半执行
-    fast_wait_until: Option<Instant>,
-    /// 调试日志计数，每 25 tick 打一次摘要
-    log_counter: u32,
 }
 
 impl AkmodeGovernor {
@@ -146,10 +135,6 @@ impl AkmodeGovernor {
             restore: Vec::new(),
             active: false,
             current_tier: 1,
-            pending_tier: None,
-            pending_since: None,
-            fast_wait_until: None,
-            log_counter: 0,
         }
     }
 
@@ -160,17 +145,14 @@ impl AkmodeGovernor {
     /// 接管全部 cpufreq policy：
     /// 1. 先 release 清掉上一次状态；
     /// 2. 逐个 policy 读可用频率与 affected_cpus，按 CPU ID 硬编码判定大小核；
-    /// 3. 吸附四档 max 上限，快照 governor/min/max；
-    /// 4. 写 schedutil、min 压到硬件最低、写起始档的 max 上限。
-    /// initial_tier 由调用方从 rules.yaml 的生效模式换算（powersave=1..fast=4）。
-    pub fn init_policies(&mut self, cfg: &SpecialTunedConfig, initial_tier: u32) {
+    /// 3. 快照 governor/min/max；写 schedutil、min 压到硬件最低；
+    /// 4. 按 `tier`（rules.yaml 生效模式换算的档位）写各核心组 max 上限。
+    pub fn init_policies(&mut self, cfg: &SpecialTunedConfig, tier: u32) {
         self.release();
         self.cfg = cfg.clone();
         self.cfg.normalize();
-        let initial_tier = initial_tier.clamp(1, TIER_COUNT as u32);
-        self.current_tier = initial_tier;
-        self.pending_tier = None;
-        self.pending_since = None;
+        let tier = tier.clamp(1, TIER_COUNT as u32);
+        self.current_tier = tier;
 
         let policies = crate::chiri::get_cpu_policies();
 
@@ -225,7 +207,7 @@ impl AkmodeGovernor {
                 }
             };
 
-            let tier_max = snap_tier_max(&self.cfg, name, &freqs);
+            let current_max = snap_max(&self.cfg, tier, name, &freqs);
             let mut max_writer = FastWriter::new(max_path.clone());
             if !max_writer.is_valid() {
                 warn!(
@@ -265,10 +247,10 @@ impl AkmodeGovernor {
             let min_hw = freqs[0];
             let _ = crate::utils::try_write_file(&min_path, min_hw.to_string());
 
-            // 写起始档的 max 上限
-            let mut current_max = 0u32;
-            if let Some(max) = tier_max[(initial_tier - 1) as usize] {
-                current_max = max;
+            // 写当前档位的 max 上限
+            let mut written_max = 0u32;
+            if let Some(max) = current_max {
+                written_max = max;
                 let _ = max_writer.write_value_force(max);
             }
 
@@ -276,9 +258,9 @@ impl AkmodeGovernor {
                 policy_id: pid,
                 core_name: name.to_string(),
                 available_freqs: freqs,
-                tier_max,
-                max_writer,
                 current_max,
+                max_writer,
+                written_max,
             });
         }
 
@@ -312,10 +294,6 @@ impl AkmodeGovernor {
         self.clusters.clear();
         // 特调退出通知 Monitor 层恢复常规采样
         self.ak_active.store(false, Ordering::Relaxed);
-        self.pending_tier = None;
-        self.pending_since = None;
-        self.fast_wait_until = None;
-        self.log_counter = 0;
     }
 
     /// 恢复单个 policy 的原 governor/min/max，返回是否全部写成功（失败保留快照下次重试）。
@@ -353,180 +331,24 @@ impl AkmodeGovernor {
         all_ok
     }
 
-    /// 热切换配置：重新吸附四档 max 并重写当前档，当前档位不变
-    pub fn reload_config(&mut self, cfg: &SpecialTunedConfig) {
+    /// 热重载：rules.yaml 模式变化（`tier` 重新换算）或 akmode.yaml 参数变化后，
+    /// 重新吸附并重写当前档位的 max 上限，档位由调用方传入的 `tier` 决定。
+    pub fn reload_config(&mut self, cfg: &SpecialTunedConfig, tier: u32) {
         self.cfg = cfg.clone();
         self.cfg.normalize();
-        for cluster in self.clusters.iter_mut() {
-            cluster.tier_max =
-                snap_tier_max(&self.cfg, &cluster.core_name, &cluster.available_freqs);
-        }
-        self.current_tier = self.current_tier.clamp(1, TIER_COUNT as u32);
-        // 用新配置重写当前档的 max 上限
-        for cluster in self.clusters.iter_mut() {
-            if let Some(max) = cluster.tier_max[(self.current_tier - 1) as usize] {
-                if max != cluster.current_max {
-                    if cluster.max_writer.write_value_force(max) {
-                        cluster.current_max = max;
-                    }
-                }
-            }
-        }
-        debug!(
-            "{}",
-            t_with_args(
-                "akmode-config-reloaded",
-                &fluent_args!("wait" => self.cfg.tier(self.current_tier).wait_ms.to_string())
-            )
-        );
-    }
-
-    /// 档位判定入口，每个 SystemLoadUpdate（常规 120ms / 特调 40ms）触发一次。
-    /// 按核心组（little/big/prime）分别统计忙/闲核心数，每组用本组独立条件判定：
-    ///   升档 = 任一组内超过 up_core_count 个核心占用率 > up_util_percent
-    ///   降档 = 任一组内超过 down_core_count 个核心占用率 < down_util_percent
-    /// 升档优先于降档，条件成立后等 wait_ms 防抖再切档（切档时写新档位的 max 上限）。
-    pub fn on_load_update(&mut self, core_utils: &[f32]) {
-        if !self.active {
-            return;
-        }
-
-        // 档位配置克隆成局部值：`self.cfg.tier(...)` 若直接借用 self.cfg，其共享借用会
-        // 随下方 GroupStat 一直存活，之后调 self.apply_tier()（&mut self）会触发借用冲突
-        // （E0502）。克隆后 tc 只借局部变量，不占 self 的借用。
-        let tc = self.cfg.tier(self.current_tier).clone();
-
-        // 核心组按 CPU ID 区间硬编码（8550：0-2 小核 little、3-6 大核 big、7 超大核 prime，
-        // 同 SoC 布局固定不动态探测）。每组独立配置升降档条件。
-        struct GroupStat<'a> {
-            g: &'a crate::chiri::config::SpecialTunedGroup,
-            range: std::ops::Range<usize>,
-            over: usize,
-            under: usize,
-        }
-
-        let mut stats = [
-            GroupStat {
-                g: &tc.little,
-                range: 0..3,
-                over: 0,
-                under: 0,
-            },
-            GroupStat {
-                g: &tc.big,
-                range: 3..7,
-                over: 0,
-                under: 0,
-            },
-            GroupStat {
-                g: &tc.prime,
-                range: 7..8,
-                over: 0,
-                under: 0,
-            },
-        ];
-
-        let mut up_hit = false;
-        let mut down_hit = false;
-        for s in &mut stats {
-            for cpu in s.range.clone() {
-                // core_utils 按真实 CPU ID 索引，离线核心固定为 0.0，不参与统计
-                if let Some(&u) = core_utils.get(cpu) {
-                    if u <= 0.0 {
-                        continue;
-                    }
-                    if u > s.g.up_util_percent {
-                        s.over += 1;
-                    }
-                    if u < s.g.down_util_percent {
-                        s.under += 1;
-                    }
-                }
-            }
-            if s.over as u32 > s.g.up_core_count {
-                up_hit = true;
-            }
-            if s.under as u32 > s.g.down_core_count {
-                down_hit = true;
-            }
-        }
-
-        // 升档优先于降档，频率贴着需求走。
-        // 升降档条件和等待都看当前档：升档用本档各组 up_*，降档用本档各组 down_*。
-        let mut desired = self.current_tier as i32;
-        if up_hit {
-            desired += 1;
-        } else if down_hit {
-            desired -= 1;
-        }
-        let desired = desired.clamp(1, TIER_COUNT as i32) as u32;
-
-        if desired == self.current_tier {
-            self.pending_tier = None;
-            self.pending_since = None;
-        } else {
-            let now = Instant::now();
-            // 升降档后的临时加速：刚切过档（fast_wait_until 未过期）时 wait_ms 减半执行，
-            // 让连续跳档更跟手；超过 after_change_duration_ms 恢复原 wait_ms。
-            let fast_wait = self.fast_wait_until.map_or(false, |until| now < until);
-            let wait = if fast_wait {
-                tc.wait_ms / 2
-            } else {
-                tc.wait_ms
-            };
-            match self.pending_tier {
-                Some(t) if t == desired => {
-                    if let Some(since) = self.pending_since {
-                        if now.duration_since(since).as_millis() as u64 >= wait {
-                            self.apply_tier(desired);
-                            self.pending_tier = None;
-                            self.pending_since = None;
-                        }
-                    }
-                }
-                _ => {
-                    self.pending_tier = Some(desired);
-                    self.pending_since = Some(now);
-                }
-            }
-        }
-
-        self.log_counter += 1;
-        if self.log_counter % 25 == 0 {
-            let mode = crate::chiri::config::tier_to_mode(self.current_tier);
-            let (l_over, l_under) = (stats[0].over, stats[0].under);
-            let (b_over, b_under) = (stats[1].over, stats[1].under);
-            let (p_over, p_under) = (stats[2].over, stats[2].under);
-            debug!(
-                "{}",
-                t_with_args(
-                    "akmode-tick-log",
-                    &fluent_args!(
-                        "mode" => mode.to_string(),
-                        "up" => up_hit.to_string(),
-                        "down" => down_hit.to_string(),
-                        "l_over" => l_over.to_string(),
-                        "l_under" => l_under.to_string(),
-                        "b_over" => b_over.to_string(),
-                        "b_under" => b_under.to_string(),
-                        "p_over" => p_over.to_string(),
-                        "p_under" => p_under.to_string()
-                    )
-                )
-            );
-        }
-    }
-
-    /// 切档：写各核心组新档位的 max 上限，并启动临时加速窗口
-    fn apply_tier(&mut self, tier: u32) {
-        let old = self.current_tier;
+        let tier = tier.clamp(1, TIER_COUNT as u32);
         self.current_tier = tier;
-        // 写新档位的 max 上限：schedutil 在 [硬件最低, 档位max] 内按负载动态调频
-        for cluster in &mut self.clusters {
-            if let Some(max) = cluster.tier_max[(tier - 1) as usize] {
-                if max != cluster.current_max {
+        for cluster in self.clusters.iter_mut() {
+            cluster.current_max = snap_max(
+                &self.cfg,
+                tier,
+                &cluster.core_name,
+                &cluster.available_freqs,
+            );
+            if let Some(max) = cluster.current_max {
+                if max != cluster.written_max {
                     if cluster.max_writer.write_value_force(max) {
-                        cluster.current_max = max;
+                        cluster.written_max = max;
                         debug!(
                             "{}",
                             t_with_args(
@@ -543,16 +365,12 @@ impl AkmodeGovernor {
                 }
             }
         }
-        // 切档后启动临时加速窗口：此后 after_change_duration_ms 内防抖等待减半执行
-        self.fast_wait_until =
-            Some(Instant::now() + Duration::from_millis(self.cfg.after_change_duration_ms));
-        info!(
+        debug!(
             "{}",
             t_with_args(
-                "akmode-tier-change",
+                "akmode-config-reloaded",
                 &fluent_args!(
-                    "old" => crate::chiri::config::tier_to_mode(old).to_string(),
-                    "new" => crate::chiri::config::tier_to_mode(tier).to_string()
+                    "mode" => crate::chiri::config::tier_to_mode(tier).to_string()
                 )
             )
         );

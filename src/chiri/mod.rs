@@ -379,8 +379,15 @@ pub fn start_scheduler_thread(
                             let config_lock = config_clone.read().unwrap();
                             
                             if crate::common::is_special_mode(&current_mode) {
-                                // 亮屏恢复特调模式：akmode 息屏期间未释放，保持接管即可。
-                                // 配置热重载已由 ConfigReload 事件处理，此处无需额外操作。
+                                // 亮屏恢复特调：akmode 息屏期间通常保持接管（息屏分支不释放）；
+                                // 但若息屏时负载事件停止触发看门狗释放过 akmode，这里必须重新接管，
+                                // 否则特调限频失效、采样间隔也不会切回 40ms。
+                                if !ak_governor.is_active() {
+                                    cpu_governor.release();
+                                    let ak_cfg = config_lock.get_akmode().clone();
+                                    let initial_tier = get_ak_initial_tier();
+                                    ak_governor.init_policies(&ak_cfg, initial_tier);
+                                }
                             } else if current_mode != "fas" {
                                 ak_governor.release();
                                 let clg_cfg = get_clg_cfg(&config_lock, &current_mode);
@@ -508,11 +515,9 @@ pub fn start_scheduler_thread(
                         //     fas_controller.update_cpu_util(foreground_max_util);
                         //     fas_controller.update_core_utils(&core_utils);
                         // }
-                        // 特调（akmode）优先：前台为白名单应用时全权投喂 akmode 调度器；
-                        // 否则若 CLG 处于活动状态（日常模式或息屏 Doze），投喂 CLG。
-                        if ak_governor.is_active() {
-                            ak_governor.on_load_update(&core_utils);
-                        } else if cpu_governor.is_active() {
+                        // 特调（akmode）不消费负载：档位由 rules.yaml 生效模式决定、运行中不
+                        // 自动切换，频率由 schedutil 按负载动态调频。负载事件仅投喂 CLG。
+                        if cpu_governor.is_active() {
                             cpu_governor.on_load_update(&core_utils);
                         }
                     },
@@ -558,13 +563,11 @@ pub fn start_scheduler_thread(
                         if is_screen_on { // 息屏时不要用新配置覆盖 Doze
                             let config_lock = config_clone.read().unwrap();
                             if crate::common::is_special_mode(&current_mode) {
-                                // 特调模式：重载 akmode 配置
+                                // 特调模式：按 rules.yaml 重新换算档位并重载 akmode 配置
                                 let ak_cfg = config_lock.get_akmode().clone();
-                                if ak_governor.is_active() { ak_governor.reload_config(&ak_cfg); }
-                                else {
-                                    let initial_tier = get_ak_initial_tier();
-                                    ak_governor.init_policies(&ak_cfg, initial_tier);
-                                }
+                                let initial_tier = get_ak_initial_tier();
+                                if ak_governor.is_active() { ak_governor.reload_config(&ak_cfg, initial_tier); }
+                                else { ak_governor.init_policies(&ak_cfg, initial_tier); }
                             } else {
                                 ak_governor.release();
                                 let clg_cfg = get_clg_cfg(&config_lock, &current_mode);
