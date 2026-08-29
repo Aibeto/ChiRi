@@ -270,9 +270,16 @@ pub fn watch_config_file(
     if !rules_path.exists() {
         let _ = utils::try_write_file(&rules_path, "");
     }
-    inotify
-        .watches()
-        .add(&rules_path, WatchMask::MODIFY | WatchMask::CLOSE_WRITE)?;
+    // 监听 rules.yaml 所在目录而非文件本身：WebUI 通过「临时文件 + 原子 mv」替换
+    // rules.yaml 时，若 watch 挂在旧 inode 上会永久失效，只有目录级 watch 才能感知
+    // MOVED_TO；其余文件（active_config.txt 等）通过文件名过滤避免误触发重载。
+    let rules_dir = rules_path
+        .parent()
+        .ok_or("invalid rules.yaml path")?;
+    inotify.watches().add(
+        rules_dir,
+        WatchMask::MODIFY | WatchMask::CLOSE_WRITE | WatchMask::MOVED_TO,
+    )?;
     info!(
         "{}",
         t_with_args(
@@ -283,7 +290,12 @@ pub fn watch_config_file(
     let mut buffer = [0u8; 1024];
     loop {
         let events = inotify.read_events_blocking(&mut buffer)?;
-        if events.peekable().peek().is_some() {
+        // 只关心 rules.yaml 自身的事件（原子替换时为 MOVED_TO，直接改写时为 MODIFY/CLOSE_WRITE）
+        // 注：inotify::Events 只实现 IntoIterator，无 iter()，检测后 events 不再使用，直接消费
+        let rules_changed = events
+            .into_iter()
+            .any(|ev| ev.name.as_deref() == Some(std::ffi::OsStr::new("rules.yaml")));
+        if rules_changed {
             info!("{}", t("app-detect-change-detected"));
             thread::sleep(Duration::from_millis(100));
             while let Ok(events) = inotify.read_events(&mut buffer) {

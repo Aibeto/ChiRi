@@ -50,9 +50,16 @@ fi
 #   echo "$(date): disable_boost.sh not found" >> "$LOG_FILE"
 # fi
 
-# 6. 启动 yumi 守护进程
-# 方式 A: 生产模式 (不记录启动日志，节省 I/O)
-nohup "$DAEMON_PATH" > /dev/null 2>&1 &
+# 6. 启动 yumi 守护进程（崩溃自动重启）
+# 循环包装：守护进程异常退出/被杀后 3 秒自动拉起；模块被卸载（二进制文件被删除）时
+# 执行失败即退出，避免卸载后残留进程继续锁频篡改 CPU。
+# 调试排障：把下面两行换成"方式 B"的单次启动即可看到报错输出。
+nohup sh -c '
+  while :; do
+    "$1" || exit 0
+    sleep 3
+  done
+' sh "$DAEMON_PATH" > /dev/null 2>&1 &
 
 # 方式 B: 调试模式 (如果启动不起来，用这个看报错，输出到 logs/boot_error.log)
-# nohup "$DAEMON_PATH" > "$LOG_DIR/boot_error.log" 2>&1 &
+# nohup sh -c 'while :; do "$1" || exit 0; sleep 3; done' sh "$DAEMON_PATH" > "$LOG_DIR/boot_error.log" 2>&1 &

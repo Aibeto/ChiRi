@@ -55,9 +55,10 @@ fn main() -> Result<()> {
     let config_rel = config_path
         .strip_prefix(root.join("config"))
         .unwrap_or(&config_path);
+    // as_encoded_bytes 未稳定化（各 toolchain 均不可用），用 to_string_lossy 兼容
     let _ = utils::try_write_file(
         root.join("active_config.txt"),
-        config_rel.as_encoded_bytes(),
+        config_rel.to_string_lossy().as_bytes(),
     );
 
     // 导出内部特调白名单（编译期常量）供 WebUI 展示“特调”标签与专属选项：

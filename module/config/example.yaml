@@ -12,7 +12,7 @@ meta:
   # 配置名称（可选，仅供文档参考，代码不会解析此字段）
   name: "default_config"
   # 配置作者（可选，仅供文档参考，代码不会解析此字段）
-  author: "yuki"
+  author: "ChiRi"
   # 日志语言：en / zh，切换后自动加载对应 .ftl 翻译文件
   language: "zh"
   # 日志级别：DEBUG / INFO / WARN / ERROR，热重载即时生效
@@ -82,8 +82,8 @@ CpuIdle:
 #  以下为一组完整模板，复制后将 key 替换为对应模式名即可。
 # ============================================================
 
-# ⬇ 将此处替换为模式名：powersave / balance / performance / fast
-balance:
+# ⬇ 将此处替换为模式名：scenemode / balance / performance / fast
+modename:
   cpu_load_governor:
     # 升频阈值 (0.0~1.0)
     # 当 cluster 最大 util >= 此值时进入升频区间。

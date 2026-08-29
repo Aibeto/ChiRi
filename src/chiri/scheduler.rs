@@ -87,8 +87,8 @@ impl CpuScheduler {
     /// 开关关闭或 /sys/block 不存在时直接返回；每个参数非空且路径存在才写。
     fn apply_io_settings(&self) -> Result<()> {
         let config = self.config.read().unwrap();
+        // 开关关闭时直接返回，不打"已完成"日志，避免误报
         if !config.function.io_optimization {
-            log::info!("{}", t("apply-io-settings-start"));
             return Ok(());
         }
 

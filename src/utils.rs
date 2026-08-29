@@ -181,17 +181,50 @@ pub struct FastWriter {
     file: Option<File>,
     buf: [u8; 20],
     path: PathBuf,
+    /// 本次生命周期内是否已尝试过 umount（最多一次，避免反复 detach 合法挂载）
+    unmounted: bool,
 }
 
 impl FastWriter {
     pub fn new<P: AsRef<Path>>(path: P) -> Self {
         let path_ref = path.as_ref();
-        Self::try_unmount(path_ref);
         let _ = enable_perm(path_ref);
-        let file = OpenOptions::new().write(true).open(path_ref)
-            .map_err(|e| log::error!("{}", t_with_args("sysfs-open-failed", &fluent_args!("path" => path_ref.display().to_string(), "error" => e.to_string()))))
-            .ok();
-        Self { file, buf: [0u8; 20], path: path_ref.to_path_buf() }
+        let mut w = Self {
+            file: Self::open_file(path_ref),
+            buf: [0u8; 20],
+            path: path_ref.to_path_buf(),
+            unmounted: false,
+        };
+        // 惰性卸载：仅当直接打开失败（厂商 bind mount 保护 / 权限封装）时才尝试 umount 重开，
+        // 避免对正常设备上每个节点无条件 detach（可能拆掉合法挂载）。写入被拒（EACCES/EROFS）
+        // 时也会走一次卸载重试（见 do_write）。
+        if w.file.is_none() {
+            w.unmount_and_reopen();
+        }
+        w
+    }
+
+    fn open_file(path: &Path) -> Option<File> {
+        OpenOptions::new()
+            .write(true)
+            .open(path)
+            .map_err(|e| {
+                log::error!(
+                    "{}",
+                    t_with_args(
+                        "sysfs-open-failed",
+                        &fluent_args!("path" => path.display().to_string(), "error" => e.to_string())
+                    )
+                )
+            })
+            .ok()
+    }
+
+    fn unmount_and_reopen(&mut self) {
+        Self::try_unmount(&self.path);
+        self.unmounted = true;
+        // 卸载后强制重新打开：旧 fd 可能仍指向被卸载的挂载背衬，需换到真实节点
+        self.file = Self::open_file(&self.path);
     }
 
     fn try_unmount(path: &Path) {
@@ -218,32 +251,38 @@ impl FastWriter {
     pub fn is_valid(&self) -> bool { self.file.is_some() }
 
     fn do_write(&mut self, value: u32) -> bool {
-        if let Some(file) = &mut self.file {
-            let len = Self::u32_to_buf(value, &mut self.buf);
+        let len = Self::u32_to_buf(value, &mut self.buf);
+        let write_result = if let Some(file) = &mut self.file {
             let _ = file.seek(SeekFrom::Start(0));
-            match file.write_all(&self.buf[..len]) {
-                Ok(()) => {
-                    true
-                }
-                Err(e) => {
+            file.write_all(&self.buf[..len])
+        } else {
+            return false;
+        };
+        match write_result {
+            Ok(()) => true,
+            Err(e) => {
+                match e.raw_os_error() {
                     // EINVAL(22): 内核拒绝该频率 (热限频 / 范围收窄)
                     // EBUSY(16): sysfs 节点短暂被占用
                     // 两者均为预期内的瞬态错误，降级为 debug 并且不缓存，下次 tick 自动重试
-                    match e.raw_os_error() {
-                        Some(libc::EINVAL) | Some(libc::EBUSY) => {
-                            log::debug!("write freq {} to {:?} skipped: {}", value, self.path, e);
-                        }
-                        _ => {
-                            log::warn!("{}", t_with_args("sysfs-write-freq-failed",
-                                &fluent_args!("freq" => value.to_string(), "error" => e.to_string())));
-                        }
+                    Some(libc::EINVAL) | Some(libc::EBUSY) => {
+                        log::debug!("write freq {} to {:?} skipped: {}", value, self.path, e);
                     }
-                    // 写入失败不更新 last_value，确保下次 tick 会重试
-                    false
+                    // EACCES/EROFS: 多为厂商挂载写保护，卸载后重试一次
+                    Some(libc::EACCES) | Some(libc::EROFS) if !self.unmounted => {
+                        log::warn!("{}", t_with_args("sysfs-write-freq-failed",
+                            &fluent_args!("freq" => value.to_string(), "error" => e.to_string())));
+                        self.unmount_and_reopen();
+                        return self.do_write(value);
+                    }
+                    _ => {
+                        log::warn!("{}", t_with_args("sysfs-write-freq-failed",
+                            &fluent_args!("freq" => value.to_string(), "error" => e.to_string())));
+                    }
                 }
+                // 写入失败不更新 last_value，确保下次 tick 会重试
+                false
             }
-        } else {
-            false
         }
     }
 

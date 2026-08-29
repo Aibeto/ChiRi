@@ -122,6 +122,7 @@ clg-tick-log = [CLG] P{ $pid } 利用率={ $util }% perf={ $perf } 频率={ $fre
 clg-writer-invalid = [CLG] P{ $pid } sysfs 写入器无效 (max_valid: { $max_valid }, min_valid: { $min_valid })，已跳过。
 clg-freq-set = [CLG] P{ $pid } 频率调整: { $old_khz }MHz -> { $new_khz }MHz
 clg-freq-write-failed-cached = [CLG] P{ $pid } 频率写入失败，保持缓存值 { $cached_khz }MHz (目标 { $target_khz }MHz)
+clg-watchdog-release = [CLG] 看门狗: 已 { $secs } 秒未收到负载事件，eBPF 负载源疑似失效，已释放 CPU 控制权恢复系统默认调频
 
 # --- FAS ---
 fas-freq-mismatch = [FAS] P{ $pid }: 频率不匹配！预期 { $min }-{ $max }，实际 { $actual } -> 正在紧急重写

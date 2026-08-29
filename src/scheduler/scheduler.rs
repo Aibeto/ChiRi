@@ -52,16 +52,17 @@ impl CpuScheduler {
         if config.function.cpu_idle_scaling_governor && !config.cpu_idle.current_governor.is_empty() {
             if self.sys_path_exist.cpuidle_governor_exist {
                 let _ = utils::try_write_file("/sys/devices/system/cpu/cpuidle/current_governor", &config.cpu_idle.current_governor);
+                // 仅在真正发起写入时输出"已完成"，避免开关未开启时误报
+                log::info!("{}", t("apply-cpu-idle-governor-start"));
             }
         }
-        log::info!("{}",t("apply-cpu-idle-governor-start"));
         Ok(())
     }
 
     fn apply_io_settings(&self) -> Result<()> {
         let config = self.config.read().unwrap();
+        // 开关关闭时直接返回，不打"已完成"日志，避免误报
         if !config.function.io_optimization {
-            log::info!("{}", t("apply-io-settings-start"));
             return Ok(());
         }
 

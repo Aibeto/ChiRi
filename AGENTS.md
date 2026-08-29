@@ -1,62 +1,93 @@
 # AGENTS.md
 
-> 上次更新时间：2026-08-29
+> 上次更新时间：2026-08-29 15:00:00
+> head：affbc9fed37ca7a8d2d78db8f42cd2f7d839b5a0
 
-本文件为 AI 编程助手在本仓库工作时提供指导。
+本文件为 AI 编程助手（Cursor / Claude Code / Trae 等）在本仓库工作时提供指导，由 AI 自主生成。
 
 ## 项目概述
 
-**yumi** 是 Android CPU 智能调度控制系统（Magisk/KernelSU 模块），核心为 Rust 守护进程，通过 eBPF 采集 CPU 调度事件与渲染帧数据，结合 PID 控制 FAS 帧感知调度与 CLG 动态调频。
+**yumi** 是一个 Android CPU 智能调度控制系统（Magisk/KernelSU 模块），核心为 Rust 守护进程，通过 eBPF 内核探针采集 CPU 调度事件与渲染帧数据，结合 PID 控制 FAS 帧感知调度与 CPU 负载调速器（CLG）动态调频。
 
-- 目标平台：Android 8.0+ / AArch64 / Root
+- 目标平台：Android 8.0+ / AArch64 / 需要 Root
 - 许可证：GPL-3.0-or-later
-- 版本：`module/module.prop` 与 `Cargo.toml` 同步
+- 版本：见 `module/module.prop` 与 `Cargo.toml`（需保持同步）
 
-## 核心架构
+## 目录结构
 
 ```
-src/                  # Rust 守护进程
+src/                  # Rust 守护进程主代码
   monitor/            # 监控层：app_detect / fps_monitor / cpu_monitor / screen_detect
-  scheduler/          # 调度层（Yumi）：FAS 引擎、CLG 调速器
-  chiri/              # Chiri 专用调度器（特定 SoC）
-yumi-ebpf/            # eBPF 探针（独立 workspace）
-module/               # Magisk/KernelSU 模块载体
-  config/             # 配置文件 + 处理器子目录
-webui/                # Vue 3 管理界面
+  scheduler/          # 调度层（默认 Yumi）：FAS 引擎、CLG 负载调速器
+    fas/              # FAS 核心：PID 控制器、帧率档位、frame_pipeline
+  chiri/              # Chiri 专用调度器（特定 SoC 触发；复制自 scheduler/，待定制）
+  common.rs / fas_types.rs / i18n.rs / logger.rs
+yumi-ebpf/            # eBPF 探针（bpfel-unknown-none，build-std 编译；独立 workspace，不在根 members）
+xtask/                # 构建脚本（cargo xtask build 完成编译打包 zip）
+module/               # Magisk/KernelSU 模块载体（module.prop、customize.sh、service.sh）
+  config/             # config.yaml / rules.yaml / i18n (en.ftl / zh.ftl)；<soc>/config.yaml + special_tuned.yaml 处理器子目录
+webui/                # Vue 3 + TypeScript + Vite + Pinia + Vant 管理界面
+updateInformation/    # 更新.json 与 changelog
+.github/workflows/    # CI：Node 24 + Rust nightly + NDK r29 + cargo-ndk
 ```
 
-技术栈：Rust (nightly) + tokio + aya(eBPF) + Vue 3 + TypeScript + Vite
+## 技术栈
+
+| 层       | 技术                                                                              |
+| -------- | --------------------------------------------------------------------------------- |
+| 守护进程 | Rust (edition 2024, nightly), tokio, aya (eBPF), serde_yaml, inotify, netlink     |
+| eBPF     | aya 框架，`sched_switch` tracepoint + `queueBuffer` uprobe                        |
+| WebUI    | Vue 3, TypeScript, Vite, Pinia, Vant, vue-i18n, kernelsu                          |
+| 构建     | cargo xtask build（Rust aarch64-linux-android 交叉编译 + webui npm build + 打包） |
 
 ## 常用命令
 
 ```bash
-cargo xtask build                                    # 完整构建
-cargo +nightly check -p yumi --target aarch64-linux-android  # 静态检查
-cd webui && npm run dev                              # WebUI 开发
-cd webui && npm run type-check                       # WebUI 类型检查
+# 完整构建（编译 eBPF + 守护进程 + WebUI 并打包模块 zip）
+cargo xtask build
+
+# 本地静态检查（验证 yumi crate 本身；需 nightly + aarch64-linux-android target + bpf-linker）
+cargo +nightly check -p yumi --target aarch64-linux-android
+
+# WebUI 开发
+cd webui && npm install && npm run dev
+
+# WebUI 类型检查
+cd webui && npm run type-check
 ```
 
-**重要**：
+- **本地 check 的环境依赖**：eBPF 编译用 `-Z build-std`（仅 nightly 支持），且 build.rs 会构建 yumi-ebpf，因此 `cargo check` 需要 nightly 工具链 + `aarch64-linux-android` target + 可用的 bpf-linker。yumi 为 Android/Linux 专属 crate，切勿用 Windows host 目标检查（netlink-sys/aya 无法在 Windows 编译）。bpf-linker 在 Windows 下为 `bpf-linker.exe`（build.rs 已按 `cfg!(windows)` 兼容）。
+- **yumi-ebpf 是 no_std/no_main 探针，独立 workspace**（根 `Cargo.toml` 的 members 只有 xtask，勿把 yumi-ebpf 加回）：只可用 bpfel 目标检查（`-Z build-std=core`），**禁止**在带 std 的目标（如 aarch64-linux-android 或 Windows host）下对它编译/检查——探针既无法用 std 目标编译（`unwinding panics are not supported without std`），test 剖面还会与 `#[panic_handler]` 冲突（`duplicate lang item panic_impl`）。根 build.rs 用 `current_dir=yumi-ebpf` 单独构建它。IDE（rust-analyzer）在根 workspace 下不会检查它。
 
-- 本地开发只做 `cargo check`，不要 `cargo build`（需 NDK）
-- eBPF 是独立 workspace，勿加回根 members
-- Windows 下检查需用 `aarch64-linux-android` 目标
+- 本地开发通常只做 `cargo check` / WebUI `type-check` 验证；完整产物由云端 CI（GitHub Actions）生成。
+- 不要随意执行 `cargo build`（需要 NDK 环境），优先静态检查。
+- 完整构建的隐藏依赖：`build.rs` 的 `ensure_bpf_linker` 依次复用「PATH 中已有 bpf-linker」→「OUT_DIR 缓存」→ `cargo install bpf-linker` 兜底。CI 通过 GitHub API 解析官方 release asset 直接下载静态链接 LLVM 的预编译二进制（bpf-linker 0.11 依赖 LLVM 21+，源码编译在 ubuntu runner 上不可行；cargo-binstall 的 fallback 也会回退到源码编译）。eBPF 的 release 编译在 build.rs 内用 `CARGO_PROFILE_RELEASE_OPT_LEVEL=2` 局部覆盖（新版 bpf-linker 内嵌 LLVM 已移除 `-Oz`/`-Os`，仅支持 `-O0~O3`，workspace 根的 `opt-level="z"` 会导致链接失败）。
 
 ## 代码约定
 
-1. **架构**：Monitor 通过 mpsc 事件通道解耦，调度器双套架构（Yumi/Chiri）按 `is_chiri_soc()` 选择
-2. **配置**：走 `config.yaml` + `rules.yaml`，支持热重载，按处理器独立配置
-3. **日志**：调试用 `debug!`，高频路径周期摘要，状态变化即时打点
-4. **i18n**：新增文案必须中英文双语
-5. **WebUI**：通过 kernelsu bridge 交互，文件写入用 base64 管道 + 原子 mv
-6. **特调白名单**：`SPECIAL_TUNED_MODES` 编译进二进制，仅 ChiRi SoC 生效
+1. **架构**：Monitor 线程组通过有界 mpsc 事件通道（`DaemonEvent`，`sync_channel` 容量 64，满时 send 阻塞形成背压）解耦数据采集与调度决策，新增监控/调度能力遵循此模式。前台 PID 由 `monitor/mod.rs` 的单一 `pid_watcher` 线程经 `tokio::sync::watch` 广播，FPS/CPU 监控共享消费，不要各自重复轮询。FPS 帧监控（`fps_monitor`）仅服务于 FAS 调频，FAS 禁用期间不启动（见 `mod.rs` 中注释块）。**调度器为双套架构**：默认 `scheduler/`（Yumi CLG）与 `chiri/`（Chiri 专用）二选一，main.rs 按 `common::is_chiri_soc()`（特定 SoC 列表命中）决定启动哪一套；两套互斥消费同一事件通道，Monitor 层共享。`CHIRI_SOC_HINTS` 在 common.rs 维护，新增机型只追加列表，不要绑定单一型号。**FAS 暂禁用期间的保留代码**（fps_monitor 整模块、`DaemonEvent` 的 `FrameUpdate`/`pid`/`foreground_max_util`、capacity 权重函数等）统一加 `#[allow(dead_code)]` 并注明"恢复 FAS 时启用"，**不要删除**——恢复时直接取消注释即可。
+2. **日志**：调试与排障优先使用 `debug!`（勿全部用 info 污染信息日志）；频率控制/帧处理等高频路径用 25-tick / 60-frame 周期摘要，状态变化（模式、PID、屏幕、attach、档位）即时打点。新增日志 key 必须同时补充 `module/config/i18n/zh.ftl` 与 `en.ftl`，key 命名 `模块-描述`。
+3. **配置**：运行时配置默认走 `module/config/config.yaml`（CLG/模式参数）与 `rules.yaml`（FAS/模式映射参数），支持热重载；新增配置项需同步更新反序列化结构体与默认值。配置由 main 启动时解析一次并以 `Arc<RwLock<Config>>` 共享给对应调度器（勿重复读取），热重载由该调度器的 config_watcher 覆写同一共享实例。两套调度各持自己的 Config 类型（`scheduler::config` 与 `chiri::config`）。**按处理器独立配置**：命中 `CHIRI_SOC_HINTS` 时，经 `common::get_config_path()` 优先加载处理器子目录 `config/{命中片段}/config.yaml`，否则回退 `config/config.yaml`；特调模式段在 `common::get_special_tuned_path()` 返回的同一处理器目录 `special_tuned.yaml`（与主配置同目录、随处理器绑定）。所有加载/热重载入口（main.rs、两套 config_watcher）必须统一走 `get_config_path()`，勿硬编码路径。守护进程启动时把生效配置相对 config 目录的路径（如 `8550/config.yaml`，非处理器时 `config.yaml`）写入 `active_config.txt`，WebUI 据此拼回同一份文件。
+4. **i18n**：守护进程日志基于 Fluent（`module/config/i18n/en.ftl` / `zh.ftl`），WebUI 基于 `webui/src/i18n/locales/`；新增用户可见文案必须同时提供中英文。
+5. **Rust 风格**：release profile 为极致体积优化（`opt-level = "z"`, lto, strip），避免引入重依赖；优先复用现有依赖（serde/anyhow/log/tokio/nix 等），新增第三方库选择社区高星、维护活跃的 crate。
+6. **资源占用敏感**：守护进程运行于 Android 后台，注意内存分配（避免频繁 Vec 分配）、锁粒度和线程唤醒次数。
+7. **版本同步**：发版时同步更新 `module/module.prop`（version/versionCode）、根 `Cargo.toml`（version）、`updateInformation/update.json` 与 `changelog.md`。
+8. **WebUI**：与守护进程通过 kernelsu bridge 交互（见 `webui/src/utils/bridge.ts`），勿直接硬编码路径；读取配置文件前先读 `active_config.txt` 确定实际生效文件。文件写入用 base64 管道（`echo '<b64>' | base64 -d > path.tmp && mv -f path.tmp path`）规避 shell 特殊字符解释，**必须经临时文件 + 原子 mv**，避免直接 `>` 截断时被守护进程 config_watcher 读到半截内容导致重载失败；不要用 `echo "${content}"` 拼接。
+9. **内部特调白名单（ChiRi 专属）**：特定应用的专用模式定义在 `common.rs` 的 `SPECIAL_TUNED_MODES`，每项含包名、可用模式列表 `modes` 与优先回退模式 `fallback`（同包名多模式时，用户未显式配置则采用 `fallback`）。白名单编译进二进制，不随 rules.yaml 下发，用户/WebUI 不可修改。**特调体系仅限 ChiRi**：只在命中 `CHIRI_SOC_HINTS` 的 SoC 上生效（`determine_mode` 先判 `is_chiri_soc()`），非 ChiRi SoC 上特调映射一律回退全局模式；只在 chiri 的 `Config` 注册特调模式字段并在 `get_mode` 加分支，**不要**注册进 yumi 的 `scheduler/config.rs`。模式确定优先级：用户 `app_modes` > 白名单 `fallback` > `global_mode`；后端门控：非白名单包名映射到特调模式时 warn 并回退 `global_mode`（`app_detect.rs` 的 `determine_mode`）。**特调参数独立成文件，且与处理器绑定**：`module/config/{命中片段}/special_tuned.yaml` 按模式名分段（与白名单条目对应，和主配置同目录同处理器），chiri 的 `Config::from_file` 在 `merge_special_tuned()` 中经 `common::get_special_tuned_path()` 合并（读取/解析失败 warn 保留旧值），不放在默认 `config.yaml` 里。守护进程启动时把白名单导出到 `special_tuned.txt`（每行 `包名:模式列表(逗号分隔):优先回退模式`）并 info 打点，导出**仅 Chiri 模式**（`is_chiri_soc()`）下发生，Yumi 设备不生成该文件。WebUI 为双套流动：`bridge.ts::isChiri`（active_config 为处理器子目录 `config/{soc}/config.yaml` 时真）判定设备类型，`stores/scheduler.ts` 存 `isChiri` 态；`getSpecialTuned` 只读展示的「特调：{模式}」标签、模式动作单的专属特调选项（置顶、仅白名单应用可见）、重扫后的 `pruneSpecialTunedRules` 清理，均仅在 `isChiri` 下激活（`isChiri && specialTuned[pkg]`），Yumi 设备完全不显示特调 UI。应用列表提供「重新扫描」按钮（扫描中禁用防并发），扫描完成后清理 rules.yaml 中非白名单/非法特调映射。
 
 ## 硬性约束
 
-- 不修改 CI 构建流程
-- eBPF 目标 `bpfel-unknown-none`，确保交叉编译通过
-- 保持 KernelSU/Magisk 模块规范兼容
+- 不修改 CI 配置的构建流程（`.github/workflows/build.yml`），除非明确要求。
+- eBPF 程序目标为 `bpfel-unknown-none`，改动需确保可在 CI 环境交叉编译通过。
+- 保持与 KernelSU/Magisk 模块规范的兼容（`module/` 目录结构、`service.sh` 启动流程）。
 
-## 维护要求
+## AGENTS.md 维护要求（重要）
 
-每次会话结束前评估是否需要更新本文件（目录结构、技术栈、代码约定等）。若无需变更则跳过。
+**每次对话结束前，必须回顾本次会话内容，评估是否需要更新本文件：**
+
+- 新增/删除/重构了模块、目录或关键文件 → 更新「目录结构」
+- 引入了新的依赖、工具链或构建命令 → 更新「技术栈」「常用命令」
+- 确立了新的代码约定、架构决策或踩坑经验 → 更新「代码约定」（可新增「经验教训」小节）
+- 发现本文件描述与实际代码不符 → 立即修正
+
+若本次对话未产生需要沉淀的变化，可不更新，但必须经过此评估步骤。

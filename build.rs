@@ -62,6 +62,22 @@ fn ensure_bpf_linker(tools_dir: &Path) -> Result<PathBuf, Box<dyn std::error::Er
 
 /// 构建 yumi-ebpf BPF 程序，参照 frame-analyzer 的 build_ebpf()
 fn build_ebpf() -> Result<PathBuf, Box<dyn std::error::Error>> {
+    // 本地开发快速检查：YUMI_SKIP_EBPF=1 时跳过 eBPF 编译，仅写入占位产物
+    // 使 include_bytes! 可解析（纯类型检查用，产物内容无效，CI/发布不设置该变量，行为不变）。
+    if std::env::var_os("YUMI_SKIP_EBPF").is_some() {
+        println!("cargo:warning=YUMI_SKIP_EBPF=1: skipping eBPF build (check-only stub)");
+        let out_dir = PathBuf::from(env::var("OUT_DIR")?);
+        for profile in ["debug", "release"] {
+            let dir = out_dir
+                .join("ebpf_target")
+                .join("bpfel-unknown-none")
+                .join(profile);
+            std::fs::create_dir_all(&dir)?;
+            std::fs::write(dir.join("yumi-ebpf"), [0u8; 64])?;
+        }
+        return Ok(out_dir.join("ebpf_target"));
+    }
+
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let ebpf_dir = manifest_dir.join("yumi-ebpf");
     let out_dir = PathBuf::from(env::var("OUT_DIR")?);

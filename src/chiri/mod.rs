@@ -34,9 +34,17 @@
 
 use std::sync::{Arc, Mutex, RwLock, mpsc};
 use std::thread;
-// use std::time::Instant; // FAS 暂禁用，启用 FAS 时恢复
+use std::time::{Duration, Instant};
 use std::fs;
 use anyhow::Result;
+
+// CLG 看门狗：SystemLoadUpdate 由 eBPF 每 200ms 投喂一次，若超过 CLG_STALE_MAX 时长
+// 未收到任何事件，视为负载源失效（eBPF 加载失败/探针崩溃/通道断开），主动 release()
+// 回滚到系统原生调频，避免 CPU 永久锁频在最后写入值上（8550 balance 等 perf_init=1.0
+// 的配置下会锁满全核高频）。
+const CLG_STALE_MAX: Duration = Duration::from_secs(5);
+/// 看门狗巡检间隔：事件循环无事件时的轮询周期
+const CLG_STALE_POLL: Duration = Duration::from_secs(1);
 
 pub mod config;
 pub mod scheduler;
@@ -143,8 +151,24 @@ pub fn start_scheduler_thread(
     let config_path = common::get_config_path();
     let config_dir = root.join("config");
 
+    // 初始模式透传 rules.yaml 的 global_mode：此前硬编码 "balance" 会导致开机到首个
+    // ModeChange（约 2 秒）前按错误的模式接管 CPU（8550 上 balance perf_init=1.0 会锁满频），
+    // 且与用户配置的 global_mode 不一致。global_mode 未配置或不是已注册模式时回退 balance。
+    let initial_mode = {
+        let rules = crate::utils::read_config::<crate::monitor::config::RulesConfig, _>(
+            crate::monitor::config::get_rules_path(),
+        )
+        .unwrap_or_default();
+        let m = rules.global_mode.clone();
+        if m.is_empty() || shared_config.read().unwrap().get_mode(&m).is_none() {
+            "balance".to_string()
+        } else {
+            m
+        }
+    };
+
     // 当前生效模式名（跨线程共享，仅在 scheduler_ipc 线程内写）
-    let shared_mode_name = Arc::new(Mutex::new("balance".to_string()));
+    let shared_mode_name = Arc::new(Mutex::new(initial_mode));
     // sysfs 路径存在性缓存，避免每次 IO 调整前重复探测
     let sys_path_exist = Arc::new(utils::SysPathExist::new());
 
@@ -247,8 +271,29 @@ pub fn start_scheduler_thread(
             
             // 事件循环包在 catch_unwind 中：任何 panic 都被捕获并记录，
             // 避免调度线程静默死亡（进程存活但频率停在最后状态）
+            // 最近一次 SystemLoadUpdate 到达时间：供 CLG 看门狗判定负载源是否失效
+            let mut last_load_event = Instant::now();
             let loop_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            for msg in rx {
+            loop {
+                let msg = match rx.recv_timeout(CLG_STALE_POLL) {
+                    Ok(msg) => msg,
+                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                        // eBPF 负载源失效自愈：超过 CLG_STALE_MAX 无负载事件 → 释放 CLG，
+                        // 回滚系统原生调频，防止 CPU 永久锁频（下次 ModeChange/配置事件会重新接管）
+                        if cpu_governor.is_active() && last_load_event.elapsed() >= CLG_STALE_MAX {
+                            log::error!(
+                                "{}",
+                                t_with_args(
+                                    "clg-watchdog-release",
+                                    &fluent_args!("secs" => last_load_event.elapsed().as_secs().to_string())
+                                )
+                            );
+                            cpu_governor.release();
+                        }
+                        continue;
+                    }
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                };
                 match msg {
                     // --- 1. 屏幕状态事件 (息屏深度睡眠) ---
                     DaemonEvent::ScreenStateChange(screen_on) => {
@@ -389,6 +434,8 @@ pub fn start_scheduler_thread(
 
                     // --- 3. CPU 负载事件 (eBPF 驱动) ---
                     DaemonEvent::SystemLoadUpdate { core_utils, foreground_max_util: _ } => {
+                        // 刷新看门狗心跳：只要有负载事件到达即视为负载源存活
+                        last_load_event = Instant::now();
                         // 该事件每 200ms 一次，仅在 DEBUG 时输出摘要便于排查
                         log::debug!("{}", t_with_args("scheduler-event-load", &fluent_args!(
                             "cores" => core_utils.iter().map(|u| format!("{:.0}", u * 100.0)).collect::<Vec<_>>().join(",")
