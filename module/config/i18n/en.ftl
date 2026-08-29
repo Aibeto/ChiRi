@@ -128,12 +128,15 @@ clg-watchdog-release = [CLG] WATCHDOG: no load events for { $secs }s, eBPF sourc
 
 # --- AKMode (Arknights special tuning) ---
 akmode-init = [AKMode] Arknights special tuning take over | start mode={ $mode }
-akmode-activated = [AKMode] Arknights special tuning activated (no freq control, tier state only)
+akmode-activated = [AKMode] Arknights special tuning activated (schedutil + tier max limit)
+akmode-no-clusters = [AKMode] Arknights special tuning: no valid clusters found, staying inactive
+akmode-cluster-skipped = [AKMode] P{ $pid } skipped (reason: { $reason })
 akmode-deactivated = [AKMode] Arknights special tuning deactivated
 akmode-config-reloaded = [AKMode] special config hot-reloaded | wait={ $wait }ms
 akmode-tier-change = [AKMode] tier change: { $old } -> { $new }
+akmode-max-set = [AKMode] P{ $pid } ({ $name }) tier={ $mode } max={ $max_khz }MHz
 akmode-tick-log = [AKMode] mode={ $mode } up={ $up } down={ $down } busy/idle: L={ $l_over }/{ $l_under } B={ $b_over }/{ $b_under } P={ $p_over }/{ $p_under }
-akmode-watchdog-release = [AKMode] WATCHDOG: no load events for { $secs }s, eBPF source failed. Resetting Arknights special tuning tier state.
+akmode-watchdog-release = [AKMode] WATCHDOG: no load events for { $secs }s, eBPF source failed. Releasing Arknights special tuning and restoring original governor/min/max.
 
 # --- FAS ---
 fas-freq-mismatch = [FAS] P{ $pid }: freq mismatch! expected { $min }-{ $max }, actual { $actual } -> emergency reapply

@@ -127,12 +127,15 @@ clg-watchdog-release = [CLG] 看门狗: 已 { $secs } 秒未收到负载事件�
 
 # --- AKMode（明日方舟特调） ---
 akmode-init = [AKMode] 明日方舟特调接管 | 起始模式={ $mode }
-akmode-activated = [AKMode] 明日方舟特调已激活（不干预频率，仅档位判定）
+akmode-activated = [AKMode] 明日方舟特调已激活（schedutil + 档位限频）
+akmode-no-clusters = [AKMode] 明日方舟特调: 未找到有效集群，保持未激活状态
+akmode-cluster-skipped = [AKMode] P{ $pid } 跳过接管 (原因: { $reason })
 akmode-deactivated = [AKMode] 明日方舟特调已停用
 akmode-config-reloaded = [AKMode] 特调配置已热重载 | 等待={ $wait }ms
 akmode-tier-change = [AKMode] 档位切换: { $old } -> { $new }
+akmode-max-set = [AKMode] P{ $pid } ({ $name }) 档位={ $mode } 上限={ $max_khz }MHz
 akmode-tick-log = [AKMode] 模式={ $mode } 升档={ $up } 降档={ $down } 忙/闲: 小核={ $l_over }/{ $l_under } 大核={ $b_over }/{ $b_under } 超大核={ $p_over }/{ $p_under }
-akmode-watchdog-release = [AKMode] 看门狗: 已 { $secs } 秒未收到负载事件，eBPF 负载源疑似失效，已复位明日方舟特调档位状态
+akmode-watchdog-release = [AKMode] 看门狗: 已 { $secs } 秒未收到负载事件，eBPF 负载源疑似失效，已释放明日方舟特调控制权并恢复原 governor/min/max
 
 # --- FAS ---
 fas-freq-mismatch = [FAS] P{ $pid }: 频率不匹配！预期 { $min }-{ $max }，实际 { $actual } -> 正在紧急重写

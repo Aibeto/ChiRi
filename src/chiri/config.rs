@@ -367,9 +367,9 @@ pub struct FunctionToggles {
     pub io_optimization: bool,
 }
 
-/// 单个核心组（little/big/prime）的升降档条件，组内独立配置。
+/// 单个核心组（little/big/prime）的升降档条件 + 本档 max 上限，组内独立配置。
 /// 核心数 yaml 里直接写整数（如 2 = 组内超过 2 个核心命中阈值才触发），0 表示关闭该方向判定。
-/// 升降档判定用「当前档」对应核心组的条件。
+/// 升降档判定用「当前档」对应核心组的条件；max_freq 是该档位下本组的频率上限。
 #[derive(Debug, Deserialize, Clone)]
 pub struct SpecialTunedGroup {
     /// 升档核心数：组内超过这个数量的核心占用率 > up_util_percent 触发升档
@@ -384,6 +384,10 @@ pub struct SpecialTunedGroup {
     /// 降档占用率阈值（%）
     #[serde(default = "d_ak_down_util_threshold")]
     pub down_util_percent: f32,
+    /// 本档位下该核心组的 max 频率上限（kHz）：切到本档时写入 scaling_max_freq，
+    /// schedutil 在 min（硬件最低）..max 内按负载动态调频。0 = 不写该组 max（保持现状）。
+    #[serde(default = "d_ak_max_freq")]
+    pub max_freq: u32,
 }
 
 /// 单个档位的配置：按核心组（little/big/prime）的升降档条件 + 本档防抖等待。
@@ -406,8 +410,10 @@ pub struct SpecialTunedTier {
 }
 
 /// 明日方舟特调（akmode）配置，跟 CLG 完全没关系。
-/// 四档就是全局那套模式档位 powersave/balance/performance/fast，档位是统一的，
-/// 特调当前不干预任何频率，仅按负载在四档间判定档位并打点（频率由系统原生 governor 管理）。
+/// 四档就是全局那套模式档位 powersave/balance/performance/fast，档位是统一的。
+/// 特调机制：激活时统一内核调速器为 schedutil、min 压到硬件最低，每档把各核心组的
+/// scaling_max_freq 写到本档 max_freq 上限——schedutil 在 [硬件最低, 档位max] 内
+/// 按负载动态调频（能升能降、受档位约束）。
 #[derive(Debug, Deserialize, Clone)]
 pub struct SpecialTunedConfig {
     /// 升降档后防抖等待临时减半的持续时间（ms）：发生一次升降档后，后续 wait_ms
@@ -447,6 +453,9 @@ fn d_ak_wait_ms() -> u64 {
 fn d_ak_after_change_duration_ms() -> u64 {
     3000
 }
+fn d_ak_max_freq() -> u32 {
+    0
+}
 
 impl Default for SpecialTunedGroup {
     fn default() -> Self {
@@ -455,6 +464,7 @@ impl Default for SpecialTunedGroup {
             up_util_percent: d_ak_up_util_threshold(),
             down_core_count: d_ak_down_core_count(),
             down_util_percent: d_ak_down_util_threshold(),
+            max_freq: d_ak_max_freq(),
         }
     }
 }

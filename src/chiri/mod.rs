@@ -353,8 +353,8 @@ pub fn start_scheduler_thread(
                             // }
 
                             // 特调模式下息屏保持 akmode 接管，不切换到 CLG doze：
-                            // 特调为游戏专属锁频策略，息屏后用户预期快速恢复到同一状态，
-                            // 避免 release + 亮屏 re-init 的频率跳变和延迟。
+                            // akmode 已统一为 schedutil，息屏后 schedutil 随负载自然降频省电，
+                            // 无需 CLG 介入；避免 release + 亮屏 re-init 的 governor 反复切换。
                             if crate::common::is_special_mode(&current_mode) {
                                 // akmode 继续运行，CLG 保持释放状态
                                 log::info!("{}", t("scheduler-doze-special-keep"));

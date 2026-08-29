@@ -111,6 +111,7 @@ impl ClusterState {
 
     /// 写入目标频率（锁频：scaling_max_freq 与 scaling_min_freq 都设为同一值）。
     /// 升频先拉 max 再拉 min，降频先降 min 再降 max，保证任意中间状态满足 min <= max。
+    /// 锁频配合 schedutil governor：min=max 时 schedutil 无调频空间，频率由本控制器决定。
     fn write_freq(&mut self, freq: u32) {
         if freq == self.current_freq {
             return;
@@ -203,7 +204,7 @@ impl CpuLoadGovernor {
     /// 接管全部 cpufreq policy：
     /// 1. 先 release 清掉上一次接管状态；
     /// 2. 逐个 policy 读取可用频率、记录原始状态快照；
-    /// 3. 写入 performance governor，并按 perf_init 锁到初始频率；
+    /// 3. 写入 schedutil governor（统一内核调速器），并按 perf_init 锁到初始频率；
     /// 4. 任一 cluster 初始化成功即标记 active。
     pub fn init_policies(&mut self, gov_cfg: &CpuLoadGovernorConfig) {
         self.release();
@@ -307,7 +308,7 @@ impl CpuLoadGovernor {
                 hw_max: *freqs.last().unwrap(),
             });
 
-            let _ = crate::utils::try_write_file(&gov_path, "performance");
+            let _ = crate::utils::try_write_file(&gov_path, "schedutil");
 
             let init_perf = self
                 .cfg
