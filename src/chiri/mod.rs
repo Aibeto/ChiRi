@@ -515,9 +515,12 @@ pub fn start_scheduler_thread(
                         //     fas_controller.update_cpu_util(foreground_max_util);
                         //     fas_controller.update_core_utils(&core_utils);
                         // }
-                        // 特调（akmode）不消费负载：档位由 rules.yaml 生效模式决定、运行中不
-                        // 自动切换，频率由 schedutil 按负载动态调频。负载事件仅投喂 CLG。
-                        if cpu_governor.is_active() {
+                        // 特调（akmode）优先：白名单应用前台时投喂 akmode 做动态限频
+                        // （档位固定不切换，max 随负载在 [最低档, 生效档] 间变化）；
+                        // 否则若 CLG 处于活动状态（日常模式或息屏 Doze），投喂 CLG。
+                        if ak_governor.is_active() {
+                            ak_governor.on_load_update(&core_utils);
+                        } else if cpu_governor.is_active() {
                             cpu_governor.on_load_update(&core_utils);
                         }
                     },

@@ -132,7 +132,8 @@ akmode-no-clusters = [AKMode] 明日方舟特调: 未找到有效集群，保持
 akmode-cluster-skipped = [AKMode] P{ $pid } 跳过接管 (原因: { $reason })
 akmode-deactivated = [AKMode] 明日方舟特调已停用
 akmode-config-reloaded = [AKMode] 特调配置已热重载 | 档位={ $mode }
-akmode-max-set = [AKMode] P{ $pid } ({ $name }) 档位={ $mode } 上限={ $max_khz }MHz
+akmode-tick-log = [AKMode] 档位={ $mode } 升频={ $up } 降频={ $down } 忙/闲: 小核={ $l_over }/{ $l_under } 大核={ $b_over }/{ $b_under } 超大核={ $p_over }/{ $p_under }
+akmode-max-set = [AKMode] P{ $pid } ({ $name }) 档位={ $mode } max={ $max_khz }MHz
 akmode-watchdog-release = [AKMode] 看门狗: 已 { $secs } 秒未收到负载事件，eBPF 负载源疑似失效，已释放明日方舟特调控制权并恢复原 governor/min/max
 
 # --- FAS ---
