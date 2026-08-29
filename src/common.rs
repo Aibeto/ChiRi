@@ -16,8 +16,8 @@
  */
 
 use crate::monitor::config::RulesConfig;
-use std::path::PathBuf;
 use std::env;
+use std::path::PathBuf;
 
 /// 守护进程全局事件总线
 #[derive(Debug, Clone)]
@@ -38,7 +38,7 @@ pub enum DaemonEvent {
         /// 每个 CPU 核心的真实利用率 (0.0 ~ 1.0)，数组索引即 cpu_id
         core_utils: Vec<f32>,
         /// 如果当前有前台应用，这是该应用最吃 CPU 的那 1 个线程的利用率
-        foreground_max_util: f32, 
+        foreground_max_util: f32,
     },
 
     ConfigReload(RulesConfig),
@@ -50,12 +50,44 @@ pub enum DaemonEvent {
 pub fn get_module_root() -> PathBuf {
     // 获取当前执行文件的绝对路径
     let exe_path = env::current_exe().unwrap_or_else(|_| PathBuf::from("/"));
-    
+
     // 回溯两级目录:
     // core/bin/yumi -> core/bin -> core -> yumi
     exe_path
-        .parent().unwrap_or(&exe_path) // .../core/bin
-        .parent().unwrap_or(&exe_path) // .../core
-        .parent().unwrap_or(&exe_path) // .../yumi (Root)
+        .parent()
+        .unwrap_or(&exe_path) // .../core/bin
+        .parent()
+        .unwrap_or(&exe_path) // .../core
+        .parent()
+        .unwrap_or(&exe_path) // .../yumi (Root)
         .to_path_buf()
+}
+
+/// 读取文件首行并去除空白（用于 SoC 型号探测）
+fn read_first_line(path: &str) -> String {
+    std::fs::read_to_string(path)
+        .map(|s| s.lines().next().unwrap_or("").trim().to_string())
+        .unwrap_or_default()
+}
+
+/// 触发 Chiri 专用调度的特定处理器型号片段列表。
+/// 探测到任一命中即启用 Chiri 调度器；新增机型只需在此追加片段，不要绑定单一型号。
+/// 例：SM8550（骁龙 8 Gen 2）含 "8550"
+const CHIRI_SOC_HINTS: &[&str] = &["8550"];
+
+/// 型号片段是否命中任一特定处理器
+fn soc_hint_matches(hints: &[&str]) -> bool {
+    // 来源1：/sys/devices/soc0/machine（高通直接暴露型号，如 "SM8550"）
+    let machine = read_first_line("/sys/devices/soc0/machine");
+    if hints.iter().any(|h| machine.contains(h)) {
+        return true;
+    }
+    // 来源2：/proc/cpuinfo（Hardware / model name 行可能含型号）
+    let cpuinfo = std::fs::read_to_string("/proc/cpuinfo").unwrap_or_default();
+    hints.iter().any(|h| cpuinfo.contains(h))
+}
+
+/// 是否应启用 Chiri 专用调度器（检测到列表中的特定处理器时为 true）
+pub fn is_chiri_soc() -> bool {
+    soc_hint_matches(CHIRI_SOC_HINTS)
 }

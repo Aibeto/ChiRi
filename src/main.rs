@@ -15,6 +15,7 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
+mod chiri;
 mod common;
 pub mod fas_types;
 pub mod i18n;
@@ -43,15 +44,23 @@ fn main() -> Result<()> {
     let log_dir = root.join("logs");
     std::fs::create_dir_all(&log_dir)?;
 
-    // 2. 提前读取配置
+    // 2. 判断是否启用 Chiri 专用调度器（检测到列表中的特定处理器时启用）
+    let chiri_active = common::is_chiri_soc();
+
+    // 3. 读取配置（两套调度共用同一份 config.yaml，各自按自己的 Config 结构解析）
     let config_path: std::path::PathBuf = root.join("config/config.yaml");
-    let config = Config::from_file(config_path.to_str().unwrap()).unwrap_or_default();
 
-    // 3. 立即加载语言
-    load_language(&config.meta.language);
-
-    // 4. 初始化日志
-    logger::init(&config.meta.loglevel)?;
+    // 4. 立即加载语言与日志（两套 Config 的 meta 结构一致，先用它初始化）
+    let (language, loglevel) = if chiri_active {
+        let cfg =
+            chiri::config::Config::from_file(config_path.to_str().unwrap()).unwrap_or_default();
+        (cfg.meta.language, cfg.meta.loglevel)
+    } else {
+        let cfg = Config::from_file(config_path.to_str().unwrap()).unwrap_or_default();
+        (cfg.meta.language, cfg.meta.loglevel)
+    };
+    load_language(&language);
+    logger::init(&loglevel)?;
 
     // 日志系统就绪后再输出调试信息（init 前的 log 会被静默丢弃）
     if let Some(path) = &chdir_path {
@@ -73,23 +82,28 @@ fn main() -> Result<()> {
             "main-config-loaded",
             &fluent_args!(
                 "path" => config_path.to_string_lossy().to_string(),
-                "loglevel" => config.meta.loglevel.clone(),
-                "language" => config.meta.language.clone()
+                "loglevel" => loglevel,
+                "language" => language
             )
         )
     );
     info!("{}", t("yumi-module-starting"));
 
-    // 2.5 共享配置：main 只解析一次 config.yaml，随 Arc 传给 scheduler 复用，
-    //     避免 main 与 scheduler 各解析一份导致配置漂移/重复 I/O
-    let shared_config = Arc::new(RwLock::new(config));
-
-    // 3. 创建通信通道（有界：防止高频事件在调度线程繁忙时无限积压占用内存；
+    // 5. 创建通信通道（有界：防止高频事件在调度线程繁忙时无限积压占用内存；
     //    容量 64 足够承载 200ms 负载事件与低频状态事件，满时 send 阻塞形成背压）
     let (tx, rx) = mpsc::sync_channel::<common::DaemonEvent>(64);
 
-    // 4. 启动 Scheduler
-    if let Err(e) = scheduler::start_scheduler_thread(rx, shared_config) {
+    // 6. 按 SoC 启动对应的调度器（两套互斥，同一事件通道只被其中一个消费）
+    let start_result = if chiri_active {
+        log::info!("{}", t("main-chiri-scheduler-selected"));
+        let cfg =
+            chiri::config::Config::from_file(config_path.to_str().unwrap()).unwrap_or_default();
+        chiri::start_scheduler_thread(rx, Arc::new(RwLock::new(cfg)))
+    } else {
+        let cfg = Config::from_file(config_path.to_str().unwrap()).unwrap_or_default();
+        scheduler::start_scheduler_thread(rx, Arc::new(RwLock::new(cfg)))
+    };
+    if let Err(e) = start_result {
         error!(
             "{}",
             t_with_args(
@@ -101,7 +115,7 @@ fn main() -> Result<()> {
     }
     info!("{}", t("scheduler-module-started"));
 
-    // 5. 启动 Monitor
+    // 7. 启动 Monitor
     let monitor_thread = thread::Builder::new()
         .name("monitor_core".to_string())
         .spawn(move || {
@@ -118,7 +132,7 @@ fn main() -> Result<()> {
 
     info!("{}", t("monitor-module-started"));
 
-    // 6. 挂起
+    // 8. 挂起
     monitor_thread.join().unwrap();
 
     Ok(())
