@@ -28,7 +28,7 @@ akmode:
       down_util_percent: 60
 
   balance:
-    wait_ms: 120
+    wait_ms: 180
     little:
       up_core_count: 2
       up_util_percent: 80
@@ -46,7 +46,7 @@ akmode:
       down_util_percent: 60
 
   performance:
-    wait_ms: 80
+    wait_ms: 120
     little:
       up_core_count: 1
       up_util_percent: 60
@@ -64,7 +64,7 @@ akmode:
       down_util_percent: 60
 
   fast:
-    wait_ms: 20
+    wait_ms: 80
     little:
       up_core_count: 1
       up_util_percent: 60
