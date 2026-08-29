@@ -190,11 +190,63 @@ fn determine_mode(config: &RulesConfig, current_package: &str) -> String {
     if !config.dynamic_enabled {
         return config.global_mode.clone();
     }
-    config
-        .app_modes
-        .get(current_package)
-        .cloned()
-        .unwrap_or_else(|| config.global_mode.clone())
+    // 特调体系为 ChiRi 专属：仅命中 CHIRI_SOC_HINTS 的 SoC 上白名单/特调模式才生效，
+    // 非 ChiRi SoC 上特调映射一律回退全局模式（Yumi 调度器未注册特调模式）。
+    let chiri = crate::common::is_chiri_soc();
+    // 优先级：用户自定义 app_modes > 特调白名单的优先回退模式 > 全局模式。
+    // 门控：特调模式只允许白名单应用；非白名单包名映射到特调模式时回退全局模式并告警
+    // （WebUI 侧在扫描完成后会同步清理这类非法条目）。
+    if let Some(mode) = config.app_modes.get(current_package) {
+        if crate::common::is_special_mode(mode) {
+            if chiri && crate::common::is_special_mode_allowed(current_package, mode) {
+                debug!(
+                    "{}",
+                    t_with_args(
+                        "app-detect-special-override",
+                        &fluent_args!("pkg" => current_package, "mode" => mode.as_str())
+                    )
+                );
+                return mode.clone();
+            }
+            warn!(
+                "{}",
+                t_with_args(
+                    "app-detect-special-rejected",
+                    &fluent_args!("pkg" => current_package, "mode" => mode.as_str())
+                )
+            );
+            // 非法特调映射：回退到全局模式
+            return config.global_mode.clone();
+        }
+        return mode.clone();
+    }
+    if chiri {
+        if let Some(mode) = crate::common::special_tuned_mode(current_package) {
+            debug!(
+                "{}",
+                t_with_args(
+                    "app-detect-special-fallback",
+                    &fluent_args!("pkg" => current_package, "mode" => mode)
+                )
+            );
+            return mode.to_string();
+        }
+    }
+    let global = config.global_mode.clone();
+    // 全局模式本身不允许直接指定特调：非白名单应用回退 balance（默认模式）
+    if crate::common::is_special_mode(&global)
+        && !(chiri && crate::common::is_special_mode_allowed(current_package, &global))
+    {
+        warn!(
+            "{}",
+            t_with_args(
+                "app-detect-special-global-rejected",
+                &fluent_args!("pkg" => current_package, "mode" => global.as_str())
+            )
+        );
+        return "balance".to_string();
+    }
+    global
 }
 
 pub fn get_default_rules() -> RulesConfig {

@@ -34,6 +34,9 @@
 
 use serde::Deserialize;
 
+use crate::fluent_args;
+use crate::i18n::t_with_args;
+
 /// 全局元信息段（对应 config.yaml 顶层 `Meta`）
 #[derive(Debug, Deserialize, Default)]
 pub struct Meta {
@@ -389,14 +392,69 @@ pub struct Config {
     pub performance: Mode,
     #[serde(default)]
     pub fast: Mode,
+
+    /// 内部特调模式段（对应处理器特调文件 `325mode` 键，以数字开头故用 rename 映射）。
+    /// 配置文件省略该段时回退空 Mode，其 CLG 参数取 CpuLoadGovernorConfig 默认值。
+    #[serde(default, rename = "325mode")]
+    pub mode_325: Mode,
+
+    /// 高压特调模式段（`799mode`，明日方舟高压场景），参数同样来自处理器特调文件。
+    #[serde(default, rename = "799mode")]
+    pub mode_799: Mode,
 }
 
 impl Config {
-    /// 从 YAML 文件加载配置；读取或反序列化失败时返回 Err
+    /// 从 YAML 文件加载配置；读取或反序列化失败时返回 Err。
+    /// 加载后合并处理器专属特调文件（common::get_special_tuned_path()，与主配置同目录）。
+    /// 热重载路径同样经由本函数，因此特调参数修改后触发热重载即可生效。
     pub fn from_file(path: &str) -> anyhow::Result<Self> {
         let content = std::fs::read_to_string(path)?;
-        let config: Config = serde_yaml::from_str(&content)?;
+        let mut config: Config = serde_yaml::from_str(&content)?;
+        config.merge_special_tuned();
         Ok(config)
+    }
+
+    /// 合并独立特调配置文件中的特调模式段：
+    /// - 读取失败（文件缺失等）→ warn 并保留主配置现有值
+    /// - 解析失败（内容损坏等）→ warn 并保留主配置现有值
+    /// - 成功 → debug 打点
+    fn merge_special_tuned(&mut self) {
+        let path = crate::common::get_special_tuned_path();
+        let content = match std::fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(e) => {
+                log::warn!(
+                    "{}",
+                    t_with_args(
+                        "config-special-load-failed",
+                        &fluent_args!("path" => path.to_string_lossy().to_string(), "error" => e.to_string())
+                    )
+                );
+                return;
+            }
+        };
+        match serde_yaml::from_str::<Config>(&content) {
+            Ok(special) => {
+                self.mode_325 = special.mode_325;
+                self.mode_799 = special.mode_799;
+                log::debug!(
+                    "{}",
+                    t_with_args(
+                        "config-special-merged",
+                        &fluent_args!("path" => path.to_string_lossy().to_string())
+                    )
+                );
+            }
+            Err(e) => {
+                log::warn!(
+                    "{}",
+                    t_with_args(
+                        "config-special-parse-failed",
+                        &fluent_args!("path" => path.to_string_lossy().to_string(), "error" => e.to_string())
+                    )
+                );
+            }
+        }
     }
 
     /// 按模式名取对应配置段；未知模式返回 None
@@ -406,6 +464,8 @@ impl Config {
             "balance" => Some(&self.balance),
             "performance" => Some(&self.performance),
             "fast" => Some(&self.fast),
+            "325mode" => Some(&self.mode_325),
+            "799mode" => Some(&self.mode_799),
             _ => None,
         }
     }

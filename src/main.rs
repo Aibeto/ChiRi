@@ -47,14 +47,39 @@ fn main() -> Result<()> {
     // 2. 判断是否启用 Chiri 专用调度器（检测到列表中的特定处理器时启用）
     let chiri_active = common::is_chiri_soc();
 
-    // 3. 解析配置文件路径：8550 等 Chiri 目标 SoC 优先加载独立配置 config_{soc}.yaml，
-    //    其余机型回退到默认 config.yaml（两套调度仍共用同一份选中的文件）
+    // 3. 解析配置文件路径：8550 等 Chiri 目标 SoC 优先加载处理器子目录 config/{soc}/config.yaml，
+    //    其余机型回退到默认 config/config.yaml（两套调度仍共用同一份选中的文件）
     let config_path = common::get_config_path();
-    // 持久化当前生效的配置文件名，WebUI 读取它后读写同一份配置文件，避免改错文件
+    // 写生效配置相对 config 目录的路径（处理器子目录时为 "8550/config.yaml"，默认时为 "config.yaml"），
+    // WebUI 拼接 `config/{相对路径}` 读取同一份文件，避免改错文件
+    let config_rel = config_path
+        .strip_prefix(root.join("config"))
+        .unwrap_or(&config_path);
     let _ = utils::try_write_file(
         root.join("active_config.txt"),
-        config_path.file_name().unwrap_or_default().as_encoded_bytes(),
+        config_rel.as_encoded_bytes(),
     );
+
+    // 导出内部特调白名单（编译期常量）供 WebUI 展示“特调”标签与专属选项：
+    // 每行一条 `包名:特调模式列表(逗号分隔):优先回退模式`，WebUI 只读该文件，不提供修改入口。
+    // 仅在 Chiri 专属调度激活时导出——非 Chiri（Yumi）设备不生成该文件，WebUI 据此隐藏特调功能。
+    if chiri_active {
+        let special_tuned_content: String = common::SPECIAL_TUNED_MODES
+            .iter()
+            .map(|e| format!("{}:{}:{}\n", e.package, e.modes.join(","), e.fallback))
+            .collect();
+        let _ = utils::try_write_file(
+            root.join("special_tuned.txt"),
+            special_tuned_content.as_bytes(),
+        );
+        info!(
+            "{}",
+            t_with_args(
+                "main-special-tuned-exported",
+                &fluent_args!("count" => common::SPECIAL_TUNED_MODES.len().to_string())
+            )
+        );
+    }
 
     // 4. 立即加载语言与日志（两套 Config 的 meta 结构一致，先用它初始化）
     let (language, loglevel) = if chiri_active {

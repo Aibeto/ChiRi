@@ -139,7 +139,7 @@ pub fn start_scheduler_thread(
     shared_config: Arc<RwLock<Config>>,
 ) -> Result<()> {
     let root = common::get_module_root();
-    // 配置路径：8550 等 Chiri 目标 SoC 使用独立配置 config_{soc}.yaml，热重载跟随该文件
+    // 配置路径：8550 等 Chiri 目标 SoC 使用处理器子目录 config/{soc}/config.yaml，热重载跟随该文件
     let config_path = common::get_config_path();
     let config_dir = root.join("config");
 
@@ -322,6 +322,14 @@ pub fn start_scheduler_thread(
                             drop(current_mode_lock); 
 
                             let _ = utils::try_write_file(&mode_file_path, mode.as_bytes());
+
+                            // 特调模式激活打点：仅 ChiRi 白名单应用可进入，info 级便于用户定位
+                            if crate::common::is_special_mode(&mode) {
+                                log::info!("{}", t_with_args("scheduler-special-mode-active", &fluent_args!(
+                                    "pkg" => package_name.as_str(),
+                                    "mode" => mode.as_str()
+                                )));
+                            }
 
                             // ==== FAS 暂禁用：进游戏不再释放 CLG 控制权、不再激活 FAS ====
                             if mode == "fas" {

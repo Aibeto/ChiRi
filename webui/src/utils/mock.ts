@@ -46,16 +46,23 @@ const mockConfig = {
   }
 };
 
-const mockApps = ['com.android.chrome', 'com.tencent.mm', 'com.miHoYo.GenshinImpact'];
+const mockApps = ['com.android.chrome', 'com.tencent.mm', 'com.miHoYo.GenshinImpact', 'com.hypergryph.arknights'];
+
+// 内部特调白名单 mock：开发模式下预览“特调”标签与专属选项用
+const mockSpecialTuned: Record<string, { modes: string[]; fallback: string }> = {
+  'com.hypergryph.arknights': { modes: ['325mode', '799mode'], fallback: '325mode' }
+};
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 let simulatedModeTxt = "balance";
 
 export const MockBridge = {
   async isDaemonRunning(): Promise<boolean> { await delay(100); return true; },
   async getCurrentMode(): Promise<string> { await delay(200); return simulatedModeTxt; },
+  async isChiri(): Promise<boolean> { await delay(100); return true; }, // dev 演示特调能力
   async setMode(mode: string): Promise<void> { await delay(200); mockRules.global_mode = mode; setTimeout(() => { simulatedModeTxt = mode; }, 800); },
   async getInstalledApps(): Promise<string[]> { await delay(500); return mockApps; },
   async getAppRules(): Promise<Record<string, string>> { await delay(300); return mockRules.app_modes; },
+  async getSpecialTuned(): Promise<Record<string, { modes: string[]; fallback: string }>> { await delay(200); return { ...mockSpecialTuned }; },
   async saveAppRule(pkg: string, mode: string): Promise<void> { 
     await delay(200); 
     
@@ -79,6 +86,25 @@ export const MockBridge = {
     // }
   },  async getRulesConfig(): Promise<any> { await delay(300); return JSON.parse(JSON.stringify(mockRules)); },
   async saveRulesConfig(config: any): Promise<void> { await delay(400); Object.assign(mockRules, config); },
+  // 清理 rules.yaml 中非白名单/非法的特调映射（扫描完成后调用）
+  async pruneSpecialTunedRules(specialTuned: Record<string, { modes: string[]; fallback: string }>): Promise<number> {
+    await delay(200);
+    let removed = 0;
+    const specialModes = new Set<string>();
+    Object.values(specialTuned).forEach(e => e.modes.forEach(m => specialModes.add(m)));
+    const rules = mockRules.app_modes as Record<string, string>;
+    Object.keys(rules).forEach(pkg => {
+      const mode = rules[pkg];
+      if (specialModes.has(mode)) {
+        const entry = specialTuned[pkg];
+        if (!entry || !entry.modes.includes(mode)) {
+          delete rules[pkg];
+          removed++;
+        }
+      }
+    });
+    return removed;
+  },
   async getMainConfig(): Promise<any> { await delay(300); return JSON.parse(JSON.stringify(mockConfig)); },
   async saveMainConfig(config: any): Promise<void> { await delay(400); Object.assign(mockConfig, config); },
   async getDaemonLog(): Promise<string> {

@@ -18,6 +18,7 @@
 use crate::monitor::config::RulesConfig;
 use std::env;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
 /// 守护进程全局事件总线
 /// FAS 暂禁用：`FrameUpdate` 变体暂无生产者、`ModeChange.pid` 与 `SystemLoadUpdate.foreground_max_util`
@@ -90,26 +91,90 @@ fn soc_hint_matches(hints: &[&str]) -> bool {
     hints.iter().any(|h| cpuinfo.contains(h))
 }
 
-/// 是否应启用 Chiri 专用调度器（检测到列表中的特定处理器时为 true）
+/// 是否应启用 Chiri 专用调度器（检测到列表中的特定处理器时为 true）。
+/// 结果只探测一次并缓存：determine_mode 等路径会反复调用，避免每次读 /proc 与 sysfs。
+static CHIRI_SOC: OnceLock<bool> = OnceLock::new();
 pub fn is_chiri_soc() -> bool {
-    soc_hint_matches(CHIRI_SOC_HINTS)
+    *CHIRI_SOC.get_or_init(|| soc_hint_matches(CHIRI_SOC_HINTS))
+}
+
+/// 命中 Chiri 目标 SoC 时，返回其处理器专属配置目录 `config/{命中片段}/`（存在则返回）。
+fn matched_soc_config_dir() -> Option<PathBuf> {
+    if !is_chiri_soc() {
+        return None;
+    }
+    let config_dir = get_module_root().join("config");
+    CHIRI_SOC_HINTS
+        .iter()
+        .map(|hint| config_dir.join(hint))
+        .find(|dir| dir.join("config.yaml").exists())
 }
 
 /// 返回当前应加载的配置文件路径：
-/// - 命中 Chiri 目标 SoC 且 config 目录存在 `config_{命中片段}.yaml` 时，使用该独立文件
-/// - 否则回退到默认 `config.yaml`
+/// - 命中 Chiri 目标 SoC 且存在处理器子目录 `config/{命中片段}/config.yaml` 时，使用该文件
+/// - 否则回退到默认 `config/config.yaml`
 ///
 /// 所有配置加载/热重载入口（main.rs 与两套调度器的 config_watcher）统一走这里，
-/// 保证 8550 等目标机型使用独立配置，其余机型不受影响。
+/// 保证 8550 等目标机型使用处理器独立配置，其余机型不受影响。
 pub fn get_config_path() -> PathBuf {
-    let config_dir = get_module_root().join("config");
-    if is_chiri_soc() {
-        for hint in CHIRI_SOC_HINTS {
-            let candidate = config_dir.join(format!("config_{}.yaml", hint));
-            if candidate.exists() {
-                return candidate;
-            }
-        }
-    }
-    config_dir.join("config.yaml")
+    matched_soc_config_dir()
+        .map(|dir| dir.join("config.yaml"))
+        .unwrap_or_else(|| get_module_root().join("config").join("config.yaml"))
+}
+
+/// 内部特调白名单条目：一个应用可对应多个特调模式。
+/// 编译进守护进程二进制，不随 rules.yaml 下发，用户 / WebUI 均不可修改。
+pub struct SpecialTunedEntry {
+    /// 应用包名
+    pub package: &'static str,
+    /// 该应用可用的特调模式列表（WebUI 动作单据此提供专属选项）
+    pub modes: &'static [&'static str],
+    /// 优先回退模式：用户未显式配置该应用时默认采用的模式（必须存在于 modes 中）
+    pub fallback: &'static str,
+}
+
+/// 内部特调白名单。
+/// 调度优先级：rules.yaml 用户自定义 app_modes > 特调白名单的优先回退模式 > global_mode。
+/// 特调模式名不可用于白名单之外的包名——monitor 侧做门控（determine_mode），
+/// 非白名单包名映射到特调模式时回退 global_mode 并告警。
+/// 新增特调只需追加条目，模式名须在 chiri 的 Config::get_mode 中注册，
+/// 参数写在处理器目录 `module/config/{命中SoC}/special_tuned.yaml`（按模式名分段，与白名单条目一致）。
+/// WebUI 通过守护进程启动时导出的 special_tuned.txt 展示“特调”标签与专属选项。
+pub const SPECIAL_TUNED_MODES: &[SpecialTunedEntry] = &[
+    SpecialTunedEntry {
+        package: "com.hypergryph.arknights", // 明日方舟
+        modes: &["325mode", "799mode"],
+        fallback: "325mode",
+    },
+];
+
+/// 查询包名是否命中特调白名单，命中返回优先回退模式
+pub fn special_tuned_mode(pkg: &str) -> Option<&'static str> {
+    SPECIAL_TUNED_MODES
+        .iter()
+        .find(|e| e.package == pkg)
+        .map(|e| e.fallback)
+}
+
+/// 判断模式名是否为特调模式（任一白名单条目的 modes 列表中出现）
+pub fn is_special_mode(mode: &str) -> bool {
+    SPECIAL_TUNED_MODES.iter().any(|e| e.modes.contains(&mode))
+}
+
+/// 包名是否被允许使用指定特调模式（包名在白名单且模式在该条目 modes 列表中）
+pub fn is_special_mode_allowed(pkg: &str, mode: &str) -> bool {
+    SPECIAL_TUNED_MODES
+        .iter()
+        .find(|e| e.package == pkg)
+        .map(|e| e.modes.contains(&mode))
+        .unwrap_or(false)
+}
+
+/// 处理器专属特调配置文件路径：与处理器主配置同目录 `config/{命中片段}/special_tuned.yaml`（特调与处理器绑定）。
+/// 无处理器专属特调文件时回退根 `config/special_tuned.yaml`（通常不存在，合并时 warn 保留旧值）。
+/// 只含白名单特调模式段，随模块发布，WebUI 不提供编辑。
+pub fn get_special_tuned_path() -> PathBuf {
+    matched_soc_config_dir()
+        .map(|dir| dir.join("special_tuned.yaml"))
+        .unwrap_or_else(|| get_module_root().join("config").join("special_tuned.yaml"))
 }

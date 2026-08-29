@@ -18,6 +18,7 @@ main-chdir = [Main] Changed working directory to: { $dir }
 main-module-root = [Main] Module root: { $path }
 main-config-loaded = [Main] Config loaded: { $path } (loglevel={ $loglevel }, language={ $language })
 main-chiri-scheduler-selected = [Main] Specific SoC detected, enabling Chiri scheduler
+main-special-tuned-exported = [Main] Exported { $count } special-tuned whitelist entries to special_tuned.txt
 monitor-thread-start-screen = [Main] Starting screen state watcher thread...
 monitor-thread-start-config-watch = [Main] Starting config watcher thread...
 monitor-thread-start-fps = [Main] Starting eBPF FPS monitor thread...
@@ -39,6 +40,10 @@ app-detect-debounce-start = [AppDetect] Debounce started: new app { $pkg } (pid=
 app-detect-debounce-confirmed = [AppDetect] Debounce confirmed: app { $pkg } (pid={ $pid }) is stable
 app-detect-pkg-change = [AppDetect] Foreground app state: { $pkg } (pid={ $pid }, temp={ $temp }°C, force={ $force })
 app-detect-no-app = [AppDetect] No valid foreground app detected (system process or unknown package)
+app-detect-special-override = [AppDetect] Special profile applied: { $pkg } -> { $mode }
+app-detect-special-rejected = [AppDetect] Non-whitelisted app { $pkg } mapped to special profile { $mode }, rejected, falling back to global mode
+app-detect-special-fallback = [AppDetect] Special whitelist hit: { $pkg } uses fallback profile { $mode }
+app-detect-special-global-rejected = [AppDetect] Global mode { $mode } is a special profile and does not apply to non-whitelisted app { $pkg }, falling back to balance
 
 # --- ScreenDetect ---
 screen-state-change-detected = [Screen] State change detected via '{ $source }'.
@@ -88,11 +93,15 @@ scheduler-event-mode-change = [Scheduler] mode change event: pkg={ $pkg } { $old
 scheduler-event-load = [Scheduler] load event: core_utils=[{ $cores }]
 scheduler-event-frame = [Scheduler] frame event: delta={ $delta_ms }ms
 scheduler-event-config-reload = [Scheduler] config reload event: mode={ $mode }, screen_on={ $screen_on }
+scheduler-special-mode-active = [Scheduler] Special profile active: { $pkg } -> { $mode }
 
 # --- Scheduler: Config Watcher ---
 config-reloading = [Config] Config file change detected, reloading...
 config-reloaded-success = [Config] Config reloaded successfully.
 config-reload-fail = [Config] Config reload failed: { $error }
+config-special-load-failed = [Config] Failed to read special-tuned config: { $path } ({ $error }), keeping existing values
+config-special-parse-failed = [Config] Failed to parse special-tuned config: { $path } ({ $error }), keeping existing values
+config-special-merged = [Config] Merged special-tuned config: { $path }
 config-watch-error = [Config] Failed to watch config directory: { $error }
 config-apply-mode-failed = [Config] Failed to apply reloaded mode settings: { $error }
 config-apply-tweaks-failed = [Config] Failed to apply reloaded system tweaks: { $error }

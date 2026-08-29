@@ -1,16 +1,17 @@
 # ============================================================
-# SM8550（骁龙 8 Gen 2）独立配置
-# 命中 CHIRI_SOC_HINTS（"8550"）时优先加载本文件，缺省字段回退到代码默认值。
-# 此文件仅影响 8550 设备，修改不会波及默认 config.yaml。
+# SM8550（骁龙 8 Gen 2）处理器独立配置
+# 命中 CHIRI_SOC_HINTS（"8550"）时优先加载本处理器目录下的 config.yaml，
+# 缺省字段回退到代码默认值。仅影响 8550 设备，不波及默认 config.yaml。
+# 处理器专属特调模式见本目录下 special_tuned.yaml（与处理器绑定，随本目录发布）。
 # 调整参数后可热重载（config_watcher 监听 config 目录）。
 # ============================================================
 
 # 元数据信息
 meta:
   name: "config_8550"
-  author: "yuki"
+  author: "ChiRi"
   language: "zh"
-  loglevel: "INFO"
+  loglevel: "DEBUG"
 
 # 主要功能开关
 function:
@@ -19,9 +20,9 @@ function:
 
 # IO 设置
 IO_Settings:
-  Scheduler: "none"
-  read_ahead_kb: "128"
-  nomerges: "2"
+  Scheduler: ""
+  read_ahead_kb: "512"
+  nomerges: "1"
   iostats: "0"
 
 # CPU 空闲设置
@@ -29,6 +30,28 @@ CpuIdle:
   current_governor: ""
 
 # --- 性能模式 ---
+
+# 保存模式
+dozemode:
+  cpu_load_governor:
+    up_threshold: 1.0
+    down_threshold: 1.0
+    smoothing_up: 0.2
+    smoothing_down: 1.0
+    down_rate_limit_ticks: 1
+    up_rate_limit_ticks: 10
+    headroom_factor: 1.0
+    headroom_ramp: 0.15
+    perf_floor: 0.0
+    perf_ceil: 0.2
+    perf_init: 0.3
+    up_jump_threshold: 0.5
+    slow_up_scale: 0.02
+    slow_down_scale: 0.5
+    down_fast_threshold: 10.0
+    down_fast_mult: 10.0
+    spike_jump_threshold: 0.25
+    spike_decay: 0.1
 
 # 省电模式
 powersave:
@@ -55,24 +78,24 @@ powersave:
 # 均衡模式
 balance:
   cpu_load_governor:
-    up_threshold: 0.80
-    down_threshold: 0.50
-    smoothing_up: 0.60
-    smoothing_down: 0.30
-    down_rate_limit_ticks: 3
-    up_rate_limit_ticks: 2
+    up_threshold: 0.25
+    down_threshold: 0.8
+    smoothing_up: 0.8
+    smoothing_down: 0.8
+    down_rate_limit_ticks: 1
+    up_rate_limit_ticks: 1
     headroom_factor: 1.25
-    headroom_ramp: 0.15
-    perf_floor: 0.15
-    perf_ceil: 1.0
-    perf_init: 0.50
-    up_jump_threshold: 0.35
-    slow_up_scale: 0.02
-    slow_down_scale: 0.5
-    down_fast_threshold: 0.10
+    headroom_ramp: 0.2
+    perf_floor: 0.25
+    perf_ceil: 0.8
+    perf_init: 1.0
+    up_jump_threshold: 0.2
+    slow_up_scale: 0.2
+    slow_down_scale: 0.6
+    down_fast_threshold: 0.2
     down_fast_mult: 2.5
-    spike_jump_threshold: 0.35
-    spike_decay: 0.30
+    spike_jump_threshold: 0.6
+    spike_decay: 0.75
 
 # 性能模式
 performance:

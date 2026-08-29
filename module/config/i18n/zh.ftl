@@ -17,6 +17,7 @@ main-chdir = [Main] 切换工作目录到: { $dir }
 main-module-root = [Main] 模块根目录: { $path }
 main-config-loaded = [Main] 已读取配置: { $path } (loglevel={ $loglevel }, language={ $language })
 main-chiri-scheduler-selected = [Main] 检测到特定处理器，已启用 Chiri 专用调度器
+main-special-tuned-exported = [Main] 已导出 { $count } 个内部特调白名单条目到 special_tuned.txt
 monitor-thread-start-screen = [Main] 启动屏幕状态监控线程...
 monitor-thread-start-config-watch = [Main] 启动配置监控线程...
 monitor-thread-start-fps = [Main] 启动 eBPF FPS 监控线程...
@@ -38,6 +39,10 @@ app-detect-debounce-start = [AppDetect] 防抖开始: 检测到新应用 { $pkg 
 app-detect-debounce-confirmed = [AppDetect] 防抖确认: 应用 { $pkg } (pid={ $pid }) 保持稳定
 app-detect-pkg-change = [AppDetect] 前台应用状态变化: { $pkg } (pid={ $pid }, temp={ $temp }°C, force={ $force })
 app-detect-no-app = [AppDetect] 未检测到有效前台应用 (可能为系统进程或未知包)
+app-detect-special-override = [AppDetect] 特调模式应用: { $pkg } -> { $mode }
+app-detect-special-rejected = [AppDetect] 非白名单应用 { $pkg } 映射到特调模式 { $mode } 已拒绝，回退全局模式
+app-detect-special-fallback = [AppDetect] 特调白名单命中: { $pkg } 使用优先回退模式 { $mode }
+app-detect-special-global-rejected = [AppDetect] 全局模式 { $mode } 为特调模式，不适用于非白名单应用 { $pkg }，回退 balance
 
 # --- ScreenDetect ---
 screen-state-change-detected = [Screen] 通过 '{ $source }' 检测到状态变更
@@ -87,11 +92,15 @@ scheduler-event-mode-change = [Scheduler] 收到模式切换事件: 包={ $pkg }
 scheduler-event-load = [Scheduler] 收到负载事件: 核心利用率=[{ $cores }]
 scheduler-event-frame = [Scheduler] 收到帧事件: 帧间隔={ $delta_ms }ms
 scheduler-event-config-reload = [Scheduler] 收到配置重载事件: 当前模式={ $mode }, 亮屏={ $screen_on }
+scheduler-special-mode-active = [Scheduler] 特调模式激活: { $pkg } -> { $mode }
 
 # --- Scheduler: Config Watcher ---
 config-reloading = [Config] 检测到配置文件变更，正在重载...
 config-reloaded-success = [Config] 配置重载成功
 config-reload-fail = [Config] 配置重载失败: { $error }
+config-special-load-failed = [Config] 特调配置文件读取失败: { $path } ({ $error }) — 保留主配置现有特调参数
+config-special-parse-failed = [Config] 特调配置文件解析失败: { $path } ({ $error }) — 保留主配置现有特调参数
+config-special-merged = [Config] 已合并特调配置文件: { $path }
 config-watch-error = [Config] 监控配置目录失败: { $error }
 config-apply-mode-failed = [Config] 应用重载的模式设置失败: { $error }
 config-apply-tweaks-failed = [Config] 应用重载的系统微调失败: { $error }

@@ -15,20 +15,21 @@ const PATHS = {
   RULES_YAML: `${MODULE_BASE_PATH}/rules.yaml`,          
   CONFIG_YAML: `${MODULE_BASE_PATH}/config/config.yaml`, 
   ACTIVE_CONFIG: `${MODULE_BASE_PATH}/active_config.txt`,
+  SPECIAL_TUNED: `${MODULE_BASE_PATH}/special_tuned.txt`,
   CURRENT_MODE: `${MODULE_BASE_PATH}/current_mode.txt`,
   DAEMON_LOG: `${MODULE_BASE_PATH}/logs/daemon.log`
 };
 
 // 解析守护进程当前实际加载的配置文件：
-// 8550 等 Chiri 目标 SoC 会使用 config_8550.yaml，守护进程启动时把文件名写入
-// active_config.txt，这里读取它以保证 WebUI 与守护进程读写同一份文件。
-// 读取失败/为空时回退到默认 config.yaml。
+// Chiri 目标 SoC（如 8550）使用处理器子目录 config/8550/config.yaml，守护进程启动时把
+// 相对 config 目录的路径（如 "8550/config.yaml"）写入 active_config.txt，这里读取它以保证
+// WebUI 与守护进程读写同一份文件。读取失败/为空时回退到默认 config/config.yaml。
 async function resolveConfigPath(): Promise<string> {
   try {
     const { errno, stdout } = await exec(`cat "${PATHS.ACTIVE_CONFIG}"`);
     const name = stdout.trim();
-    // 只接受合法文件名，防止路径注入
-    if (errno === 0 && name && !name.includes('/') && !name.includes('..')) {
+    // 只接受相对 config 目录的合法路径（可含一层处理器子目录），禁止上级穿越（..）防路径注入
+    if (errno === 0 && name && !name.includes('..')) {
       return `${MODULE_BASE_PATH}/config/${name}`;
     }
   } catch (e) { /* 回退默认 */ }
@@ -78,6 +79,19 @@ const RealBridge = {
   async saveMainConfig(config: any): Promise<void> { await this.writeFile(await resolveConfigPath(), yaml.dump(config)); toast(i18n.global.t('core_config_saved') as string); },
 
   async getCurrentMode(): Promise<string> { try { return (await this.readFile(PATHS.CURRENT_MODE)).trim(); } catch (e) { return 'balance'; } },
+
+  // 判定是否处于 Chiri 专属调度（特定处理器）：active_config 若为"处理器子目录/config.yaml"
+  // （含 '/'，如 "8550/config.yaml"）则为 Chiri，否则为默认 Yumi。
+  // 特调 UI 仅在 Chiri 下激活，Yumi 设备看不到特调标签/选项。
+  async isChiri(): Promise<boolean> {
+    try {
+      const { errno, stdout } = await exec(`cat "${PATHS.ACTIVE_CONFIG}"`);
+      const name = stdout.trim();
+      return errno === 0 && !!name && name.includes('/');
+    } catch (e) {
+      return false;
+    }
+  },
   async setMode(mode: string): Promise<void> {
     const rules = await this.getRulesConfig();
     rules.global_mode = mode;
@@ -105,6 +119,50 @@ const RealBridge = {
     return [];
   },
   async getAppRules(): Promise<Record<string, string>> { return (await this.getRulesConfig()).app_modes || {}; },
+
+  // 清理 rules.yaml 中非法特调映射（应用列表扫描完成后调用，与后端门控一致）：
+  // 特调模式只允许白名单内且在该包名 modes 列表中的条目；
+  // 特调模式集合 = 所有白名单条目 modes 的并集。返回删除条数。
+  async pruneSpecialTunedRules(specialTuned: Record<string, { modes: string[]; fallback: string }>): Promise<number> {
+    const rules = await this.getRulesConfig();
+    if (!rules.app_modes) return 0;
+    const specialModes = new Set<string>();
+    Object.values(specialTuned).forEach(e => e.modes.forEach(m => specialModes.add(m)));
+    let removed = 0;
+    Object.keys(rules.app_modes).forEach(pkg => {
+      const mode = rules.app_modes[pkg];
+      if (specialModes.has(mode)) {
+        const entry = specialTuned[pkg];
+        if (!entry || !entry.modes.includes(mode)) {
+          delete rules.app_modes[pkg];
+          removed++;
+        }
+      }
+    });
+    if (removed > 0) await this.saveRulesConfig(rules);
+    return removed;
+  },
+
+  // 读取守护进程启动时导出的内部特调白名单（每行 `包名:特调模式列表(逗号分隔):优先回退模式`）。
+  // 该文件由守护进程维护，WebUI 只读用于展示“特调”标签与专属模式选项，不提供修改入口；
+  // 文件缺失（守护进程未启动等）时返回空表，标签静默降级。
+  async getSpecialTuned(): Promise<Record<string, { modes: string[]; fallback: string }>> {
+    try {
+      const raw = await this.readFile(PATHS.SPECIAL_TUNED);
+      const map: Record<string, { modes: string[]; fallback: string }> = {};
+      raw.split('\n').forEach(line => {
+        const [pkg, modesPart, fallback] = line.split(':');
+        const modes = (modesPart || '').split(',').map(s => s.trim()).filter(Boolean);
+        const pkgName = (pkg || '').trim();
+        if (pkgName && modes.length) {
+          map[pkgName] = { modes, fallback: (fallback || '').trim() || modes[0] };
+        }
+      });
+      return map;
+    } catch (e) {
+      return {};
+    }
+  },
   
   // ================= 修改这里 =================
   async saveAppRule(packageName: string, mode: string): Promise<void> {

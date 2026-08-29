@@ -113,7 +113,7 @@ pub fn start_scheduler_thread(
     shared_config: Arc<RwLock<Config>>,
 ) -> Result<()> {
     let root = common::get_module_root();
-    // 配置路径：非 Chiri 机型回退到默认 config.yaml；若意外命中独立配置则跟随之
+    // 配置路径：非 Chiri 机型回退到默认 config/config.yaml；若意外命中处理器子目录则跟随之
     let config_path = common::get_config_path();
     let config_dir = root.join("config");
 
