@@ -159,7 +159,7 @@ fn matched_soc_config_dir() -> Option<PathBuf> {
 /// 处理器核心组区间（little/big/prime 的 CPU ID 区间，左闭右开）。
 /// akmode 按组统计忙/闲核心数、CLG 触摸升频判定大核簇时使用；
 /// 各 SoC 簇布局不同，按命中片段区分（未命中时回退 8550 布局兜底）。
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct CoreGroupRanges {
     /// 小核组
     pub little: std::ops::Range<usize>,
