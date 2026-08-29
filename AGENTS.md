@@ -46,6 +46,9 @@ updateInformation/    # 更新.json 与 changelog
 # 完整构建（编译 eBPF + 守护进程 + WebUI 并打包模块 zip）
 cargo xtask build
 
+# 仅组装模块目录、不打包 zip（CI 用；目录名按 module.prop 动态命名，GitHub 下载时自动压缩）
+cargo xtask build --no-pack
+
 # 本地静态检查（验证 yumi crate 本身；需 nightly + aarch64-linux-android target + bpf-linker）
 cargo +nightly check -p yumi --target aarch64-linux-android
 
@@ -71,7 +74,7 @@ cd webui && npm run type-check
 4. **i18n**：守护进程日志基于 Fluent（`module/config/i18n/en.ftl` / `zh.ftl`），WebUI 基于 `webui/src/i18n/locales/`；新增用户可见文案必须同时提供中英文。
 5. **Rust 风格**：release profile 为极致体积优化（`opt-level = "z"`, lto, strip），避免引入重依赖；优先复用现有依赖（serde/anyhow/log/tokio/nix 等），新增第三方库选择社区高星、维护活跃的 crate。
 6. **资源占用敏感**：守护进程运行于 Android 后台，注意内存分配（避免频繁 Vec 分配）、锁粒度和线程唤醒次数。
-7. **版本同步**：发版时同步更新 `module/module.prop`（version/versionCode）、根 `Cargo.toml`（version）、`updateInformation/update.json` 与 `changelog.md`。
+7. **版本同步**：发版时同步更新 `module/module.prop`（version/versionCode）、根 `Cargo.toml`（version）、`updateInformation/update.json` 与 `changelog.md`。**产物命名以 `module/module.prop` 为准**：xtask 读取其 `name + version`（配合 git 提交数与日期）生成 zip/目录名（如 `ChiRi-Alpha01-42-20260829-1200`），CI 用 `cargo xtask build --no-pack` 只组装目录、不预打包，目录名即 GitHub artifact 名，由 GitHub 下载时统一压缩成同名 `.zip`（避免 `.zip.zip`）。
 8. **WebUI**：与守护进程通过 kernelsu bridge 交互（见 `webui/src/utils/bridge.ts`），勿直接硬编码路径；读取配置文件前先读 `active_config.txt` 确定实际生效文件。文件写入用 base64 管道（`echo '<b64>' | base64 -d > path.tmp && mv -f path.tmp path`）规避 shell 特殊字符解释，**必须经临时文件 + 原子 mv**，避免直接 `>` 截断时被守护进程 config_watcher 读到半截内容导致重载失败；不要用 `echo "${content}"` 拼接。**依赖约束**：`typescript` 固定在 5.x（`~5.9.0`）——TS 7.x 为 Go 原生编译器，不再导出 `lib/tsc`，`vue-tsc` 3.x 无法兼容（type-check 报 `ERR_PACKAGE_PATH_NOT_EXPORTED`），勿升级。
 9. **内部特调白名单（ChiRi 专属）**：特定应用的专用模式定义在 `common.rs` 的 `SPECIAL_TUNED_MODES`，每项含包名、可用模式列表 `modes` 与优先回退模式 `fallback`（同包名多模式时，用户未显式配置则采用 `fallback`）。白名单编译进二进制，不随 rules.yaml 下发，用户/WebUI 不可修改。**特调体系仅限 ChiRi**：只在命中 `CHIRI_SOC_HINTS` 的 SoC 上生效（`determine_mode` 先判 `is_chiri_soc()`），非 ChiRi SoC 上特调映射一律回退全局模式；只在 chiri 的 `Config` 注册特调模式字段并在 `get_mode` 加分支，**不要**注册进 yumi 的 `scheduler/config.rs`。模式确定优先级：用户 `app_modes` > 白名单 `fallback` > `global_mode`；后端门控：非白名单包名映射到特调模式时 warn 并回退 `global_mode`（`app_detect.rs` 的 `determine_mode`）。**特调参数独立成文件，且与处理器绑定**：`module/config/{命中片段}/special_tuned.yaml` 按模式名分段（与白名单条目对应，和主配置同目录同处理器），chiri 的 `Config::from_file` 在 `merge_special_tuned()` 中经 `common::get_special_tuned_path()` 合并（读取/解析失败 warn 保留旧值），不放在默认 `config.yaml` 里。守护进程启动时把白名单导出到 `special_tuned.txt`（每行 `包名:模式列表(逗号分隔):优先回退模式`）并 info 打点，导出**仅 Chiri 模式**（`is_chiri_soc()`）下发生，Yumi 设备不生成该文件。WebUI 为双套流动：`bridge.ts::isChiri`（active_config 为处理器子目录 `config/{soc}/config.yaml` 时真）判定设备类型，`stores/scheduler.ts` 存 `isChiri` 态；`getSpecialTuned` 只读展示的「特调：{模式}」标签、模式动作单的专属特调选项（置顶、仅白名单应用可见）、重扫后的 `pruneSpecialTunedRules` 清理，均仅在 `isChiri` 下激活（`isChiri && specialTuned[pkg]`），Yumi 设备完全不显示特调 UI。应用列表提供「重新扫描」按钮（扫描中禁用防并发），扫描完成后清理 rules.yaml 中非白名单/非法特调映射。
 
