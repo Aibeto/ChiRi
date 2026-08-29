@@ -61,13 +61,13 @@ powersave:
     touch_boost_ms: 350
     touch_boost_tiers: 1
 
-# 均衡模式（基准：快速按需升频 + 直接降频，日常使用默认档）
+# 均衡模式（性能上限全开：允许触达硬件最高频；降频激进：1 tick 即降、低负载直接降，日常默认档）
 balance:
   cpu_load_governor:
-    up_threshold: 0.78
-    down_threshold: 0.45
+    up_threshold: 0.72
+    down_threshold: 0.55
     smoothing_up: 0.75
-    down_rate_limit_ticks: 2
+    down_rate_limit_ticks: 1
     up_rate_limit_ticks: 1
     headroom_factor: 1.20
     headroom_ramp: 0.12
@@ -76,20 +76,20 @@ balance:
     perf_init: 0.40
     up_jump_threshold: 0.30
     slow_up_scale: 0.03
-    down_fast_threshold: 0.08
+    down_fast_threshold: 0.20
     spike_jump_threshold: 0.40
     spike_decay: 0.25
     touch_boost_enabled: true
     touch_boost_ms: 400
     touch_boost_tiers: 1
 
-# 性能模式（相对 balance 更激进：更低的升频门槛、更高的地板、更晚降频）
+# 性能模式（相对新 balance 更偏性能：更低的升频门槛、更高的地板、更保守的降频）
 performance:
   cpu_load_governor:
-    up_threshold: 0.60
+    up_threshold: 0.55
     down_threshold: 0.40
     smoothing_up: 0.95
-    down_rate_limit_ticks: 4
+    down_rate_limit_ticks: 5
     up_rate_limit_ticks: 1
     headroom_factor: 1.40
     headroom_ramp: 0.12
@@ -98,7 +98,7 @@ performance:
     perf_init: 0.60
     up_jump_threshold: 0.25
     slow_up_scale: 0.05
-    down_fast_threshold: 0.08
+    down_fast_threshold: 0.05
     spike_jump_threshold: 0.40
     spike_decay: 0.20
     touch_boost_enabled: true
