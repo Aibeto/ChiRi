@@ -377,6 +377,10 @@ pub fn app_detection_loop(
     let mut debounce_start = Instant::now();
 
     loop {
+        // 屏幕状态自愈：uevent 可能漏报/误报导致 screen_state_arc 与实际屏幕状态脱节
+        // （亮屏仍为 false），先按 backlight sysfs 校正一次，保证后续 ScreenStateChange
+        // 事件与真实屏幕一致——避免亮屏期间 scenemode 计时器被误触发、亮屏后无法退出。
+        super::screen_detect::verify_screen_state(&screen_state_arc);
         let force_refresh = force_refresh_arc.swap(false, Ordering::SeqCst);
         let current_screen_state = { *screen_state_arc.lock().unwrap() };
 

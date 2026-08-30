@@ -29,5 +29,4 @@ done
 #   pm enable "$PACKAGE_NAME" >/dev/null 2>&1
 # fi
 
-
 echo "卸载ChiRi调度成功完成 请重启手机"
