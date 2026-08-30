@@ -8,7 +8,7 @@
 # --- 模块路径和工具 ---
 # $MODPATH 是 Magisk 传入的模块安装路径
 
-# --- 自动检测 BusyBox (保留以备将来可能使用，当前未使用) ---
+# --- 自动检测 BusyBox (暂未使用，预留) ---
 if [ -x "/data/adb/magisk/busybox" ]; then
   BUSYBOX="/data/adb/magisk/busybox"
 elif [ -x "/data/adb/ksu/bin/busybox" ]; then
@@ -37,4 +37,4 @@ ui_print "$MSG_WELCOME"
 ui_print " "
 
 # --- 结束 ---
-# 保留模块默认配置不变，不进行任何文件操作
+# 保留默认配置，不执行文件操作

@@ -122,8 +122,8 @@ fn main() -> Result<()> {
     );
     info!("{}", t("yumi-module-starting"));
 
-    // 5. 创建通信通道（有界：防止高频事件在调度线程繁忙时无限积压占用内存；
-    //    容量 64 足够承载 120ms（特调 40ms）负载事件与低频状态事件，满时 send 阻塞形成背压）
+    // 5. 创建通信通道（有界：容量 64，满时 send 阻塞形成背压，防止事件无限积压；
+    //    足够承载 160ms（特调 40ms）负载事件与低频状态事件）
     let (tx, rx) = mpsc::sync_channel::<common::DaemonEvent>(64);
 
     // 特调（akmode）激活共享标志：AkmodeGovernor 接管/释放时置位，
@@ -153,8 +153,7 @@ fn main() -> Result<()> {
     info!("{}", t("scheduler-module-started"));
 
     // 7. 启动 Monitor
-    // 常规采样间隔按 SoC 参数化（满足"只动 ChiRi"）：Chiri 目标 SoC 用 160ms（事件驱动
-    // 重构后的优化值），其余（Yumi）恢复原有 200ms（akmode 动态采样改造前硬编码值）。
+    // 常规采样间隔按 SoC 参数化：Chiri 160ms，Yumi 保持原有 200ms
     let sample_ms_normal: u64 = if chiri_active { 160 } else { 200 };
     let monitor_thread = thread::Builder::new()
         .name("monitor_core".to_string())

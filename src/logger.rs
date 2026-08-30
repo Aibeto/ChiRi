@@ -133,7 +133,7 @@ impl Append for SelfHealingAppender {
             return Ok(());
         }
 
-        // 确保日志目录存在（目录被删也能重建）
+        // 保证日志目录存在（目录被删也能重建）
         if let Some(parent) = self.path.parent() {
             let _ = fs::create_dir_all(parent);
         }

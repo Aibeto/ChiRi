@@ -1,15 +1,14 @@
 # ============================================================
-# SM8450（骁龙 8 Gen 1）处理器独立配置
-# 命中 CHIRI_SOC_HINTS（"8450"）时优先加载本处理器目录下的 config.yaml，
-# 缺省字段回退到代码默认值。仅影响 8450 设备，不波及其它机型。
-# 处理器专属特调见本目录下 akmode.yaml（与处理器绑定、随本目录发布；8450 与 8998 参数相同、各自一份）。
+# SM8475（骁龙 8+ Gen 1）处理器独立配置
+# 命中 CHIRI_SOC_HINTS（"8475"）时优先加载本目录下的 config.yaml，缺省字段回退代码默认值，不影响其它机型。
+# 本目录 akmode.yaml 为该处理器的特调参数（8475 与 8998 参数相同，各自维护一份）。
 # 调整参数后可热重载（config_watcher 监听 config 目录）。
 # 核心分布：1×X2 超大核 + 3×A710 大核 + 4×A510 小核，CPU ID 0-3 小核 / 4-6 大核 / 7 超大核。
 # ============================================================
 
 # 元数据信息
 meta:
-  name: "config_8450"
+  name: "config_8475"
   author: "ChiRi"
   language: "zh"
   loglevel: "INFO"
@@ -127,9 +126,9 @@ fast:
     touch_boost_ms: 0
     touch_boost_tiers: 1
 
-# 息屏场景模式（scenemode）：息屏超过 scene_mode_delay_secs 后切换，不择手段压功耗提续航：
-# up_threshold=1.0 永不主动升频，perf_ceil 极低封顶，直接降频立即回落。
-# 需要关闭时把 enabled 改为 false（届时息屏超时后释放 CLG 回系统默认调频）。
+# 息屏场景模式（scenemode）：息屏超过 scene_mode_delay_secs 后切换，压低功耗拉长续航。
+# up_threshold=1.0 不主动升频，perf_ceil 极低封顶，降频直接回落。
+# 需要关闭时把 enabled 改为 false（息屏超时后释放 CLG 回系统默认调频）。
 scenemode:
   cpu_load_governor:
     enabled: true

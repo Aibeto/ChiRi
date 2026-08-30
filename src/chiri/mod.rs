@@ -39,13 +39,12 @@ use std::time::{Duration, Instant};
 use std::fs;
 use anyhow::Result;
 
-// CLG 看门狗：SystemLoadUpdate 常规 160ms / 特调 40ms 投喂一次，若超过 CLG_STALE_MAX 时长
-// 未收到任何事件，视为负载源失效（eBPF 加载失败/探针崩溃/通道断开），主动 release()
-// 回滚到系统原生调频，避免 CPU 永久锁频在最后写入值上（8550 balance 等 perf_init=1.0
-// 的配置下会锁满全核高频）。
+// CLG 看门狗：SystemLoadUpdate 常规 160ms / 特调 40ms 投喂一次，超过 CLG_STALE_MAX 没收到
+// 事件就认为负载源失效（eBPF 加载失败/探针崩溃/通道断开），直接 release() 回系统调频，
+// 防止 CPU 锁死在上次写入的频率（如 8550 balance perf_init=1.0 会锁满全核高频）。
 const CLG_STALE_MAX: Duration = Duration::from_secs(5);
 /// 事件轮询间隔：主事件通道无事件时的轮询周期。
-/// 兼顾触摸事件驱动即时性（≤100ms 处理触摸事件）与看门狗巡检（仍按 CLG_STALE_MAX 阈值）。
+/// 兼顾触摸事件即时处理（≤100ms）与看门狗巡检（仍按 CLG_STALE_MAX 阈值）。
 const EVENT_POLL_MS: Duration = Duration::from_millis(100);
 
 pub mod config;
@@ -255,8 +254,17 @@ pub fn start_scheduler_thread(
             log::info!("{}", t("scheduler-ipc-started"));
             
             let root = common::get_module_root();
-            // 当前模式持久化文件：每次模式切换时写入，供外部（如 WebUI）读取当前状态
+            // 当前模式持久化文件：每次模式切换时写入，供外部（如 WebUI）读取当前状态。
+            // 自愈：常态下每 5 秒重写一次（见循环内 MODE_FILE_REWRITE_INTERVAL 分支），
+            // 防止文件被意外清空/删除后 WebUI 读不到当前状态（清空原因多非人为，但重写兜底人为误删）。
             let mode_file_path = root.join("current_mode.txt");
+            const MODE_FILE_REWRITE_INTERVAL: Duration = Duration::from_secs(5);
+            let mut last_mode_file_write = Instant::now();
+            // 启动时先写一次初始模式，避免开机后文件缺失/被清空时 WebUI 显示未知状态
+            {
+                let mode = mode_clone.lock().unwrap().clone();
+                let _ = utils::try_write_file(&mode_file_path, mode.as_bytes());
+            }
             
             // let mut fas_controller = crate::scheduler::fas::FasController::new(); // FAS 暂禁用
             let mut cpu_governor = crate::chiri::cpu_load_governor::CpuLoadGovernor::new();
@@ -275,7 +283,7 @@ pub fn start_scheduler_thread(
             // const FAS_SUSPEND_GRACE_SECS: u64 = 5;               // FAS 暂禁用
             
             let mut is_screen_on = true; // 屏幕状态标记
-            // 息屏计时：屏幕熄灭时记录，超过 scene_mode_delay_secs 后切换 scenemode 极致省电
+            // 息屏计时：屏幕熄灭时记录，超过 scene_mode_delay_secs 后切到 scenemode 低功耗
             let mut screen_off_at: Option<Instant> = None;
             // 是否已进入 scenemode（一次性切换，亮屏/模式变更时复位）
             let mut scene_mode_active = false;
@@ -321,12 +329,20 @@ pub fn start_scheduler_thread(
                 }
             }
             
-            // 事件循环包在 catch_unwind 中：任何 panic 都被捕获并记录，
-            // 避免调度线程静默死亡（进程存活但频率停在最后状态）
+            // 事件循环包在 catch_unwind 中：panic 被捕获并记录，
+            // 不会让调度线程静默挂掉（否则频率会停在最后状态）。
             // 最近一次 SystemLoadUpdate 到达时间：供 CLG 看门狗判定负载源是否失效
             let mut last_load_event = Instant::now();
             let loop_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             loop {
+                // 当前模式文件自愈：每 5 秒重写一次（即便内容未变也重写），
+                // 保证被外部清空/删除后 WebUI 最多 5 秒恢复读取当前状态
+                if last_mode_file_write.elapsed() >= MODE_FILE_REWRITE_INTERVAL {
+                    let mode = mode_clone.lock().unwrap().clone();
+                    let _ = utils::try_write_file(&mode_file_path, mode.as_bytes());
+                    last_mode_file_write = Instant::now();
+                }
+
                 // 触摸事件（事件驱动）：每次醒来先处理触摸队列，立即触发大核升频并写频，
                 // 不等待下一个 160ms 负载决策 tick。窗口内的持续触摸会刷新截止时间，
                 // 触摸升频由 on_touch 设置地板 + flush 写频（FastWriter 去重）。
@@ -341,9 +357,9 @@ pub fn start_scheduler_thread(
                 let msg = match rx.recv_timeout(EVENT_POLL_MS) {
                     Ok(msg) => msg,
                     Err(mpsc::RecvTimeoutError::Timeout) => {
-                        // eBPF 负载源失效自愈：超过 CLG_STALE_MAX 无负载事件 → 释放当前接管的
-                        // 调度器（CLG 或 akmode），回滚系统原生调频，防止 CPU 永久锁频
-                        // （下次 ModeChange/配置事件会重新接管）
+                        // eBPF 负载源超时自愈：超过 CLG_STALE_MAX 无负载事件 → 释放
+                        // 当前接管（CLG 或 akmode），回系统原生调频，防止 CPU 锁频
+                        // （下次 ModeChange/配置事件会重新接管）。
                         if last_load_event.elapsed() >= CLG_STALE_MAX {
                             if ak_governor.is_active() {
                                 log::error!(
@@ -382,7 +398,7 @@ pub fn start_scheduler_thread(
 
                         if !is_screen_on {
                             log::info!("{}", t("scheduler-doze-enable"));
-                            // 息屏计时起点：超过 scene_mode_delay_secs 后切换 scenemode 极致省电
+                            // 息屏计时起点：超过 scene_mode_delay_secs 后切到 scenemode 低功耗
                             screen_off_at = Some(Instant::now());
                             scene_mode_active = false;
 
@@ -405,7 +421,7 @@ pub fn start_scheduler_thread(
                                 // 非特调模式：交回 CLG 处理深度睡眠
                                 ak_governor.release();
 
-                                // 强行让 CLG 接管，并动态生成一个极致省电配置
+                                // 让 CLG 接管，动态生成一个低功耗配置
                                 let config_lock = config_clone.read().unwrap();
                                 let mut doze_cfg = get_clg_cfg(&config_lock, "powersave"); 
                                 doze_cfg.enabled = true;
@@ -571,9 +587,9 @@ pub fn start_scheduler_thread(
                             cpu_governor.flush();
                         }
 
-                        // scenemode：息屏超过 scene_mode_delay_secs 后把 CLG 切换到极致省电配置
-                        // （一次性）。特调模式由 akmode 独立接管不参与；亮屏后恢复原模式
-                        // （见 ScreenStateChange 亮屏分支）。scenemode 未启用时释放 CLG 回系统默认。
+                        // scenemode：息屏超过 scene_mode_delay_secs 后把 CLG 切到低功耗配置
+                        // （一次性）。特调模式由 akmode 独立接管不参与；亮屏后恢复原模式。
+                        // scenemode 未启用时释放 CLG 回系统默认。
                         if !is_screen_on && !scene_mode_active {
                             // 先用免锁的计时预判（最低 60s），避免息屏期间每个负载 tick 都抢锁
                             let delay_hit = screen_off_at

@@ -1,12 +1,12 @@
 #!/system/bin/sh
 
-# 停止残留守护进程：模块卸载后运行中的进程不会自动退出，会继续锁频篡改 CPU，
-# 必须先 killall（循环包装壳会因二进制文件被删除而自行退出）。
+# 先停掉守护进程：卸载后进程不会自动退出，可能继续锁频。
+# killall 后循环壳因二进制被删会自行退出。
 killall -9 yumi > /dev/null 2>&1
 sleep 1
 
-# 恢复被 CLG 锁定的 CPU 频率（守护进程被强杀时来不及 release，governor 可能停留在
-# performance、min==max 锁频）：放宽到硬件全档并退回系统默认 schedutil governor。
+# 恢复被锁的 CPU 频率：强杀时 governor 可能卡在 performance 锁频，
+# 放宽到硬件全档并退回 schedutil。
 for d in /sys/devices/system/cpu/cpufreq/policy*; do
   [ -f "$d/scaling_available_frequencies" ] || continue
   max_f=$(tr ' ' '\n' < "$d/scaling_available_frequencies" | sort -n | tail -1)
@@ -29,4 +29,4 @@ done
 #   pm enable "$PACKAGE_NAME" >/dev/null 2>&1
 # fi
 
-echo "卸载ChiRi调度成功完成 请重启手机"
+echo "ChiRi 调度已卸载，重启手机生效"

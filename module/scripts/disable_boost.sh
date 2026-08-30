@@ -18,7 +18,7 @@ write_value() {
 }
 
 disable_kernel_boost() {
-    echo "正在禁用内核级 Boost..."
+    echo "正在禁用内核 Boost..."
 
     write_value "/sys/devices/system/cpu/cpufreq/hotplug/cpu_hotplug_disable" "1"
     write_value "/sys/module/control_center/parameters/*" "N"
@@ -86,7 +86,7 @@ disable_cpuset_boost() {
 }
 
 disable_system_boost() {
-    echo "正在禁用系统级服务 Boost..."
+    echo "正在禁用系统服务 Boost..."
     stop miuibooster 2>/dev/null
     stop oneplus_brain_service 2>/dev/null
     stop vendor.perfservice 2>/dev/null
@@ -145,7 +145,7 @@ disable_uclamp_boost() {
         write_value "/dev/cpuctl/*/cpu.uclamp.latency_sensitive" "0"
         write_value "/dev/cpuctl/*/cpu.shares" "0"
         
-        # 恢复部分默认值
+        # 恢复默认值
         write_value "/dev/cpuctl/cpu.shares" "1024"
         write_value "/dev/cpuctl/top-app/cpu.shares" "1024"
         write_value "/dev/cpuctl/background/cpu.shares" "256"
@@ -187,7 +187,7 @@ disable_msm_performance() {
 }
 
 main() {
-    echo "--- 开始执行系统 Boost 禁用脚本 ---"
+    echo "正在禁用系统 Boost..."
     
     disable_kernel_boost
     disable_system_boost
@@ -200,7 +200,7 @@ main() {
     disable_msm_performance
     disable_flyme
     
-    echo "--- 所有禁用操作已执行完毕 ---"
+    echo "禁用完成"
 }
 
 main

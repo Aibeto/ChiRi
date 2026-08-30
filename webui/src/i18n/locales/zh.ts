@@ -57,7 +57,6 @@ export default {
   scanning: '扫描中...',
   rescan_done: '扫描完成',
   rescan_failed: '扫描失败',
-  illegal_special_removed: '，已清理 {count} 条非法特调规则',
   delete_rule: '删除规则',
   select_mode_for: '为以下应用选择模式',
   cancel: '取消',

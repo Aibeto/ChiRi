@@ -97,7 +97,15 @@ const RealBridge = {
 
   // 内部读取/写入 rules.yaml：仅服务于模式切换与应用性能模式，不提供整文件编辑
   async getRulesConfig(): Promise<any> { try { return yaml.load(await this.readFile(PATHS.RULES_YAML)) || {}; } catch (e) { return {}; } },
-  async saveRulesConfig(config: any): Promise<void> { await this.writeFile(PATHS.RULES_YAML, yaml.dump(config)); },
+  async saveRulesConfig(config: any): Promise<void> {
+    // 空/缺失的 app_modes 不要落盘为 null：js-yaml 会把值为 null 的字段序列化成
+    // "app_modes: null"，而 serde_yaml 无法把 null 反序列化为 HashMap（#[serde(default)]
+    // 只对缺失字段生效），导致守护进程每次加载 rules.yaml 都告警。直接移除该键即可。
+    if (config.app_modes === null || config.app_modes === undefined) {
+      delete config.app_modes;
+    }
+    await this.writeFile(PATHS.RULES_YAML, yaml.dump(config));
+  },
 
   // 生效配置文件相对 config 目录的路径（如 "8550/config.yaml"，非处理器时为 "config.yaml"），
   // 由守护进程启动时写入 active_config.txt；WebUI 只读展示，不改动文件。
@@ -149,7 +157,12 @@ const RealBridge = {
     if (errno !== 0) throw new Error(i18n.global.t('restart_failed') as string);
   },
 
-  async getCurrentMode(): Promise<string> { try { return (await this.readFile(PATHS.CURRENT_MODE)).trim(); } catch (e) { return 'balance'; } },
+  async getCurrentMode(): Promise<string> {
+    try {
+      // 文件被意外清空时回退默认档位；守护进程已常态每 5 秒重写该文件自愈
+      return (await this.readFile(PATHS.CURRENT_MODE)).trim() || 'balance';
+    } catch (e) { return 'balance'; }
+  },
 
   // 判定是否处于 Chiri 专属调度（特定处理器）：active_config 若为"处理器子目录/config.yaml"
   // （含 '/'，如 "8550/config.yaml"）则为 Chiri，否则为默认 Yumi。
@@ -191,31 +204,8 @@ const RealBridge = {
   },
   async getAppRules(): Promise<Record<string, string>> { return (await this.getRulesConfig()).app_modes || {}; },
 
-  // 清理 rules.yaml 中非法特调映射（应用列表扫描完成后调用，与后端门控一致）：
-  // 特调模式只允许白名单内且在该包名 modes 列表中的条目；
-  // 特调模式集合 = 所有白名单条目 modes 的并集。返回删除条数。
-  async pruneSpecialTunedRules(specialTuned: Record<string, { modes: string[]; fallback: string }>): Promise<number> {
-    const rules = await this.getRulesConfig();
-    if (!rules.app_modes) return 0;
-    const specialModes = new Set<string>();
-    Object.values(specialTuned).forEach(e => e.modes.forEach(m => specialModes.add(m)));
-    let removed = 0;
-    Object.keys(rules.app_modes).forEach(pkg => {
-      const mode = rules.app_modes[pkg];
-      if (specialModes.has(mode)) {
-        const entry = specialTuned[pkg];
-        if (!entry || !entry.modes.includes(mode)) {
-          delete rules.app_modes[pkg];
-          removed++;
-        }
-      }
-    });
-    if (removed > 0) await this.saveRulesConfig(rules);
-    return removed;
-  },
-
   // 读取守护进程启动时导出的内部特调白名单（每行 `包名:特调模式列表(逗号分隔):优先回退模式`）。
-  // 该文件由守护进程维护，WebUI 只读用于展示“特调”标签与专属模式选项，不提供修改入口；
+  // 该文件由守护进程维护，WebUI 只读用于展示“特调”标签，不提供修改入口；
   // 文件缺失（守护进程未启动等）时返回空表，标签静默降级。
   async getSpecialTuned(): Promise<Record<string, { modes: string[]; fallback: string }>> {
     try {

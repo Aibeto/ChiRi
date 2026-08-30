@@ -25,9 +25,29 @@ pub fn get_rules_path() -> PathBuf {
     common::get_module_root().join("rules.yaml")
 }
 
-/// global_mode 缺省时使用与模块模板一致的均衡（balance）模式
+/// global_mode 缺省时使用模块模板中的均衡（balance）模式
 fn default_global_mode() -> String {
     "balance".to_string()
+}
+
+/// app_modes 缺失或为 null 时按空表处理：WebUI 旧版本会把空 app_modes 写成
+/// "app_modes: null"，而 serde_yaml 无法把 null 反序列化为 HashMap
+/// （#[serde(default)] 只对缺失字段生效），会导致 rules.yaml 解析失败并告警。
+/// 这里显式兼容 null，保证守护进程读取/热重载不出错。
+fn deserialize_app_modes<'de, D>(deserializer: D) -> Result<HashMap<String, String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum MapOrNull {
+        Map(HashMap<String, String>),
+        Null,
+    }
+    Ok(match MapOrNull::deserialize(deserializer)? {
+        MapOrNull::Map(m) => m,
+        MapOrNull::Null => HashMap::new(),
+    })
 }
 
 // ════════════════════════════════════════════════════════════════
@@ -49,7 +69,7 @@ pub struct RulesConfig {
     pub dynamic_enabled: bool,
     #[serde(default = "default_global_mode")]
     pub global_mode: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_app_modes")]
     pub app_modes: HashMap<String, String>,
     #[serde(default)]
     pub ignored_apps: Vec<String>,

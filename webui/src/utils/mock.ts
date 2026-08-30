@@ -64,25 +64,6 @@ export const MockBridge = {
   },
   async getRulesConfig(): Promise<any> { await delay(300); return JSON.parse(JSON.stringify(mockRules)); },
   async saveRulesConfig(config: any): Promise<void> { await delay(400); Object.assign(mockRules, config); },
-  // 清理 rules.yaml 中非白名单/非法的特调映射（扫描完成后调用）
-  async pruneSpecialTunedRules(specialTuned: Record<string, { modes: string[]; fallback: string }>): Promise<number> {
-    await delay(200);
-    let removed = 0;
-    const specialModes = new Set<string>();
-    Object.values(specialTuned).forEach(e => e.modes.forEach(m => specialModes.add(m)));
-    const rules = mockRules.app_modes as Record<string, string>;
-    Object.keys(rules).forEach(pkg => {
-      const mode = rules[pkg];
-      if (specialModes.has(mode)) {
-        const entry = specialTuned[pkg];
-        if (!entry || !entry.modes.includes(mode)) {
-          delete rules[pkg];
-          removed++;
-        }
-      }
-    });
-    return removed;
-  },
   async getActiveConfigName(): Promise<string> { await delay(100); return '8550/config.yaml'; },
   async getConfigMeta(): Promise<Record<string, any>> { await delay(200); return { ...mockMeta }; },
   async setLogLevel(level: string): Promise<void> { await delay(200); mockMeta.loglevel = level; },

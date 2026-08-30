@@ -168,7 +168,7 @@ impl ClusterState {
     }
 
     /// 频率（kHz）→ [0,1] 性能比例，与 cached_ratios 同口径：(f - fmin)/(fmax - fmin)。
-    /// 供“直接降频为当前实际频率”时同步 current_perf，避免状态与实际写入脱节。
+    /// 在"直接降频为当前实际频率"时用来同步 current_perf，防止状态与实际写入脱节。
     fn ratio_of_freq(&self, freq: u32) -> f32 {
         let fmin = *self.available_freqs.first().unwrap_or(&0) as f32;
         let fmax = *self.available_freqs.last().unwrap_or(&0) as f32;
@@ -302,7 +302,7 @@ impl CpuLoadGovernor {
             }
 
             // 记录系统原始状态（每个将被接管的 policy 单独记录），release 时恢复。
-            // 必须位于 governor 写入之前，确保 release 能还原所有被接管的 cluster。
+            // 必须位于 governor 写入之前，保证 release 能还原所有被接管的 cluster。
             // 读取失败记录为 None：恢复时跳过对应字段，避免写退化值（如 0）。
             let governor = fs::read_to_string(&gov_path)
                 .ok()
@@ -714,7 +714,7 @@ impl CpuLoadGovernor {
     }
 
     /// 判定 cluster 是否覆盖当前 SoC 的大核区间：触摸升频只作用于大核。
-    /// 大核区间随命中 SoC 变化（8550：3-6；8450：4-6；8998：4-7），
+    /// 大核区间随命中 SoC 变化（8550：3-6；8475：4-6；8998：4-7），
     /// 由 common::chiri_core_ranges() 统一提供。
     fn is_big_cluster(affected: &[usize]) -> bool {
         let big = crate::common::chiri_core_ranges().big;

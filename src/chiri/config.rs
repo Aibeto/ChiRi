@@ -382,7 +382,7 @@ pub struct SpecialTunedGroup {
 
 /// 单个档位的配置：按核心组（little/big/prime）的升降频参数 + 本档防抖等待。
 /// 核心组区间按命中 SoC 区分（common::chiri_core_ranges：8550 0-2/3-6/7、
-/// 8450 0-3/4-6/7、8998 0-3/4-7 无 prime），与 affected_cpus 的 CPU ID 对照判定。
+/// 8475 0-3/4-6/7、8998 0-3/4-7 无 prime），与 affected_cpus 的 CPU ID 对照判定。
 /// 档位由 rules.yaml 生效模式决定，特调期间固定应用、不自动切换档位。
 #[derive(Debug, Deserialize, Clone)]
 pub struct SpecialTunedTier {
@@ -580,7 +580,7 @@ pub struct Config {
     #[serde(default)]
     pub fast: Mode,
     /// 息屏场景模式（scenemode）：屏幕熄灭超过 `scene_mode_delay_secs` 秒后切换到的
-    /// 极致省电配置（不择手段压功耗提续航），亮屏后恢复原模式。
+    /// 低功耗配置（压低频率上限、禁止主动升频），亮屏后恢复原模式。
     /// 未定义时回退 CLG 默认参数（兜底，通常 8550 config.yaml 会显式配置）。
     #[serde(default)]
     pub scenemode: Mode,

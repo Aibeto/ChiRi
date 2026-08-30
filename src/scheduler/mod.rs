@@ -198,7 +198,17 @@ pub fn start_scheduler_thread(
             log::info!("{}", t("scheduler-ipc-started"));
             
             let root = common::get_module_root();
+            // 当前模式持久化文件：每次模式切换时写入，供外部（如 WebUI）读取当前状态。
+            // 自愈：常态下每 5 秒重写一次（见循环内 MODE_FILE_REWRITE_INTERVAL 分支），
+            // 防止文件被意外清空/删除后 WebUI 读不到当前状态（清空原因多非人为，但重写兜底人为误删）。
             let mode_file_path = root.join("current_mode.txt");
+            const MODE_FILE_REWRITE_INTERVAL: Duration = Duration::from_secs(5);
+            let mut last_mode_file_write = Instant::now();
+            // 启动时先写一次初始模式，避免开机后文件缺失/被清空时 WebUI 显示未知状态
+            {
+                let mode = mode_clone.lock().unwrap().clone();
+                let _ = utils::try_write_file(&mode_file_path, mode.as_bytes());
+            }
             
             // let mut fas_controller = crate::scheduler::fas::FasController::new(); // FAS 暂禁用
             let mut cpu_governor = crate::scheduler::cpu_load_governor::CpuLoadGovernor::new();
@@ -246,6 +256,14 @@ pub fn start_scheduler_thread(
             let mut last_load_event = Instant::now();
             let loop_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             loop {
+                // 当前模式文件自愈：每 5 秒重写一次（即便内容未变也重写），
+                // 保证被外部清空/删除后 WebUI 最多 5 秒恢复读取当前状态
+                if last_mode_file_write.elapsed() >= MODE_FILE_REWRITE_INTERVAL {
+                    let mode = mode_clone.lock().unwrap().clone();
+                    let _ = utils::try_write_file(&mode_file_path, mode.as_bytes());
+                    last_mode_file_write = Instant::now();
+                }
+
                 let msg = match rx.recv_timeout(CLG_STALE_POLL) {
                     Ok(msg) => msg,
                     Err(mpsc::RecvTimeoutError::Timeout) => {

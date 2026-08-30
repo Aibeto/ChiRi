@@ -85,7 +85,7 @@ scheduler-mode-change-request = [Scheduler] 模式变更请求: { $old } -> { $n
 scheduler-apply-failed = [Scheduler] 应用设置失败: { $error }
 scheduler-channel-closed = [Scheduler] 通道已关闭！线程退出
 scheduler-ipc-panic = [Scheduler] IPC 线程发生 panic，正在释放 CPU 控制权。
-scheduler-doze-enable = [Scheduler] 息屏: 启用极致深度睡眠模式 (限制 CPU 最高性能)。
+scheduler-doze-enable = [Scheduler] 息屏: 启用深度睡眠模式 (限制 CPU 最高性能)。
 scheduler-doze-special-keep = [Scheduler] 息屏: 特调模式保持接管，不切换 CLG doze。
 scheduler-doze-restore = [Scheduler] 亮屏: 恢复之前的性能限制。
 scheduler-clg-init = [Scheduler] CPU 负载调频器: 在启动时初始化 (模式={ $mode })
@@ -95,7 +95,7 @@ scheduler-event-load = [Scheduler] 收到负载事件: 核心利用率=[{ $cores
 scheduler-event-frame = [Scheduler] 收到帧事件: 帧间隔={ $delta_ms }ms
 scheduler-event-config-reload = [Scheduler] 收到配置重载事件: 当前模式={ $mode }, 亮屏={ $screen_on }
 scheduler-special-mode-active = [Scheduler] 特调模式激活: { $pkg } -> { $mode }
-scheduler-scene-mode-enter = [Scheduler] 息屏已超过阈值，切换到 scenemode 极致省电模式
+scheduler-scene-mode-enter = [Scheduler] 息屏已超过阈值，切换到 scenemode 省电模式
 
 # --- Scheduler: Config Watcher ---
 config-reloading = [Config] 检测到配置文件变更，正在重载...

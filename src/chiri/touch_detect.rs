@@ -124,7 +124,7 @@ pub fn monitor_touch(tx: SyncSender<()>) {
                                 || (etype == EV_ABS && code == ABS_MT_TRACKING_ID && value >= 0);
                             if touched {
                                 // 事件驱动：向 scheduler_ipc 发送触摸事件（非阻塞，
-                                // 通道满说明事件积压，丢失冗余触摸可接受）
+                                // 通道满时丢弃，多余的触摸事件丢了不碍事）
                                 let _ = tx.try_send(());
                                 debug!(
                                     "{}",

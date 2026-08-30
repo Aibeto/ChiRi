@@ -29,8 +29,7 @@ use tokio::sync::watch;
 use crate::fluent_args;
 use crate::i18n::{t, t_with_args};
 
-/// 常规采样周期由调用方（main.rs 按 SoC）传入：ChiRi 160ms（事件驱动重构优化值，
-/// 降低 eBPF map 读取与事件发送开销 -25%），非 Chiri（Yumi）200ms（恢复原有值）。
+/// 常规采样周期由调用方（main.rs 按 SoC）传入：ChiRi 160ms / Yumi 200ms。
 /// 见 `start_cpu_loop` 的 `sample_ms_normal` 参数。
 /// 特调采样周期（ms）：明日方舟特调激活时缩短到 40ms，保证特调档位判定的响应度
 const SAMPLE_MS_TUNED: u64 = 40;

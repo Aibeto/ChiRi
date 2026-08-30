@@ -18,8 +18,8 @@
 use crate::monitor::config::RulesConfig;
 use std::env;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// 守护进程全局事件总线
 /// FAS 暂禁用：`FrameUpdate` 变体暂无生产者、`ModeChange.pid` 与 `SystemLoadUpdate.foreground_max_util`
@@ -77,9 +77,9 @@ fn read_first_line(path: &str) -> String {
 
 /// 触发 Chiri 专用调度的特定处理器型号片段列表。
 /// 探测到任一命中即启用 Chiri 调度器；新增机型只需在此追加片段，不要绑定单一型号。
-/// 例：SM8550（骁龙 8 Gen 2）含 "8550"，SM8450（骁龙 8 Gen 1）含 "8450"，
-/// MSM8998（骁龙 835）含 "8998"。片段须能互相区分（8550 不含 8450，反之亦然）。
-const CHIRI_SOC_HINTS: &[&str] = &["8550", "8450", "8998"];
+/// 例：SM8550（骁龙 8 Gen 2）含 "8550"，SM8475（骁龙 8+ Gen 1）含 "8475"，
+/// MSM8998（骁龙 835）含 "8998"。片段须能互相区分（8550 不含 8475，反之亦然）。
+const CHIRI_SOC_HINTS: &[&str] = &["8550", "8475", "8998"];
 
 /// 读取单个 Android 系统属性（getprop key），失败/为空返回空串
 fn getprop(key: &str) -> String {
@@ -139,7 +139,7 @@ pub fn is_chiri_soc() -> bool {
 
 /// 返回第一个「既命中设备硬件标识、又存在处理器专属配置目录」的片段。
 /// 顺序与 CHIRI_SOC_HINTS 一致：配置目录缺失的机型继续向后找，
-/// 防止多 SoC 并存时设备误用其它机型的配置目录（如 8450 设备读到 8550 的 config.yaml）。
+/// 防止多 SoC 并存时设备误用其它机型的配置目录（如 8475 设备读到 8550 的 config.yaml）。
 fn matched_soc_hint() -> Option<&'static str> {
     if !is_chiri_soc() {
         return None;
@@ -171,12 +171,12 @@ pub struct CoreGroupRanges {
 
 /// 按命中的处理器片段返回核心组区间：
 /// - 8550（骁龙 8 Gen 2）：little 0-2 / big 3-6 / prime 7
-/// - 8450（骁龙 8 Gen 1）：little 0-3 / big 4-6 / prime 7
+/// - 8475（骁龙 8+ Gen 1）：little 0-3 / big 4-6 / prime 7
 /// - 8998（骁龙 835）：little 0-3 / big 4-7 / 无 prime
 /// 未命中（非 ChiRi）回退 8550 布局兜底（仅 Chiri 路径调用，正常不会发生）。
 pub fn chiri_core_ranges() -> CoreGroupRanges {
     match matched_soc_hint() {
-        Some("8450") => CoreGroupRanges {
+        Some("8475") => CoreGroupRanges {
             little: 0..4,
             big: 4..7,
             prime: 7..8,
@@ -268,7 +268,7 @@ pub fn is_special_mode_allowed(pkg: &str, mode: &str) -> bool {
 }
 
 /// 处理器专属特调配置文件路径：与处理器主配置同目录 `config/{命中片段}/akmode.yaml`
-/// （特调与处理器绑定，各目标 SoC 子目录自带一份；8450 与 8998 参数相同、各自一份）。
+/// （特调与处理器绑定，各目标 SoC 子目录自带一份；8475 与 8998 参数相同、各自一份）。
 /// 命中 SoC 时必返处理器目录下的路径，文件缺失/损坏由 merge_akmode 置特调不可用、
 /// 白名单应用回退 CLG（不落到其它目录的共享文件）。非 Chiri（不会调用）兜底根 config 路径。
 pub fn get_akmode_path() -> PathBuf {

@@ -57,7 +57,6 @@ export default {
   scanning: 'Scanning...',
   rescan_done: 'Scan complete',
   rescan_failed: 'Scan failed',
-  illegal_special_removed: ', removed {count} invalid tuned rule(s)',
   delete_rule: 'Delete rule',
   select_mode_for: 'Select mode for',
   cancel: 'Cancel',

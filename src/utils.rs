@@ -15,18 +15,18 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-use anyhow::{Result};
+use anyhow::Result;
 use inotify::{Inotify, WatchMask};
 use log;
+use nix::unistd::{AccessFlags, access};
 use serde::de::DeserializeOwned;
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use nix::unistd::{access, AccessFlags};
 
-use crate::i18n::t_with_args;
 use crate::fluent_args;
+use crate::i18n::t_with_args;
 
 /// 向文件写入内容，并处理可能的错误
 pub fn write_to_file<P: AsRef<Path>, C: AsRef<[u8]>>(path: P, content: C) -> Result<()> {
@@ -38,7 +38,7 @@ pub fn write_to_file<P: AsRef<Path>, C: AsRef<[u8]>>(path: P, content: C) -> Res
     }
 
     fs::write(path, content)?;
-    
+
     // 写完后设为只读
     let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o444));
     Ok(())
@@ -52,7 +52,7 @@ pub fn try_write_file<P: AsRef<Path>, C: AsRef<[u8]>>(path: P, content: C) -> Re
     Ok(())
 }
 
-pub fn enable_perm <P: AsRef<Path>>(path: P) -> Result<()> {
+pub fn enable_perm<P: AsRef<Path>>(path: P) -> Result<()> {
     let path = path.as_ref();
     if path.exists() {
         fs::set_permissions(path, fs::Permissions::from_mode(0o664))?;
@@ -65,17 +65,16 @@ pub fn watch_path<P: AsRef<Path>>(path_to_watch: P) -> Result<()> {
     let mut inotify = Inotify::init()?;
     // CLOSE_WRITE 覆盖直接写入；MOVED_TO 覆盖原子替换（WebUI 用临时文件 + mv 保存配置时
     // 是 rename 而非写打开，只有 MOVED_TO 能感知），两者任一触发即返回并触发重载
-    inotify.watches().add(
-        path_to_watch,
-        WatchMask::CLOSE_WRITE | WatchMask::MOVED_TO,
-    )?;
+    inotify
+        .watches()
+        .add(path_to_watch, WatchMask::CLOSE_WRITE | WatchMask::MOVED_TO)?;
 
     let mut buffer = [0u8; 1024];
     inotify.read_events_blocking(&mut buffer)?;
     Ok(())
 }
 
-// 通用的读取文件为 f64 的函数
+// 读取文件内容解析为 f64
 pub fn read_f64_from_file(path: &str) -> Result<f64> {
     let mut content = String::new();
     File::open(path)?.read_to_string(&mut content)?;
@@ -90,13 +89,13 @@ pub fn read_file_content(path: &str) -> Result<String> {
     Ok(content.trim().to_string())
 }
 
-// 查找 CPU 温度路径的逻辑
+// 查找 CPU 温度传感器路径
 pub fn find_cpu_temp_path() -> Result<String> {
     let thermal_path = "/sys/class/thermal";
     let thermal_dir = Path::new(thermal_path);
-    
+
     if !thermal_dir.exists() {
-         return Err(anyhow::anyhow!("Thermal directory not found"));
+        return Err(anyhow::anyhow!("Thermal directory not found"));
     }
 
     for entry in fs::read_dir(thermal_dir)? {
@@ -107,12 +106,14 @@ pub fn find_cpu_temp_path() -> Result<String> {
                 if dir_name.starts_with("thermal_zone") {
                     let type_path = path.join("type");
                     // 修复 E0532 模式匹配错误: 直接使用 if let Ok(...)
-                    if let Ok(type_content) = read_file_content(type_path.to_str().unwrap_or_default()) {
-                        if type_content.contains("soc_max") 
-                           || type_content.contains("mtktscpu") 
-                           || type_content.contains("cpu-1-") 
-                           || type_content.contains("cpu-0-0-usr") {
-                            
+                    if let Ok(type_content) =
+                        read_file_content(type_path.to_str().unwrap_or_default())
+                    {
+                        if type_content.contains("soc_max")
+                            || type_content.contains("mtktscpu")
+                            || type_content.contains("cpu-1-")
+                            || type_content.contains("cpu-0-0-usr")
+                        {
                             let temp_path = path.join("temp");
                             if temp_path.exists() {
                                 return Ok(temp_path.to_str().unwrap().to_string());
@@ -153,7 +154,9 @@ impl SysPathExist {
             mtk_feas_exist: Self::path_exists("/sys/module/mtk_fpsgo/parameters/perfmgr_enable"),
             walt_exist: Self::path_exists("/proc/sys/walt"),
             stune_exist: Self::path_exists("/dev/stune"),
-            hi6220_ufs_exist: Self::path_exists("/sys/bus/platform/devices/hi6220-ufs/ufs_clk_gate_disable"),
+            hi6220_ufs_exist: Self::path_exists(
+                "/sys/bus/platform/devices/hi6220-ufs/ufs_clk_gate_disable",
+            ),
             cpuctl_top_app_exist: Self::path_exists("/dev/cpuctl/top-app"),
             cpuctl_foreground_exist: Self::path_exists("/dev/cpuctl/foreground"),
             cpuctl_background_exist: Self::path_exists("/dev/cpuctl/background"),
@@ -163,7 +166,9 @@ impl SysPathExist {
             cpuset_system_background_exist: Self::path_exists("/dev/cpuset/system-background"),
             cpuset_restricted_exist: Self::path_exists("/dev/cpuset/restricted"),
             cpuset_root_exist: Self::path_exists("/dev/cpuset"),
-            cpuidle_governor_exist: Self::path_exists("/sys/devices/system/cpu/cpuidle/current_governor"),
+            cpuidle_governor_exist: Self::path_exists(
+                "/sys/devices/system/cpu/cpuidle/current_governor",
+            ),
             sda_scheduler_exist: Self::path_exists("/sys/block/sda/queue/scheduler"),
         }
     }
@@ -234,21 +239,32 @@ impl FastWriter {
                 if ret != 0 {
                     let errno = std::io::Error::last_os_error();
                     if errno.raw_os_error() != Some(libc::EINVAL)
-                        && errno.raw_os_error() != Some(libc::ENOENT) {
-                        log::debug!("{}", t_with_args("sysfs-umount2-failed", &fluent_args!("path" => path_str, "error" => errno.to_string())));
+                        && errno.raw_os_error() != Some(libc::ENOENT)
+                    {
+                        log::debug!(
+                            "{}",
+                            t_with_args(
+                                "sysfs-umount2-failed",
+                                &fluent_args!("path" => path_str, "error" => errno.to_string())
+                            )
+                        );
                     }
                 }
             }
         }
     }
 
-    pub fn re_unmount(&self) { Self::try_unmount(&self.path); }
+    pub fn re_unmount(&self) {
+        Self::try_unmount(&self.path);
+    }
 
     pub fn write_value_force(&mut self, value: u32) -> bool {
         self.do_write(value)
     }
 
-    pub fn is_valid(&self) -> bool { self.file.is_some() }
+    pub fn is_valid(&self) -> bool {
+        self.file.is_some()
+    }
 
     fn do_write(&mut self, value: u32) -> bool {
         let len = Self::u32_to_buf(value, &mut self.buf);
@@ -270,26 +286,44 @@ impl FastWriter {
                     }
                     // EACCES/EROFS: 多为厂商挂载写保护，卸载后重试一次
                     Some(libc::EACCES) | Some(libc::EROFS) if !self.unmounted => {
-                        log::warn!("{}", t_with_args("sysfs-write-freq-failed",
-                            &fluent_args!("freq" => value.to_string(), "error" => e.to_string())));
+                        log::warn!(
+                            "{}",
+                            t_with_args(
+                                "sysfs-write-freq-failed",
+                                &fluent_args!("freq" => value.to_string(), "error" => e.to_string())
+                            )
+                        );
                         self.unmount_and_reopen();
                         return self.do_write(value);
                     }
                     _ => {
-                        log::warn!("{}", t_with_args("sysfs-write-freq-failed",
-                            &fluent_args!("freq" => value.to_string(), "error" => e.to_string())));
+                        log::warn!(
+                            "{}",
+                            t_with_args(
+                                "sysfs-write-freq-failed",
+                                &fluent_args!("freq" => value.to_string(), "error" => e.to_string())
+                            )
+                        );
                     }
                 }
-                // 写入失败不更新 last_value，确保下次 tick 会重试
+                // 写入失败不更新 last_value，保证下次 tick 会重试
                 false
             }
         }
     }
 
     fn u32_to_buf(mut v: u32, buf: &mut [u8; 20]) -> usize {
-        if v == 0 { buf[0] = b'0'; buf[1] = b'\n'; return 2; }
+        if v == 0 {
+            buf[0] = b'0';
+            buf[1] = b'\n';
+            return 2;
+        }
         let mut pos = 18;
-        while v > 0 { buf[pos] = b'0' + (v % 10) as u8; v /= 10; pos -= 1; }
+        while v > 0 {
+            buf[pos] = b'0' + (v % 10) as u8;
+            v /= 10;
+            pos -= 1;
+        }
         let start = pos + 1;
         let digit_len = 19 - start;
         buf.copy_within(start..19, 0);
@@ -303,7 +337,9 @@ impl FastWriter {
 // ════════════════════════════════════════════════════════════════
 
 /// Serde 默认值辅助函数：始终返回 true
-pub fn default_true() -> bool { true }
+pub fn default_true() -> bool {
+    true
+}
 
 /// 读取文件内容并解析为 i32
 pub fn read_i32_from_file(path: &str) -> Result<i32> {
@@ -314,7 +350,10 @@ pub fn read_i32_from_file(path: &str) -> Result<i32> {
 
 /// 获取与 BPF ktime_get_ns() 绝对对齐的单调时钟时间 (纳秒)
 pub fn get_ktime_ns() -> u64 {
-    let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
     unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
     (ts.tv_sec as u64) * 1_000_000_000 + (ts.tv_nsec as u64)
 }
@@ -331,7 +370,11 @@ where
             let mut s = String::new();
             file.read_to_string(&mut s)?;
             serde_yaml::from_str(&s).or_else(|e| {
-                log::warn!("[Config] Parse error {}: {}. Default.", path_ref.display(), e);
+                log::warn!(
+                    "[Config] Parse error {}: {}. Default.",
+                    path_ref.display(),
+                    e
+                );
                 Ok(T::default())
             })
         }
