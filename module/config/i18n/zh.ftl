@@ -179,5 +179,14 @@ apply-cpu-idle-governor-start = CPU 空闲调速器设置已完成
 apply-io-settings-start = I/O 设置已完成
 main-config-watch-thread-create = 主配置监控线程已创建
 
+# --- Fast Lock ---
+fast-activated = [Fast] 极速模式已激活，所有核心锁定最高频
+fast-deactivated = [Fast] 极速模式已解除，系统频率恢复
+fast-init = [Fast] policy { $pid } 锁频 { $max_khz } kHz
+fast-rewrite = [Fast] policy { $pid } 重写 { $max_khz } kHz
+fast-writer-invalid = [Fast] policy { $pid } 写入器无效 (max_valid: { $max_valid }, min_valid: { $min_valid })，已跳过
+fast-restore = [Fast] policy { $pid } 恢复 governor={ $governor } min={ $min } max={ $max }
+fast-watchdog-release = [Fast] 负载源超时 ({ $secs }s)，释放极速锁频
+
 # --- Logger ---
 log-level-updated = 日志级别已更新为: { $level }

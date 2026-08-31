@@ -55,6 +55,7 @@ pub mod scheduler;
 pub mod cpu_load_governor;
 pub mod akmode;
 pub mod touch_detect;
+pub mod fast;
 
 use crate::i18n::{t, load_language, t_with_args};
 use crate::fluent_args; 
@@ -273,6 +274,10 @@ pub fn start_scheduler_thread(
             let ak_governor_flag = ak_active.clone();
             let mut ak_governor = crate::chiri::akmode::AkmodeGovernor::new(ak_governor_flag);
 
+            // 极速模式（fast）专属锁频器：与 CLG 完全独立，不读 yaml 调频参数，
+            // 直接锁所有 cluster 的 min=max=硬件最高频，每 5 秒重写防止外部篡改。
+            let mut fast_lock = crate::chiri::fast::FastLock::new();
+
             // ==== FAS 暂禁用：以下变量仅服务于 FAS 调度，暂注释 ====
             // let rules_path = crate::monitor::config::get_rules_path();
             // let mut current_rules = crate::utils::read_config::<crate::monitor::config::RulesConfig, _>(&rules_path).unwrap_or_default();
@@ -319,7 +324,9 @@ pub fn start_scheduler_thread(
             // 启动时初始化
             {
                 let current_mode = mode_clone.lock().unwrap().clone();
-                if current_mode != "fas" {
+                if current_mode == "fast" {
+                    fast_lock.init();
+                } else if current_mode != "fas" {
                     let config_lock = config_clone.read().unwrap();
                     let clg_cfg = get_clg_cfg(&config_lock, &current_mode);
                     if clg_cfg.enabled {
@@ -354,6 +361,9 @@ pub fn start_scheduler_thread(
                     }
                 }
 
+                // 极速模式：每 5 秒重写一次硬件最高频，防止系统/厂商守护进程篡改
+                fast_lock.tick();
+
                 let msg = match rx.recv_timeout(EVENT_POLL_MS) {
                     Ok(msg) => msg,
                     Err(mpsc::RecvTimeoutError::Timeout) => {
@@ -380,6 +390,16 @@ pub fn start_scheduler_thread(
                                     )
                                 );
                                 cpu_governor.release();
+                            }
+                            if fast_lock.is_active() {
+                                log::error!(
+                                    "{}",
+                                    t_with_args(
+                                        "fast-watchdog-release",
+                                        &fluent_args!("secs" => last_load_event.elapsed().as_secs().to_string())
+                                    )
+                                );
+                                fast_lock.release();
                             }
                         }
                         continue;
@@ -420,6 +440,7 @@ pub fn start_scheduler_thread(
                             } else {
                                 // 非特调模式：交回 CLG 处理深度睡眠
                                 ak_governor.release();
+                                fast_lock.release();
 
                                 // 让 CLG 接管，动态生成一个低功耗配置
                                 let config_lock = config_clone.read().unwrap();
@@ -449,8 +470,14 @@ pub fn start_scheduler_thread(
                                     let initial_tier = get_ak_initial_tier();
                                     ak_governor.init_policies(&ak_cfg, initial_tier);
                                 }
+                            } else if current_mode == "fast" {
+                                // 亮屏恢复极速模式：释放 doze CLG，由 fast_lock 接管
+                                ak_governor.release();
+                                cpu_governor.release();
+                                fast_lock.init();
                             } else if current_mode != "fas" {
                                 ak_governor.release();
+                                fast_lock.release();
                                 let clg_cfg = get_clg_cfg(&config_lock, &current_mode);
                                 if clg_cfg.enabled {
                                     // 息屏 doze 期间 CLG 仍持有 writer，热切换配置即可
@@ -542,9 +569,15 @@ pub fn start_scheduler_thread(
                                         let ak_cfg = config_lock.get_akmode().clone();
                                         let initial_tier = get_ak_initial_tier();
                                         ak_governor.init_policies(&ak_cfg, initial_tier);
-                                    } else {
-                                        // 退出特调模式：停止 akmode，交回 CLG 接管
+                                    } else if mode == "fast" {
+                                        // 极速模式：停止特调/CLG，由 fast_lock 独立锁满频
                                         ak_governor.release();
+                                        cpu_governor.release();
+                                        fast_lock.init();
+                                    } else {
+                                        // 退出特调/极速模式：停止 akmode/fast_lock，交回 CLG 接管
+                                        ak_governor.release();
+                                        fast_lock.release();
                                         let clg_cfg = get_clg_cfg(&config_lock, &mode);
                                         if clg_cfg.enabled {
                                             // CLG 已激活时热切换配置，避免同模式反复切换全量重建
@@ -668,8 +701,14 @@ pub fn start_scheduler_thread(
                                 let initial_tier = get_ak_initial_tier();
                                 if ak_governor.is_active() { ak_governor.reload_config(&ak_cfg, initial_tier); }
                                 else { ak_governor.init_policies(&ak_cfg, initial_tier); }
+                            } else if current_mode == "fast" {
+                                // 极速模式不读 yaml 参数，ConfigReload 无需处理；
+                                // fast_lock 保持活跃，仅确保 CLG 未意外启动
+                                if cpu_governor.is_active() { cpu_governor.release(); }
                             } else {
+                                // 非特调、非极速模式：确保 fast_lock 释放，CLG 接管
                                 ak_governor.release();
+                                fast_lock.release();
                                 let clg_cfg = get_clg_cfg(&config_lock, &current_mode);
                                 if clg_cfg.enabled {
                                     if cpu_governor.is_active() { cpu_governor.reload_config(&clg_cfg); } 
@@ -701,6 +740,7 @@ pub fn start_scheduler_thread(
             // 收尾：无论 channel 关闭还是 panic，都恢复 CPU 控制状态，避免频率/governor 残留
             cpu_governor.release();
             ak_governor.release();
+            fast_lock.release();
             // ==== FAS 暂禁用 ====
             // fas_controller.reset_all_freqs();
             // fas_controller.clear_game();

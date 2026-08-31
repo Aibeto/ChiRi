@@ -180,5 +180,14 @@ apply-cpu-idle-governor-start = CPU idle governor settings applied.
 apply-io-settings-start = I/O settings applied.
 main-config-watch-thread-create = Main config watcher thread created.
 
+# --- Fast Lock ---
+fast-activated = [Fast] activated, all cores locked to max frequency
+fast-deactivated = [Fast] deactivated, system frequencies restored
+fast-init = [Fast] policy { $pid } locked at { $max_khz } kHz
+fast-rewrite = [Fast] policy { $pid } rewrite { $max_khz } kHz
+fast-writer-invalid = [Fast] policy { $pid } writer invalid (max_valid: { $max_valid }, min_valid: { $min_valid }), skipping
+fast-restore = [Fast] policy { $pid } restore governor={ $governor } min={ $min } max={ $max }
+fast-watchdog-release = [Fast] load source timeout ({ $secs }s), releasing fast lock
+
 # --- Logger ---
 log-level-updated = Log level updated to: { $level }
