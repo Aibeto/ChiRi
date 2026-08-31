@@ -678,9 +678,28 @@ impl Config {
             Ok(c) => c,
             Err(_) => return,
         };
-        match serde_yaml::from_str::<Config>(&content) {
+        // 只反序列化 scenemode 段（先解析成 Value 再提取），不解析整个 Config：
+        // 1) 文件里混入的其它字段不会被反序列化，也不会覆盖当前配置；
+        // 2) scenemode 段缺失时保持 config.yaml 已配置的值，而不是用默认值覆盖。
+        let scene_value = match serde_yaml::from_str::<serde_yaml::Value>(&content) {
+            Ok(value) => match value.get("scenemode").cloned() {
+                Some(v) => v,
+                None => return, // 段缺失：保持当前已配置的 scenemode
+            },
+            Err(e) => {
+                log::warn!(
+                    "{}",
+                    t_with_args(
+                        "config-scenemode-parse-failed",
+                        &fluent_args!("path" => path.to_string_lossy().to_string(), "error" => e.to_string())
+                    )
+                );
+                return;
+            }
+        };
+        match serde_yaml::from_value::<Mode>(scene_value) {
             Ok(scene_config) => {
-                self.scenemode = scene_config.scenemode;
+                self.scenemode = scene_config;
                 log::debug!(
                     "{}",
                     t_with_args(
