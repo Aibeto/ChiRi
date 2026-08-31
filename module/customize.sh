@@ -24,9 +24,9 @@ fi
 LANG_CODE="en"
 MSG_WELCOME="Welcome to ChiRi Scheduler! (Based on Yumi Scheduler)"
 MSG_SELECT_MODE="Please select installation mode:"
-MSG_VOLUME_UP="[Volume UP] Full installation (Recommended)"
-MSG_VOLUME_DOWN="[Volume DOWN] Hot update (Keep current config)"
-MSG_SELECTED_UP="Selected: Full installation"
+MSG_VOLUME_UP="[Volume UP] Full installation"
+MSG_VOLUME_DOWN="[Volume DOWN] Hot update"
+MSG_SELECTED_UP="Selected: Full installation (Requires device reboot)"
 MSG_SELECTED_DOWN="Selected: Hot update"
 MSG_HOT_UPDATE_START="Starting hot update process..."
 MSG_STOPPING_DAEMON="Stopping daemon process..."
@@ -42,8 +42,8 @@ if echo "$CURRENT_LOCALE" | $BUSYBOX grep -qi "zh"; then
   LANG_CODE="zh"
   MSG_WELCOME="欢迎使用 ChiRi 调度！（Based on Yumi Scheduler）"
   MSG_SELECT_MODE="请选择安装模式："
-  MSG_VOLUME_UP="[音量上键] 完整安装（推荐）"
-  MSG_VOLUME_DOWN="[音量下键] 热更新（保留当前配置）"
+  MSG_VOLUME_UP="[音量上键] 完整安装（需要重启设备）"
+  MSG_VOLUME_DOWN="[音量下键] 热更新"
   MSG_SELECTED_UP="已选择：完整安装"
   MSG_SELECTED_DOWN="已选择：热更新"
   MSG_HOT_UPDATE_START="开始热更新流程..."
@@ -84,29 +84,62 @@ if [ "$HOT_UPDATE_AVAILABLE" = "true" ]; then
     
     # 音量键检测函数（兼容 Magisk/KernelSU 环境）
     # 返回 0 表示音量上键，返回 1 表示音量下键
+    # 返回 2 表示错误（多次按下事件）
     detect_volume_key() {
         # 尝试使用 Magisk 的 chooseport（如果可用）
         if type chooseport >/dev/null 2>&1; then
             chooseport && return 0 || return 1
         fi
         
-        # 备用方案：读取音量键设备节点
-        for input_dev in /dev/input/event*; do
-            local name=$(cat /sys/class/input/$(basename $input_dev)/device/name 2>/dev/null)
-            case "$name" in
-                *volume*|*Volume*|*gpio-keys*|*qpnp_pon*)
-                    # 检测音量键事件（1秒超时）
-                    local event=$(timeout 1 getevent -l $input_dev 2>/dev/null | head -1)
-                    if echo "$event" | grep -q "KEY_VOLUMEUP"; then
+        # 备用方案：使用 getevent 监听音量键按下事件
+        # getevent -l 输出格式: /dev/input/eventX: EV_KEY KEY_VOLUMEUP DOWN/UP
+        # 需要检测按下事件（DOWN），而非检查当前状态
+        
+        ui_print "等待音量键按下..."
+        ui_print "Waiting for volume key press..."
+        
+        # 后台启动 getevent 监听所有输入设备，超时 10 秒
+        getevent -l > /tmp/getevent_output 2>/dev/null &
+        local getevent_pid=$!
+        
+        # 等待用户按下音量键（最多 10 秒）
+        local count=0
+        local first_key=""
+        while [ $count -lt 100 ]; do
+            # 检查是否检测到音量键按下事件
+            if [ -f /tmp/getevent_output ]; then
+                # 统计按下事件数量
+                local up_count=$(grep -c "KEY_VOLUMEUP.*DOWN" /tmp/getevent_output 2>/dev/null || echo 0)
+                local down_count=$(grep -c "KEY_VOLUMEDOWN.*DOWN" /tmp/getevent_output 2>/dev/null || echo 0)
+                local total_count=$((up_count + down_count))
+                
+                # 如果有多个按下事件，报错
+                if [ $total_count -gt 1 ]; then
+                    kill $getevent_pid 2>/dev/null
+                    rm -f /tmp/getevent_output
+                    ui_print "错误：检测到多个音量键按下事件！"
+                    ui_print "Error: Multiple volume key press events detected!"
+                    return 2
+                fi
+                
+                # 如果检测到一个事件，返回结果
+                if [ $total_count -eq 1 ]; then
+                    kill $getevent_pid 2>/dev/null
+                    rm -f /tmp/getevent_output
+                    if [ $up_count -eq 1 ]; then
                         return 0
-                    elif echo "$event" | grep -q "KEY_VOLUMEDOWN"; then
+                    else
                         return 1
                     fi
-                    ;;
-            esac
+                fi
+            fi
+            sleep 0.1
+            count=$((count + 1))
         done
         
-        # 如果没有找到音量键，使用默认选择（完整安装）
+        # 超时，清理并使用默认选择
+        kill $getevent_pid 2>/dev/null
+        rm -f /tmp/getevent_output
         ui_print "未检测到音量键，使用完整安装流程..."
         ui_print "No volume key detected, proceeding with full installation..."
         return 0
@@ -115,6 +148,13 @@ if [ "$HOT_UPDATE_AVAILABLE" = "true" ]; then
     # 等待用户按键选择
     detect_volume_key
     local choice_result=$?
+    
+    # 检查是否检测到多个按键事件（错误）
+    if [ $choice_result -eq 2 ]; then
+        ui_print "安装已取消，请重新运行安装脚本。"
+        ui_print "Installation cancelled. Please run the installation script again."
+        exit 1
+    fi
     
     if [ $choice_result -eq 0 ]; then
         # 音量上键 - 完整安装

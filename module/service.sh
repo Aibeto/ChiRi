@@ -77,7 +77,7 @@ WATCHDOG_CMD="sh -c '
   done
   rm -f \"\$PIDFILE\"
   exit 0
-' sh \"$LOG_DIR/watchdog.pid\" \"$DAEMON_PATH\" \"$MODDIR/.uninstalling\" > /dev/null 2>&1 &"
+' sh \"$LOG_DIR/watchdog.pid\" \"$DAEMON_PATH\" \"$MODDIR/.uninstalling\" > /dev/null 2>&1"
 
 # 启动看门狗，优先使用 setsid 脱离父进程组
 if [ -n "$SETSID_CMD" ]; then
