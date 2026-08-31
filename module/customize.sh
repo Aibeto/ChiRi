@@ -92,50 +92,71 @@ if [ "$HOT_UPDATE_AVAILABLE" = "true" ]; then
         fi
         
         # 备用方案：使用 getevent 监听音量键按下事件
-        # getevent -l 输出格式: /dev/input/eventX: EV_KEY KEY_VOLUMEUP DOWN/UP
-        # 需要检测按下事件（DOWN），而非检查当前状态
+        # 参考标准 Magisk 模块的音量键检测方式
         
         ui_print "等待音量键按下..."
         ui_print "Waiting for volume key press..."
         
-        # 后台启动 getevent 监听所有输入设备，超时 10 秒
+        # 清理旧的临时文件
+        rm -f /tmp/volume_key_pressed
+        
+        # 后台启动 getevent 监听所有输入设备
         getevent -l > /tmp/getevent_output 2>/dev/null &
         local getevent_pid=$!
         
         # 等待用户按下音量键（最多 10 秒）
+        local timeout=100
         local count=0
-        local first_key=""
-        while [ $count -lt 100 ]; do
+        local key_click=""
+        
+        while [ $count -lt $timeout ]; do
             # 检查是否检测到音量键按下事件
             if [ -f /tmp/getevent_output ]; then
-                # 统计按下事件数量
-                local up_count=$(grep -c "KEY_VOLUMEUP.*DOWN" /tmp/getevent_output 2>/dev/null || echo 0)
-                local down_count=$(grep -c "KEY_VOLUMEDOWN.*DOWN" /tmp/getevent_output 2>/dev/null || echo 0)
-                local total_count=$((up_count + down_count))
-                
-                # 如果有多个按下事件，报错
-                if [ $total_count -gt 1 ]; then
-                    kill $getevent_pid 2>/dev/null
-                    rm -f /tmp/getevent_output
-                    ui_print "错误：检测到多个音量键按下事件！"
-                    ui_print "Error: Multiple volume key press events detected!"
-                    return 2
+                # 检测音量上键按下
+                if grep -q "KEY_VOLUMEUP.*DOWN" /tmp/getevent_output 2>/dev/null; then
+                    key_click="KEY_VOLUMEUP"
+                    break
                 fi
-                
-                # 如果检测到一个事件，返回结果
-                if [ $total_count -eq 1 ]; then
-                    kill $getevent_pid 2>/dev/null
-                    rm -f /tmp/getevent_output
-                    if [ $up_count -eq 1 ]; then
-                        return 0
-                    else
-                        return 1
-                    fi
+                # 检测音量下键按下
+                if grep -q "KEY_VOLUMEDOWN.*DOWN" /tmp/getevent_output 2>/dev/null; then
+                    key_click="KEY_VOLUMEDOWN"
+                    break
                 fi
             fi
             sleep 0.1
             count=$((count + 1))
         done
+        
+        # 检测完成后，等待一小段时间检测是否有多个事件
+        if [ -n "$key_click" ]; then
+            sleep 0.5
+            
+            # 统计按下事件数量
+            local up_count=$(grep -c "KEY_VOLUMEUP.*DOWN" /tmp/getevent_output 2>/dev/null || echo 0)
+            local down_count=$(grep -c "KEY_VOLUMEDOWN.*DOWN" /tmp/getevent_output 2>/dev/null || echo 0)
+            local total_count=$((up_count + down_count))
+            
+            # 清理
+            kill $getevent_pid 2>/dev/null
+            rm -f /tmp/getevent_output
+            
+            # 如果有多个按下事件，报错
+            if [ $total_count -gt 1 ]; then
+                ui_print "错误：检测到多个音量键按下事件！"
+                ui_print "Error: Multiple volume key press events detected!"
+                return 2
+            fi
+            
+            # 返回结果
+            case "$key_click" in
+                "KEY_VOLUMEUP")
+                    return 0
+                    ;;
+                "KEY_VOLUMEDOWN")
+                    return 1
+                    ;;
+            esac
+        fi
         
         # 超时，清理并使用默认选择
         kill $getevent_pid 2>/dev/null
