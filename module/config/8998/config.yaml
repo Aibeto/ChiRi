@@ -106,28 +106,3 @@ performance:
     touch_boost_tiers: 1
 
 # 极速模式（fast）无需配置：由守护进程硬编码把 min=max 锁到硬件最高频，见 src/chiri/cpu_load_governor.rs
-
-# 息屏场景模式（scenemode）：息屏超过 scene_mode_delay_secs 后切换，压低功耗拉长续航。
-# up_threshold=1.0 不主动升频，perf_ceil 极低封顶，降频直接回落。
-# 需要关闭时把 enabled 改为 false（息屏超时后释放 CLG 回系统默认调频）。
-scenemode:
-  cpu_load_governor:
-    enabled: true
-    up_threshold: 1.0
-    down_threshold: 0.01
-    smoothing_up: 0.01
-    down_rate_limit_ticks: 1
-    up_rate_limit_ticks: 10
-    headroom_factor: 1.0
-    headroom_ramp: 0.15
-    perf_floor: 0.0
-    perf_ceil: 0.15
-    perf_init: 0.15
-    up_jump_threshold: 0.50
-    slow_up_scale: 0.02
-    down_fast_threshold: 0.30
-    spike_jump_threshold: 0.30
-    spike_decay: 0.10
-    touch_boost_enabled: false
-    touch_boost_ms: 0
-    touch_boost_tiers: 1

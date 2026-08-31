@@ -601,24 +601,33 @@ fn default_scene_mode_delay_secs() -> u64 {
 
 impl Config {
     /// 从 YAML 文件加载配置；读取或反序列化失败时返回 Err。
-    /// 加载后合并处理器专属特调文件（common::get_akmode_path()，与主配置同目录）。
-    /// 热重载路径同样经由本函数，因此特调参数修改后触发热重载即可生效。
+    /// 加载后合并处理器专属特调文件（SoC 目录 → config/normal/ → 都没有则 akmode 不可用）。
+    /// scenemode 配置同样按 SoC → normal 路径加载。
     pub fn from_file(path: &str) -> anyhow::Result<Self> {
         let content = std::fs::read_to_string(path)?;
         let mut config: Config = serde_yaml::from_str(&content)?;
         config.merge_akmode();
+        config.merge_scenemode();
         Ok(config)
     }
 
-    /// 合并独立特调配置文件（akmode.yaml）中的特调段：
-    /// - 读取失败（文件缺失等）→ warn 并置特调不可用（白名单应用回退 CLG）
-    /// - 解析失败（内容损坏等）→ warn 并置特调不可用（回退 CLG）
-    /// - 成功 → debug 打点
-    ///
-    /// 特调可用性经 common::AKMODE_AVAILABLE 共享给 monitor 层：缺 akmode.yaml 的
-    /// 机型（如未随处理器发布特调文件时）不启用特调，避免用默认参数接管 CPU。
+    /// 合并独立特调配置文件（akmode.yaml）中的特调段。
+    /// 路径：SoC 专属目录 → config/normal/，都不存在则置特调不可用（白名单应用回退 CLG）。
     fn merge_akmode(&mut self) {
-        let path = crate::common::get_akmode_path();
+        let path = match crate::common::get_akmode_path() {
+            Some(p) => p,
+            None => {
+                log::warn!(
+                    "{}",
+                    t_with_args(
+                        "config-special-load-failed",
+                        &fluent_args!("path" => "<not found: soc/akmode.yaml, normal/akmode.yaml>".to_string(), "error" => "file not found".to_string())
+                    )
+                );
+                crate::common::set_akmode_available(false);
+                return;
+            }
+        };
         let content = match std::fs::read_to_string(&path) {
             Ok(c) => c,
             Err(e) => {
@@ -655,6 +664,39 @@ impl Config {
                     )
                 );
                 crate::common::set_akmode_available(false);
+            }
+        }
+    }
+
+    /// 合并 scenemode 配置：SoC 专属目录 → config/normal/，都不存在则保持 serde 默认值。
+    fn merge_scenemode(&mut self) {
+        let path = match crate::common::get_scenemode_path() {
+            Some(p) => p,
+            None => return, // 无 scenemode 配置文件，保持 serde 默认值
+        };
+        let content = match std::fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        match serde_yaml::from_str::<Config>(&content) {
+            Ok(scene_config) => {
+                self.scenemode = scene_config.scenemode;
+                log::debug!(
+                    "{}",
+                    t_with_args(
+                        "config-scenemode-merged",
+                        &fluent_args!("path" => path.to_string_lossy().to_string())
+                    )
+                );
+            }
+            Err(e) => {
+                log::warn!(
+                    "{}",
+                    t_with_args(
+                        "config-scenemode-parse-failed",
+                        &fluent_args!("path" => path.to_string_lossy().to_string(), "error" => e.to_string())
+                    )
+                );
             }
         }
     }

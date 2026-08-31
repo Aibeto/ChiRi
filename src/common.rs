@@ -15,6 +15,23 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
+/*
+ * Copyright (C) 2026 ChiRi
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
 use crate::monitor::config::RulesConfig;
 use std::env;
 use std::path::PathBuf;
@@ -267,12 +284,36 @@ pub fn is_special_mode_allowed(pkg: &str, mode: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// 处理器专属特调配置文件路径：与处理器主配置同目录 `config/{命中片段}/akmode.yaml`
-/// （特调与处理器绑定，各目标 SoC 子目录自带一份；8475 与 8998 参数相同、各自一份）。
-/// 命中 SoC 时必返处理器目录下的路径，文件缺失/损坏由 merge_akmode 置特调不可用、
-/// 白名单应用回退 CLG（不落到其它目录的共享文件）。非 Chiri（不会调用）兜底根 config 路径。
-pub fn get_akmode_path() -> PathBuf {
-    matched_soc_config_dir()
-        .map(|dir| dir.join("akmode.yaml"))
-        .unwrap_or_else(|| get_module_root().join("config").join("akmode.yaml"))
+/// akmode.yaml 路径：SoC 专属目录 → config/normal/ → 都不存在返回 None（回退 CLG）。
+pub fn get_akmode_path() -> Option<PathBuf> {
+    let root = get_module_root().join("config");
+    // 1. SoC 专属目录
+    if let Some(dir) = matched_soc_config_dir() {
+        let soc_path = dir.join("akmode.yaml");
+        if soc_path.exists() {
+            return Some(soc_path);
+        }
+    }
+    // 2. config/normal/（与 SoC 目录同级的通用配置）
+    let normal_path = root.join("normal").join("akmode.yaml");
+    if normal_path.exists() {
+        return Some(normal_path);
+    }
+    None
+}
+
+/// scenemode 配置路径：SoC 专属目录 → config/normal/ → 都不存在返回 None（用 serde 默认值）。
+pub fn get_scenemode_path() -> Option<PathBuf> {
+    let root = get_module_root().join("config");
+    if let Some(dir) = matched_soc_config_dir() {
+        let soc_path = dir.join("scenemode.yaml");
+        if soc_path.exists() {
+            return Some(soc_path);
+        }
+    }
+    let normal_path = root.join("normal").join("scenemode.yaml");
+    if normal_path.exists() {
+        return Some(normal_path);
+    }
+    None
 }

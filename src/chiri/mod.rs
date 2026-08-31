@@ -292,6 +292,9 @@ pub fn start_scheduler_thread(
             let mut screen_off_at: Option<Instant> = None;
             // 是否已进入 scenemode（一次性切换，亮屏/模式变更时复位）
             let mut scene_mode_active = false;
+            // 特调模式冷却：init_policies 因配置缺失/硬件不支持失败后，5 分钟内不再触发
+            const AKMODE_COOLDOWN: Duration = Duration::from_secs(300);
+            let mut akmode_cooldown_until: Option<Instant> = None;
 
             // ==== FAS 暂禁用：CPU 温度采样仅用于 FAS 限温，暂注释 ====
             // let temp_sensor_path = crate::utils::find_cpu_temp_path().unwrap_or_default();
@@ -350,13 +353,13 @@ pub fn start_scheduler_thread(
                     last_mode_file_write = Instant::now();
                 }
 
-                // 触摸事件（事件驱动）：每次醒来先处理触摸队列，立即触发大核升频并写频，
-                // 不等待下一个 160ms 负载决策 tick。窗口内的持续触摸会刷新截止时间，
-                // 触摸升频由 on_touch 设置地板 + flush 写频（FastWriter 去重）。
+                // 触摸事件（事件驱动）：每次醒来先处理触摸队列。on_touch 更新共享
+                // 触摸状态并唤醒全部 Worker 立即 flush 写频，大核 Worker 在本次 flush
+                // 中直接应用触摸升频地板，不等待下一个 160ms 负载决策 tick。
+                // 窗口内的持续触摸会刷新截止时间（FastWriter 去重重复写频）。
                 while touch_rx.try_recv().is_ok() {
                     if cpu_governor.is_active() {
                         cpu_governor.on_touch();
-                        cpu_governor.flush();
                         log::debug!("{}", t("touch-event-received"));
                     }
                 }
@@ -464,11 +467,27 @@ pub fn start_scheduler_thread(
                                 // 亮屏恢复特调：akmode 息屏期间通常保持接管（息屏分支不释放）；
                                 // 但若息屏时负载事件停止触发看门狗释放过 akmode，这里必须重新接管，
                                 // 否则特调限频失效、采样间隔也不会切回 40ms。
-                                if !ak_governor.is_active() {
+                                // 冷却期内跳过特调，直接走 CLG。
+                                let in_cooldown = akmode_cooldown_until
+                                    .map_or(false, |until| Instant::now() < until);
+                                if !ak_governor.is_active() && !in_cooldown {
                                     cpu_governor.release();
                                     let ak_cfg = config_lock.get_akmode().clone();
                                     let initial_tier = get_ak_initial_tier();
-                                    ak_governor.init_policies(&ak_cfg, initial_tier);
+                                    if !ak_governor.init_policies(&ak_cfg, initial_tier) {
+                                        // init 失败（配置缺失/硬件不支持）：冷却 5 分钟，CLG 接管
+                                        akmode_cooldown_until = Some(Instant::now() + AKMODE_COOLDOWN);
+                                        log::warn!("{}", t_with_args(
+                                            "scheduler-akmode-cooldown",
+                                            &fluent_args!("secs" => AKMODE_COOLDOWN.as_secs().to_string())
+                                        ));
+                                        let clg_cfg = get_clg_cfg(&config_lock, &current_mode);
+                                        if clg_cfg.enabled { cpu_governor.init_policies(&clg_cfg); }
+                                    }
+                                } else if !ak_governor.is_active() {
+                                    // 冷却中：CLG 接管
+                                    let clg_cfg = get_clg_cfg(&config_lock, &current_mode);
+                                    if clg_cfg.enabled { cpu_governor.init_policies(&clg_cfg); }
                                 }
                             } else if current_mode == "fast" {
                                 // 亮屏恢复极速模式：释放 doze CLG，由 fast_lock 接管
@@ -564,11 +583,29 @@ pub fn start_scheduler_thread(
                                     let config_lock = config_clone.read().unwrap();
                                     if crate::common::is_special_mode(&mode) {
                                         // 进入特调模式：停止 CLG，改由 akmode 独立接管。
-                                        // 起始档从 rules.yaml 的生效模式识别（档位与全局统一）
-                                        cpu_governor.release();
-                                        let ak_cfg = config_lock.get_akmode().clone();
-                                        let initial_tier = get_ak_initial_tier();
-                                        ak_governor.init_policies(&ak_cfg, initial_tier);
+                                        // 起始档从 rules.yaml 的生效模式识别（档位与全局统一）。
+                                        // 冷却期内跳过特调，直接走 CLG。
+                                        let in_cooldown = akmode_cooldown_until
+                                            .map_or(false, |until| Instant::now() < until);
+                                        if !in_cooldown {
+                                            cpu_governor.release();
+                                            let ak_cfg = config_lock.get_akmode().clone();
+                                            let initial_tier = get_ak_initial_tier();
+                                            if !ak_governor.init_policies(&ak_cfg, initial_tier) {
+                                                // init 失败：冷却 5 分钟，CLG 接管
+                                                akmode_cooldown_until = Some(Instant::now() + AKMODE_COOLDOWN);
+                                                log::warn!("{}", t_with_args(
+                                                    "scheduler-akmode-cooldown",
+                                                    &fluent_args!("secs" => AKMODE_COOLDOWN.as_secs().to_string())
+                                                ));
+                                                let clg_cfg = get_clg_cfg(&config_lock, &mode);
+                                                if clg_cfg.enabled { cpu_governor.init_policies(&clg_cfg); }
+                                            }
+                                        } else {
+                                            // 冷却中：CLG 接管
+                                            let clg_cfg = get_clg_cfg(&config_lock, &mode);
+                                            if clg_cfg.enabled { cpu_governor.init_policies(&clg_cfg); }
+                                        }
                                     } else if mode == "fast" {
                                         // 极速模式：停止特调/CLG，由 fast_lock 独立锁满频
                                         ak_governor.release();
@@ -615,9 +652,9 @@ pub fn start_scheduler_thread(
                         if ak_governor.is_active() {
                             ak_governor.on_load_update(&core_utils);
                         } else if cpu_governor.is_active() {
-                            // 决策 + backset 统一写频：CLG 决策后由 flush() 去重写回 sysfs
+                            // Worker 架构：on_load_update 广播给各核心组 Worker，
+                            // Worker 线程内自主完成决策 + 写频，无需外部 flush
                             cpu_governor.on_load_update(&core_utils);
-                            cpu_governor.flush();
                         }
 
                         // scenemode：息屏超过 scene_mode_delay_secs 后把 CLG 切到低功耗配置
@@ -699,8 +736,26 @@ pub fn start_scheduler_thread(
                                 // 特调模式：按 rules.yaml 重新换算档位并重载 akmode 配置
                                 let ak_cfg = config_lock.get_akmode().clone();
                                 let initial_tier = get_ak_initial_tier();
-                                if ak_governor.is_active() { ak_governor.reload_config(&ak_cfg, initial_tier); }
-                                else { ak_governor.init_policies(&ak_cfg, initial_tier); }
+                                if ak_governor.is_active() {
+                                    ak_governor.reload_config(&ak_cfg, initial_tier);
+                                } else {
+                                    let in_cooldown = akmode_cooldown_until
+                                        .map_or(false, |until| Instant::now() < until);
+                                    if !in_cooldown {
+                                        if !ak_governor.init_policies(&ak_cfg, initial_tier) {
+                                            akmode_cooldown_until = Some(Instant::now() + AKMODE_COOLDOWN);
+                                            log::warn!("{}", t_with_args(
+                                                "scheduler-akmode-cooldown",
+                                                &fluent_args!("secs" => AKMODE_COOLDOWN.as_secs().to_string())
+                                            ));
+                                            let clg_cfg = get_clg_cfg(&config_lock, &current_mode);
+                                            if clg_cfg.enabled { cpu_governor.init_policies(&clg_cfg); }
+                                        }
+                                    } else {
+                                        let clg_cfg = get_clg_cfg(&config_lock, &current_mode);
+                                        if clg_cfg.enabled { cpu_governor.init_policies(&clg_cfg); }
+                                    }
+                                }
                             } else if current_mode == "fast" {
                                 // 极速模式不读 yaml 参数，ConfigReload 无需处理；
                                 // fast_lock 保持活跃，仅确保 CLG 未意外启动

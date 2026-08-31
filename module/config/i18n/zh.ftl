@@ -95,6 +95,7 @@ scheduler-event-load = [Scheduler] 收到负载事件: 核心利用率=[{ $cores
 scheduler-event-frame = [Scheduler] 收到帧事件: 帧间隔={ $delta_ms }ms
 scheduler-event-config-reload = [Scheduler] 收到配置重载事件: 当前模式={ $mode }, 亮屏={ $screen_on }
 scheduler-special-mode-active = [Scheduler] 特调模式激活: { $pkg } -> { $mode }
+scheduler-akmode-cooldown = [Scheduler] 特调接管失败，进入 { $secs } 秒冷却，期间由 CLG 接管调度
 scheduler-scene-mode-enter = [Scheduler] 息屏已超过阈值，切换到 scenemode 省电模式
 
 # --- Scheduler: Config Watcher ---
@@ -104,6 +105,7 @@ config-reload-fail = [Config] 配置重载失败: { $error }
 config-special-load-failed = [Config] 特调配置文件读取失败: { $path } ({ $error }) — 特调不可用，白名单应用回退 CLG
 config-special-parse-failed = [Config] 特调配置文件解析失败: { $path } ({ $error }) — 特调不可用，白名单应用回退 CLG
 config-special-merged = [Config] 已合并特调配置文件: { $path }
+config-scenemode-merged = [Config] 已合并息屏场景配置文件: { $path }
 config-watch-error = [Config] 监控配置目录失败: { $error }
 config-apply-mode-failed = [Config] 应用重载的模式设置失败: { $error }
 config-apply-tweaks-failed = [Config] 应用重载的系统微调失败: { $error }

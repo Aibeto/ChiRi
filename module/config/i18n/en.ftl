@@ -96,6 +96,7 @@ scheduler-event-load = [Scheduler] load event: core_utils=[{ $cores }]
 scheduler-event-frame = [Scheduler] frame event: delta={ $delta_ms }ms
 scheduler-event-config-reload = [Scheduler] config reload event: mode={ $mode }, screen_on={ $screen_on }
 scheduler-special-mode-active = [Scheduler] Special profile active: { $pkg } -> { $mode }
+scheduler-akmode-cooldown = [Scheduler] Special tuning takeover failed, entering { $secs }s cooldown; CLG takes over during cooldown
 scheduler-scene-mode-enter = [Scheduler] Screen off past threshold, switching to scenemode extreme power-saving.
 
 # --- Scheduler: Config Watcher ---
@@ -105,6 +106,7 @@ config-reload-fail = [Config] Config reload failed: { $error }
 config-special-load-failed = [Config] Failed to read special-tuned config: { $path } ({ $error }) — special tuning unavailable, whitelisted apps fall back to CLG
 config-special-parse-failed = [Config] Failed to parse special-tuned config: { $path } ({ $error }) — special tuning unavailable, whitelisted apps fall back to CLG
 config-special-merged = [Config] Merged special-tuned config: { $path }
+config-scenemode-merged = [Config] Merged scenemode config: { $path }
 config-watch-error = [Config] Failed to watch config directory: { $error }
 config-apply-mode-failed = [Config] Failed to apply reloaded mode settings: { $error }
 config-apply-tweaks-failed = [Config] Failed to apply reloaded system tweaks: { $error }

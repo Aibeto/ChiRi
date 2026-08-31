@@ -21,7 +21,7 @@
 /// 每 5 秒重写一次频率，防止系统/厂商守护进程篡改。
 
 use crate::utils::FastWriter;
-use log::{debug, info};
+use log::{debug, info, warn};
 use std::fs;
 
 use crate::fluent_args;

@@ -1,21 +1,4 @@
 /*
- * Copyright (C) 2026 yuki
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
- */
-
-/*
  * Copyright (C) 2026 ChiRi
  *
  * This program is free software: you can redistribute it and/or modify
@@ -139,7 +122,9 @@ impl AkmodeGovernor {
     /// 2. 逐个 policy 读可用频率与 affected_cpus，按 CPU ID 硬编码判定大小核；
     /// 3. 快照 governor/min/max；写 schedutil、min 压到硬件最低；
     /// 4. 初始 max = 硬件最高（所有档位都能用硬件最高档位）。
-    pub fn init_policies(&mut self, cfg: &SpecialTunedConfig, tier: u32) {
+    ///
+    /// 返回 true 表示成功接管，false 表示无可用 cluster（配置错误或硬件不支持）。
+    pub fn init_policies(&mut self, cfg: &SpecialTunedConfig, tier: u32) -> bool {
         self.release();
         self.cfg = cfg.clone();
         self.cfg.normalize();
@@ -272,6 +257,7 @@ impl AkmodeGovernor {
         } else {
             warn!("{}", t("akmode-no-clusters"));
         }
+        self.active
     }
 
     /// 释放接管：恢复各 policy 的 governor/min/max，清空状态
