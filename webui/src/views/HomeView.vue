@@ -64,29 +64,29 @@ const copyQQGroup = async () => {
   }
 };
 
-// 手动热重启守护进程：确认后重启，用于模块更新后不重启设备即生效
-const restarting = ref(false);
-const handleRestart = async () => {
-  if (restarting.value) return;
+// 关闭调度：确认后终止看门狗与调度进程，需手动 action/重启设备恢复
+const stopping = ref(false);
+const handleStop = async () => {
+  if (stopping.value) return;
   try {
     await showConfirmDialog({
-      title: t('restart_title'),
-      message: t('restart_confirm'),
-      confirmButtonText: t('restart_confirm_ok'),
+      title: t('stop_title'),
+      message: t('stop_confirm'),
+      confirmButtonText: t('stop_confirm_ok'),
       cancelButtonText: t('cancel')
     });
   } catch (e) {
     return; // 用户取消
   }
-  restarting.value = true;
+  stopping.value = true;
   try {
-    await Bridge.restartDaemon();
-    toast(t('restart_success'));
+    await Bridge.stopScheduler();
+    toast(t('stop_success'));
   } catch (e) {
-    toast(t('restart_failed'));
+    toast(t('stop_failed'));
   }
-  // 等待新守护进程启动后刷新状态/模式
-  setTimeout(async () => { await store.initData(); restarting.value = false; }, 2000);
+  // 关闭后刷新状态（调度已停止）
+  setTimeout(async () => { await store.initData(); stopping.value = false; }, 1000);
 };
 </script>
 
@@ -174,7 +174,7 @@ const handleRestart = async () => {
         <van-grid-item icon="apps-o" :text="t('app_management')" to="/apps" />
         <van-grid-item icon="setting-o" :text="t('config_info')" to="/config" />
         <van-grid-item icon="notes-o" :text="t('view_log')" to="/log" />
-        <van-grid-item :icon="restarting ? 'loading' : 'replay'" :text="t('restart_daemon')" @click="handleRestart" />
+        <van-grid-item :icon="stopping ? 'loading' : 'poweroff'" :text="t('stop_daemon')" @click="handleStop" />
       </van-grid>
     </div>
   </div>

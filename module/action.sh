@@ -1,70 +1,74 @@
 #!/system/bin/sh
 #
-# yumi 模块 action 脚本
+# ChiRi 模块 action 脚本：手动启动/重启调度
+# KernelSU/Magisk 在用户点击模块「Action」按钮时执行本脚本。
+# 作用：显式终止旧看门狗与主进程 → 重新拉起看门狗与主进程 → 分步打印消息。
+# 说明：action 阶段无 ui_print（那是安装期函数），统一用 log() 输出到 stdout 与 service.log。
 #
 
-# 1. 等待系统启动完成
-# until [ "$(getprop sys.boot_completed)" = "1" ]; do
-#   sleep 1
-# done
-
-# 2. 定义路径
+# 0. 定义路径
 [ -z "$MODDIR" ] && MODDIR=${0%/*}
 
 DAEMON_PATH="$MODDIR/core/bin/yumi"
-SCRIPTS_DIR="$MODDIR/scripts"
 LOG_DIR="$MODDIR/logs"
 LOG_FILE="$LOG_DIR/service.log"
+PID_FILE="$LOG_DIR/watchdog.pid"
+STOP_FLAG="$MODDIR/.uninstalling"
 
-# 确保日志目录存在
 mkdir -p "$LOG_DIR"
 
-# 禁用 OPPO/OnePlus/Realme 的 Oiface
-# if [ "$(getprop persist.sys.oiface.enable)" = "1" ]; then
-#   setprop persist.sys.oiface.enable 0
-#   echo "$(date): Oiface disabled." >> "$LOG_FILE"
-# fi
+# 分步消息：同时打印到 stdout（KernelSU action 弹窗可见）与日志文件
+log() { echo "$(date): $*"; echo "$(date): $*" >> "$LOG_FILE"; }
 
-# 禁用小米的 Joyose 服务（已注释）
-# PACKAGE_NAME="com.xiaomi.joyose"
-# if pm list packages -e | grep -q "$PACKAGE_NAME"; then
-#   pm disable-user "$PACKAGE_NAME" >/dev/null 2>&1
-#   pm clear "$PACKAGE_NAME" >/dev/null 2>&1
-#   echo "$(date): Joyose service disabled and data cleared." >> "$LOG_FILE"
-# fi
-
-# 3. 清理旧进程
+# 1. 终止旧看门狗与主进程（确保不残留重复实例，消除竞态）
+log "stopping old watchdog and daemon..."
+[ -f "$PID_FILE" ] && kill "$(cat "$PID_FILE" 2>/dev/null)" 2>/dev/null
 killall -9 yumi > /dev/null 2>&1
+rm -f "$PID_FILE"
+sleep 1
+log "stopped."
 
-# 4. 设置权限
+# 2. 设置权限
 chmod 755 "$DAEMON_PATH"
-if [ -d "$SCRIPTS_DIR" ]; then
-  chmod -R 755 "$SCRIPTS_DIR"
+
+# 3. 启动 yumi 看门狗（崩溃自动重启，卸载时退出）
+# 看门狗记录自身 PID，供后续 action/WebUI「关闭调度」定位并终止。
+# 使用 setsid 而非 nohup，确保进程完全脱离父进程组，防止关闭界面导致服务终止。
+
+# 检测 setsid 可用性，优先使用 BusyBox 的 setsid
+SETSID_CMD=""
+if command -v setsid >/dev/null 2>&1; then
+  SETSID_CMD="setsid"
+elif [ -x "/data/adb/magisk/busybox" ] && "/data/adb/magisk/busybox" setsid true >/dev/null 2>&1; then
+  SETSID_CMD="/data/adb/magisk/busybox setsid"
+elif [ -x "/data/adb/ksu/bin/busybox" ] && "/data/adb/ksu/bin/busybox" setsid true >/dev/null 2>&1; then
+  SETSID_CMD="/data/adb/ksu/bin/busybox setsid"
+elif [ -x "/data/adb/ap/bin/busybox" ] && "/data/adb/ap/bin/busybox" setsid true >/dev/null 2>&1; then
+  SETSID_CMD="/data/adb/ap/bin/busybox setsid"
 fi
 
-# 5. 调用禁用 boost 脚本
-# if [ -f "$SCRIPTS_DIR/disable_boost.sh" ]; then
-#   echo "$(date): Executing disable_boost.sh" >> "$LOG_FILE"
-#   "$SCRIPTS_DIR/disable_boost.sh"
-# else
-#   echo "$(date): disable_boost.sh not found" >> "$LOG_FILE"
-# fi
-
-# 6. 启动 yumi 守护进程（崩溃自动重启）
-# 守护进程退出后 3 秒自动拉起；二进制被删（卸载）时自动退出，不残留。
-# 调试：换成下方"方式 B"可输出报错日志。
-nohup sh -c '
+# 看门狗启动命令（直接执行 sh -c，而非通过函数，确保 setsid 可正常工作）
+WATCHDOG_CMD="sh -c '
+  PIDFILE=\"\$1\"; DAEMON=\"\$2\"; FLAG=\"\$3\"
+  echo \$\$ > \"\$PIDFILE\"
   while :; do
-    "$1" || exit 0
+    [ -f \"\$FLAG\" ] && break      # 卸载标记 → 退出，不残留
+    [ -f \"\$DAEMON\" ] || break    # 二进制被删 → 退出，不残留
+    \"\$DAEMON\"                    # 崩溃/退出后返回，sleep 后再拉起
     sleep 3
   done
-' sh "$DAEMON_PATH" > /dev/null 2>&1 &
+  rm -f \"\$PIDFILE\"
+  exit 0
+' sh \"$PID_FILE\" \"$DAEMON_PATH\" \"$STOP_FLAG\" > /dev/null 2>&1 &"
 
-# 方式 B: 调试模式（启动失败时用这个排查，输出到 logs/boot_error.log）
-# nohup sh -c 'while :; do "$1" || exit 0; sleep 3; done' sh "$DAEMON_PATH" > "$LOG_DIR/boot_error.log" 2>&1 &
+# 启动看门狗，优先使用 setsid 脱离父进程组
+if [ -n "$SETSID_CMD" ]; then
+  $SETSID_CMD sh -c "$WATCHDOG_CMD"
+else
+  # fallback: 使用 nohup（兼容性更好，但可能无法完全脱离进程组）
+  nohup sh -c "$WATCHDOG_CMD" > /dev/null 2>&1 &
+fi
 
-# 记录启动日志（action 阶段无 ui_print，改写日志）
-echo "$(date): daemon started." >> "$LOG_FILE"
-
-
-ui_print "ChiRi Scheduler started."
+# 4. 打印执行结果
+log "daemon restarted."
+exit 0

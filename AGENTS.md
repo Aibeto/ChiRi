@@ -1,6 +1,6 @@
 # AGENTS.md
 
-> 上次更新时间：2026-08-30 12:00:00
+> 上次更新时间：2026-08-31
 > 最后更新位于此 head 之后：40577b0af15ce66a0875546b1d98d730fa2925af
 
 本文档为 AI 编程助手（Cursor / Claude Code / Trae 等）在本仓库工作时的指导文件。
@@ -90,7 +90,8 @@ cd webui && npm run type-check
 
 - **含 `std::ops::Range<usize>` 字段的结构体别 `derive(Copy)`**：CI（`-Z build-std` + nightly）编译 `common::CoreGroupRanges` 时报 E0204（字段不实现 Copy），即便标准库中 `Range<usize>` 实现了 Copy。按值 move 或显式 `clone()` 即可，用 `#[derive(Debug, Clone)]` 够了，不要加 Copy。
 - **日志文件被删不能崩**：`src/logger.rs` 用自实现 `SelfHealingAppender`（替换 log4rs `RollingFileAppender`），每次写入按路径 `create+append` 重新打开，`daemon.log` 被外部删除会自动重建；循环轮转与锁上锁全程 `Result`/剥除 poison，绝不 `unwrap`。别改回 log4rs 滚动追加器。
-- **WebUI 手动重启必须 `setsid`**：`bridge.ts::restartDaemon` 用 `killall -9 yumi; sleep 1; setsid "$MODDIR/service.sh" </dev/null >/dev/null 2>&1 &`。`ksu.exec` 返回会清理执行 shell 的进程组，直接 `nohup ... &` 拉起的守护进程会被一并杀掉。`setsid` 新开会话 + 重定向标准流后脱离 exec 进程组存活，等效手动执行 service.sh。
+- **看门狗崩溃自愈 + 进程模型**：`service.sh`（开机）/`action.sh`（手动启动）用 `nohup sh -c` 拉起统一定义的看门狗循环，启动时把自己 PID 写入 `logs/watchdog.pid`。循环内 `"$DAEMON"` 崩溃返回非 0 仍会 `sleep 3` 自动重启；仅当存在卸载标记 `$MODDIR/.uninstalling`（`uninstall.sh` 开头 touch）或主进程二进制被删时才 `break` 退出。**旧写法 `"$1" || exit 0` 在 yumi 崩溃（返回非 0）时会直接让看门狗退出、无法自愈，禁止复用**。
+- **WebUI「关闭调度」而非重启**：`bridge.ts::stopScheduler` 先按 `logs/watchdog.pid` kill 掉看门狗（防止其把主进程再拉起），再 `killall -9 yumi`，实现彻底停止调度；恢复需点击模块 Action（`action.sh` 手动启动）或重启设备。**不要在 ksu.exec 里用 `nohup ... &` 后台拉起**——`ksu.exec` 返回会清理执行 shell 的进程组，直接拉起会被一并杀掉；要启动调度一律调用模块自身的 service.sh/action.sh（内含 `nohup`，且 disable_boost 幂等）。
 
 ## AGENTS.md 维护要求
 

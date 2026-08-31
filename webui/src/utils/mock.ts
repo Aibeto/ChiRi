@@ -67,7 +67,7 @@ export const MockBridge = {
   async getActiveConfigName(): Promise<string> { await delay(100); return '8550/config.yaml'; },
   async getConfigMeta(): Promise<Record<string, any>> { await delay(200); return { ...mockMeta }; },
   async setLogLevel(level: string): Promise<void> { await delay(200); mockMeta.loglevel = level; },
-  async restartDaemon(): Promise<void> { await delay(300); },
+  async stopScheduler(): Promise<void> { await delay(300); },
   async getDaemonLog(): Promise<string> {
     await delay(300);
     return `[2026-02-23 02:31:07] [INFO] [yumi] daemon is running smoothly.\n[2026-02-23 02:48:18] [INFO] [Scheduler] Active mode: ${simulatedModeTxt}`;

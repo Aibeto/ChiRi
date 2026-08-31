@@ -1,8 +1,12 @@
 #!/system/bin/sh
 
-# 先停掉守护进程：卸载后进程不会自动退出，可能继续锁频。
-# killall 后循环壳因二进制被删会自行退出。
+# 先写卸载标记，让看门狗在下一次循环检查到后自行退出，不再拉起主进程。
+# 随后再强杀主进程与看门狗自身，确保卸载后不残留、不继续锁频。
+[ -z "$MODDIR" ] && MODDIR=${0%/*}
+touch "$MODDIR/.uninstalling"
+[ -f "$MODDIR/logs/watchdog.pid" ] && kill "$(cat "$MODDIR/logs/watchdog.pid" 2>/dev/null)" 2>/dev/null
 killall -9 yumi > /dev/null 2>&1
+rm -f "$MODDIR/logs/watchdog.pid" "$MODDIR/.uninstalling"
 sleep 1
 
 # 恢复被锁的 CPU 频率：强杀时 governor 可能卡在 performance 锁频，

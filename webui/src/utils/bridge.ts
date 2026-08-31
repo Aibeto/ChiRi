@@ -18,7 +18,8 @@ const PATHS = {
   ACTIVE_CONFIG: `${MODULE_BASE_PATH}/active_config.txt`,
   SPECIAL_TUNED: `${MODULE_BASE_PATH}/special_tuned.txt`,
   CURRENT_MODE: `${MODULE_BASE_PATH}/current_mode.txt`,
-  DAEMON_LOG: `${MODULE_BASE_PATH}/logs/daemon.log`
+  DAEMON_LOG: `${MODULE_BASE_PATH}/logs/daemon.log`,
+  WATCHDOG_PID: `${MODULE_BASE_PATH}/logs/watchdog.pid`
 };
 
 // 解析守护进程当前实际加载的配置文件：
@@ -144,17 +145,15 @@ const RealBridge = {
     toast(i18n.global.t('loglevel_updated') as string);
   },
 
-  // 手动热重启守护进程：先杀掉旧进程，再重新执行 module 的 service.sh 拉起守护进程。
-  // 关键点：ksu.exec 返回时会清理执行 shell 所在的进程组，若像之前那样直接
-  // `nohup ... &` 后台拉起，新守护进程会作为该 shell 的子进程被一并杀掉（表现为
-  // “只杀死了、没启动起来”）。这里用 `setsid` 把 service.sh 开成一个全新会话，
-  // 并重定向全部标准流，使其脱离 exec 的进程组存活，等效于手动执行 service.sh 重启。
-  async restartDaemon(): Promise<void> {
+  // 关闭调度：先终止看门狗（防止其崩溃自愈把主进程再拉起），再强杀主进程 yumi。
+  // 看门狗 PID 在 service.sh/action.sh 启动时写入 logs/watchdog.pid。
+  // 关闭后需点击模块 Action（action.sh 手动启动）或重启设备才恢复调度。
+  async stopScheduler(): Promise<void> {
     const { errno } = await exec(
-      `killall -9 yumi 2>/dev/null; sleep 1; ` +
-      `setsid "${PATHS.MODULE}/service.sh" </dev/null >/dev/null 2>&1 &`
+      `[ -f "${PATHS.WATCHDOG_PID}" ] && kill "$(cat "${PATHS.WATCHDOG_PID}" 2>/dev/null)" 2>/dev/null; ` +
+      `killall -9 yumi 2>/dev/null; rm -f "${PATHS.WATCHDOG_PID}"`
     );
-    if (errno !== 0) throw new Error(i18n.global.t('restart_failed') as string);
+    if (errno !== 0) throw new Error(i18n.global.t('stop_failed') as string);
   },
 
   async getCurrentMode(): Promise<string> {
