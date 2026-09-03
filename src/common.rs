@@ -33,8 +33,9 @@
  */
 
 use crate::monitor::config::RulesConfig;
+use serde::Deserialize;
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -154,18 +155,17 @@ pub fn is_chiri_soc() -> bool {
     *CHIRI_SOC.get_or_init(|| soc_hint_matches(CHIRI_SOC_HINTS))
 }
 
-/// 返回第一个「既命中设备硬件标识、又存在处理器专属配置目录」的片段。
-/// 顺序与 CHIRI_SOC_HINTS 一致：配置目录缺失的机型继续向后找，
-/// 防止多 SoC 并存时设备误用其它机型的配置目录（如 8475 设备读到 8550 的 config.yaml）。
+/// 返回第一个命中设备硬件标识的处理器片段。
+/// 顺序与 CHIRI_SOC_HINTS 一致。配置已编译进二进制（embedded_config_str），
+/// 匹配只看硬件标识，不再依赖磁盘目录是否存在——磁盘快照缺失/被删不影响识别。
 fn matched_soc_hint() -> Option<&'static str> {
     if !is_chiri_soc() {
         return None;
     }
-    let config_dir = get_module_root().join("config");
     CHIRI_SOC_HINTS
         .iter()
         .copied()
-        .find(|hint| hint_matches(hint) && config_dir.join(hint).join("config.yaml").exists())
+        .find(|hint| hint_matches(hint))
 }
 
 /// 命中 Chiri 目标 SoC 时，返回其处理器专属配置目录 `config/{命中片段}/`（存在则返回）。
@@ -221,7 +221,7 @@ pub fn is_akmode_available() -> bool {
     AKMODE_AVAILABLE.load(Ordering::Acquire)
 }
 
-/// 设置特调可用性：chiri Config::from_file 合并 akmode.yaml 时调用。
+/// 设置特调可用性：chiri Config::load 合并嵌入的 akmode.yaml 时调用。
 pub fn set_akmode_available(available: bool) {
     AKMODE_AVAILABLE.store(available, Ordering::Release);
 }
@@ -238,82 +238,236 @@ pub fn get_config_path() -> PathBuf {
         .unwrap_or_else(|| get_module_root().join("config").join("config.yaml"))
 }
 
-/// 内部特调白名单条目：一个应用可对应多个特调模式。
-/// 编译进守护进程二进制，不随 rules.yaml 下发，用户 / WebUI 均不可修改。
+// ════════════════════════════════════════════════════════════════
+//  内部特调白名单（编译期嵌入，见 src/chiri/special_tuned.txt）
+// ════════════════════════════════════════════════════════════════
+
+/// 特调白名单条目（由 src/chiri/special_tuned.txt 编译期嵌入并解析）。
+/// 用户 / WebUI 均不可修改；磁盘上的 special_tuned.txt 只是运行时导出快照。
 pub struct SpecialTunedEntry {
-    /// 应用包名
-    pub package: &'static str,
-    /// 该应用可用的特调模式列表（WebUI 动作单据此提供专属选项）
-    pub modes: &'static [&'static str],
-    /// 优先回退模式：用户未显式配置该应用时默认采用的模式（必须存在于 modes 中）
-    pub fallback: &'static str,
+    /// 匹配器原文：精确包名，或 "re:" 前缀的正则表达式
+    pub package: String,
+    /// 正则条目的预编译结果（精确条目为 None）
+    pub regex: Option<regex::Regex>,
+    /// 该应用可用的特调模式列表（须在 chiri Config::get_mode 注册）
+    pub modes: Vec<String>,
+    /// 优先回退模式：用户未显式配置该应用时默认采用（必须在 modes 内）
+    pub fallback: String,
 }
 
-/// 内部特调白名单。
-/// 调度优先级：rules.yaml 用户自定义 app_modes > 特调白名单的优先回退模式 > global_mode。
-/// 特调模式名不可用于白名单之外的包名——monitor 侧做门控（determine_mode），
-/// 非白名单包名映射到特调模式时回退 global_mode 并告警。
-/// 新增特调只需追加条目，模式名须在 chiri 的 Config::get_mode 中注册，
-/// 参数写在处理器目录 `module/config/{命中SoC}/akmode.yaml`（特调段，与白名单条目一致）。
-/// WebUI 通过守护进程启动时导出的 special_tuned.txt 展示“特调”标签与专属选项。
-pub const SPECIAL_TUNED_MODES: &[SpecialTunedEntry] = &[SpecialTunedEntry {
-    package: "com.hypergryph.arknights", // 明日方舟
-    modes: &["akmode"],
-    fallback: "akmode",
-}];
+impl SpecialTunedEntry {
+    /// 包名是否命中本条目：精确条目全等比较，正则条目 is_match
+    fn matches(&self, pkg: &str) -> bool {
+        match &self.regex {
+            Some(re) => re.is_match(pkg),
+            None => self.package == pkg,
+        }
+    }
+}
+
+/// 嵌入的白名单原文（include_str! 相对 src/common.rs）
+const SPECIAL_TUNED_TEXT: &str = include_str!("chiri/special_tuned.txt");
+
+/// 解析结果只算一次，之后全部走缓存
+static SPECIAL_TUNED: OnceLock<Vec<SpecialTunedEntry>> = OnceLock::new();
+
+/// 解析嵌入文本：跳过空行与 # 注释行，按 `匹配器:模式列表:回退模式` 切分。
+/// "re:" 前缀条目预编译正则，编译失败的条目跳过并告警（不影响其余条目）。
+fn parse_special_tuned(text: &str) -> Vec<SpecialTunedEntry> {
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut parts = line.splitn(3, ':');
+        let (Some(pkg), Some(modes), Some(fallback)) = (parts.next(), parts.next(), parts.next())
+        else {
+            log::warn!("special-tuned: malformed entry skipped: {}", line);
+            continue;
+        };
+        let modes: Vec<String> = modes
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        let fallback = fallback.trim().to_string();
+        if modes.is_empty() || fallback.is_empty() {
+            log::warn!(
+                "special-tuned: entry with empty modes/fallback skipped: {}",
+                line
+            );
+            continue;
+        }
+        let (package, regex) = match pkg.strip_prefix("re:") {
+            Some(pat) => match regex::Regex::new(pat) {
+                Ok(re) => (pkg.to_string(), Some(re)),
+                Err(e) => {
+                    log::warn!("special-tuned: invalid regex '{}' skipped: {}", pat, e);
+                    continue;
+                }
+            },
+            None => (pkg.to_string(), None),
+        };
+        out.push(SpecialTunedEntry {
+            package,
+            regex,
+            modes,
+            fallback,
+        });
+    }
+    out
+}
+
+/// 全部白名单条目（精确 + 正则，按文件顺序）。
+/// main.rs 导出 special_tuned.txt 时只取 regex.is_none() 的精确条目。
+pub fn special_tuned_entries() -> &'static [SpecialTunedEntry] {
+    SPECIAL_TUNED.get_or_init(|| parse_special_tuned(SPECIAL_TUNED_TEXT))
+}
+
+/// 查询包名命中的白名单条目：先按精确包名匹配（文件顺序），未命中再按正则条目。
+/// 调度优先级：rules.yaml 用户自定义 app_modes > 特调白名单回退模式 > global_mode。
+pub fn special_tuned_entry(pkg: &str) -> Option<&'static SpecialTunedEntry> {
+    let list = special_tuned_entries();
+    list.iter()
+        .find(|e| e.regex.is_none() && e.package == pkg)
+        .or_else(|| list.iter().find(|e| e.matches(pkg)))
+}
 
 /// 查询包名是否命中特调白名单，命中返回优先回退模式
-pub fn special_tuned_mode(pkg: &str) -> Option<&'static str> {
-    SPECIAL_TUNED_MODES
-        .iter()
-        .find(|e| e.package == pkg)
-        .map(|e| e.fallback)
+pub fn special_tuned_mode(pkg: &str) -> Option<String> {
+    special_tuned_entry(pkg).map(|e| e.fallback.clone())
 }
 
 /// 判断模式名是否为特调模式（任一白名单条目的 modes 列表中出现）
 pub fn is_special_mode(mode: &str) -> bool {
-    SPECIAL_TUNED_MODES.iter().any(|e| e.modes.contains(&mode))
+    special_tuned_entries()
+        .iter()
+        .any(|e| e.modes.iter().any(|m| m == mode))
 }
 
-/// 包名是否被允许使用指定特调模式（包名在白名单且模式在该条目 modes 列表中）
+/// 包名是否被允许使用指定特调模式（包名命中白名单且模式在该条目 modes 列表中）
 pub fn is_special_mode_allowed(pkg: &str, mode: &str) -> bool {
-    SPECIAL_TUNED_MODES
-        .iter()
-        .find(|e| e.package == pkg)
-        .map(|e| e.modes.contains(&mode))
+    special_tuned_entry(pkg)
+        .map(|e| e.modes.iter().any(|m| m == mode))
         .unwrap_or(false)
 }
 
-/// akmode.yaml 路径：SoC 专属目录 → config/normal/ → 都不存在返回 None（回退 CLG）。
-pub fn get_akmode_path() -> Option<PathBuf> {
-    let root = get_module_root().join("config");
-    // 1. SoC 专属目录
-    if let Some(dir) = matched_soc_config_dir() {
-        let soc_path = dir.join("akmode.yaml");
-        if soc_path.exists() {
-            return Some(soc_path);
-        }
+// ════════════════════════════════════════════════════════════════
+//  编译期嵌入的配置（include_str!，防篡改）
+// ════════════════════════════════════════════════════════════════
+//
+// 调优配置一律以二进制内嵌内容为准；磁盘上的同名 yaml 只是「自愈快照 +
+// meta 覆盖入口」：daemon 启动/重载时会把嵌入内容还原到磁盘（快照自愈），
+// 只有 meta.loglevel / meta.language 允许被外部修改（WebUI 日志等级切换）。
+
+/// 嵌入的 config.yaml：按命中的处理器取对应内容，非 ChiRi SoC 用默认配置
+pub fn embedded_config_str() -> &'static str {
+    match matched_soc_hint() {
+        Some("8550") => include_str!("../module/config/8550/config.yaml"),
+        Some("8475") => include_str!("../module/config/8475/config.yaml"),
+        Some("8998") => include_str!("../module/config/8998/config.yaml"),
+        _ => include_str!("../module/config/config.yaml"),
     }
-    // 2. config/normal/（与 SoC 目录同级的通用配置）
-    let normal_path = root.join("normal").join("akmode.yaml");
-    if normal_path.exists() {
-        return Some(normal_path);
-    }
-    None
 }
 
-/// scenemode 配置路径：SoC 专属目录 → config/normal/ → 都不存在返回 None（用 serde 默认值）。
-pub fn get_scenemode_path() -> Option<PathBuf> {
-    let root = get_module_root().join("config");
-    if let Some(dir) = matched_soc_config_dir() {
-        let soc_path = dir.join("scenemode.yaml");
-        if soc_path.exists() {
-            return Some(soc_path);
+/// 嵌入的 akmode.yaml（config/normal/，嵌入后特调始终可用）
+pub fn embedded_akmode_str() -> &'static str {
+    include_str!("../module/config/normal/akmode.yaml")
+}
+
+/// 嵌入的 scenemode.yaml（config/normal/）
+pub fn embedded_scenemode_str() -> &'static str {
+    include_str!("../module/config/normal/scenemode.yaml")
+}
+
+/// 嵌入的语言包：zh → zh.ftl，其余语言一律回退 en.ftl
+pub fn embedded_ftl_str(lang: &str) -> &'static str {
+    if lang.eq_ignore_ascii_case("zh") {
+        include_str!("../module/config/i18n/zh.ftl")
+    } else {
+        include_str!("../module/config/i18n/en.ftl")
+    }
+}
+
+/// 磁盘配置文件的 meta 覆盖结构：只反序列化 meta 段，其余字段全部忽略
+/// （调优字段即使被篡改也不会被读入，从根本上防篡改）。
+#[derive(Deserialize, Default)]
+struct ExternalMetaSection {
+    #[serde(default, alias = "Loglevel")]
+    loglevel: String,
+    #[serde(default, alias = "Language")]
+    language: String,
+}
+
+#[derive(Deserialize, Default)]
+struct ExternalMetaFile {
+    #[serde(default, alias = "Meta")]
+    meta: ExternalMetaSection,
+}
+
+/// 读磁盘配置文件的 meta 覆盖值 (loglevel, language)。
+/// 文件缺失或解析失败返回 (None, None)：meta 是唯一允许外部修改的字段，
+/// 文件损坏时回退嵌入默认值，绝不让坏文件拖垮配置加载。
+pub fn read_external_meta(path: &Path) -> (Option<String>, Option<String>) {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return (None, None);
+    };
+    let Ok(file) = serde_yaml::from_str::<ExternalMetaFile>(&text) else {
+        return (None, None);
+    };
+    let to_opt = |s: String| Some(s).filter(|v| !v.is_empty());
+    (to_opt(file.meta.loglevel), to_opt(file.meta.language))
+}
+
+/// 把 yaml 文本中指定标量键的值替换为 value（保留缩进与注释，与
+/// WebUI bridge.ts::setLogLevel 的行替换同口径）。全文件按行扫描，
+/// 仅替换第一个形如 `<缩进>key: ...` 的行。
+fn replace_yaml_scalar(content: &str, key: &str, value: &str) -> String {
+    let mut out = Vec::with_capacity(content.lines().count());
+    let mut replaced = false;
+    for line in content.lines() {
+        let trimmed = line.trim_start();
+        if !replaced
+            && trimmed.starts_with(key)
+            && trimmed[key.len()..].trim_start().starts_with(':')
+        {
+            let indent = &line[..line.len() - trimmed.len()];
+            out.push(format!("{indent}{key}: \"{value}\""));
+            replaced = true;
+        } else {
+            out.push(line.to_string());
         }
     }
-    let normal_path = root.join("normal").join("scenemode.yaml");
-    if normal_path.exists() {
-        return Some(normal_path);
+    let mut s = out.join("\n");
+    if content.ends_with('\n') {
+        s.push('\n');
     }
-    None
+    s
+}
+
+/// 配置快照自愈：把「嵌入内容 + 磁盘 meta 覆盖」写回生效配置路径。
+/// - 磁盘文件被篡改 → 调优参数被还原为嵌入值（meta 保留用户选择）
+/// - 文件缺失 → 重建（首次安装 / 被误删）
+/// - 内容已一致 → 跳过写入（返回 false，防止 config_watcher 事件循环）
+///
+/// main.rs 启动时与两套 config_watcher 热重载后调用。
+/// 返回是否实际写入。
+pub fn sync_config_snapshot(path: &Path) -> bool {
+    let mut content = embedded_config_str().to_string();
+    let (loglevel, language) = read_external_meta(path);
+    if let Some(v) = &loglevel {
+        content = replace_yaml_scalar(&content, "loglevel", v);
+    }
+    if let Some(v) = &language {
+        content = replace_yaml_scalar(&content, "language", v);
+    }
+    // 内容一致就跳过：watcher 重载后再次写入会再次触发 inotify，必须防环
+    if std::fs::read_to_string(path).ok().as_deref() == Some(content.as_str()) {
+        return false;
+    }
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    crate::utils::try_write_file(path, content.as_bytes()).is_ok()
 }

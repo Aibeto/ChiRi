@@ -46,6 +46,44 @@ const CLG_STALE_MAX: Duration = Duration::from_secs(5);
 /// 事件轮询间隔：主事件通道无事件时的轮询周期。
 /// 兼顾触摸事件即时处理（≤100ms）与看门狗巡检（仍按 CLG_STALE_MAX 阈值）。
 const EVENT_POLL_MS: Duration = Duration::from_millis(100);
+/// 热保护温度采样间隔：2s 一次，温度变化缓慢，更密的采样只浪费 IO。
+const THERMAL_CHECK_INTERVAL: Duration = Duration::from_secs(2);
+/// 电池温度节点（Android 标准电源供给接口，毫摄氏度）。
+/// 电池温度为主参考：反映整机持续发热，变化缓慢、不随游戏瞬时负载抖动
+const BATT_TEMP_PATH: &str = "/sys/class/power_supply/battery/temp";
+
+/// 读电池温度（毫摄氏度）→ °C；节点缺失或读失败返回 None
+fn read_battery_temp() -> Option<f32> {
+    std::fs::read_to_string(BATT_TEMP_PATH)
+        .ok()
+        .and_then(|s| s.trim().parse::<f64>().ok())
+        .map(|v| (v / 1000.0) as f32)
+}
+
+/// 单传感器三级判定（带回滞）：>= 硬限压 hard_cap；>= 软限压 soft_cap；
+/// 回落到 软限-hyst 以下解除；回滞带内无压制状态保持、压制中先退到软限档防阶跃。
+fn eval_thermal_cap(
+    temp_c: f32,
+    current: f32,
+    soft: f32,
+    hard: f32,
+    soft_cap: f32,
+    hard_cap: f32,
+    hyst: f32,
+) -> f32 {
+    if temp_c >= hard {
+        hard_cap
+    } else if temp_c >= soft {
+        soft_cap
+    } else if temp_c < soft - hyst {
+        1.0
+    } else if current >= 1.0 {
+        1.0
+    } else {
+        // 回滞带内且压制中：硬限压制先退到软限档，避免阶跃解除
+        current.min(soft_cap)
+    }
+}
 
 pub mod config;
 pub mod scheduler;
@@ -221,15 +259,19 @@ pub fn start_scheduler_thread(
 
                 let old_lang = config_clone.read().unwrap().meta.language.clone();
                 
-                match Config::from_file(config_path.to_str().unwrap()) {
+                match Config::load(config_path.to_str().unwrap()) {
                     Ok(new_config) => {
                         logger::update_level(&new_config.meta.loglevel);
                         *config_clone.write().unwrap() = new_config;
-                        
+
                         let new_lang = config_clone.read().unwrap().meta.language.clone();
                         if old_lang != new_lang { load_language(&new_lang); }
 
                         log::info!("{}", t("config-reloaded-success"));
+
+                        // 快照自愈：调优参数以嵌入内容为准，磁盘文件被篡改时还原
+                        // （meta 保留外部修改）。内容一致时内部跳过写入，不会成环。
+                        common::sync_config_snapshot(&config_path);
 
                         let scheduler = CpuScheduler::new(config_clone.clone(), sys_path_clone.clone());
                         if let Err(e) = scheduler.apply_system_tweaks() {
@@ -296,6 +338,24 @@ pub fn start_scheduler_thread(
             const AKMODE_COOLDOWN: Duration = Duration::from_secs(300);
             let mut akmode_cooldown_until: Option<Instant> = None;
 
+            // 热保护：启动时探测一次温度传感器（CPU + 电池），缺失的参考静默降级；
+            // 事件循环内每 2s 采样，按 config.thermal 阈值计算压制上限下发给 CLG
+            let temp_sensor_path = crate::utils::find_cpu_temp_path().ok();
+            if temp_sensor_path.is_none() {
+                log::debug!("{}", t("clg-thermal-no-sensor"));
+            }
+            let batt_sensor_exists = std::path::Path::new(BATT_TEMP_PATH).exists();
+            if !batt_sensor_exists {
+                log::debug!("{}", t("clg-thermal-no-battery"));
+            }
+            let mut last_thermal_check = Instant::now();
+            // 当前生效的热保护上限（1.0 = 无压制）；变化时才写 governor，避免高频原子写
+            let mut thermal_cap_current: f32 = 1.0;
+            // 当前生效的压制豁免档（与 governor 内原子量同步，配置热重载时下发新值）
+            let mut thermal_free_current: f32 = config_clone.read().unwrap().thermal.free_above;
+            // 启动即把配置豁免档同步给 governor（内部默认 0.80，配置可能不同）
+            cpu_governor.set_thermal_limits(thermal_cap_current, thermal_free_current);
+
             // ==== FAS 暂禁用：CPU 温度采样仅用于 FAS 限温，暂注释 ====
             // let temp_sensor_path = crate::utils::find_cpu_temp_path().unwrap_or_default();
             // let mut last_temp_update = Instant::now();
@@ -351,6 +411,89 @@ pub fn start_scheduler_thread(
                     let mode = mode_clone.lock().unwrap().clone();
                     let _ = utils::try_write_file(&mode_file_path, mode.as_bytes());
                     last_mode_file_write = Instant::now();
+                }
+
+                // 热保护（2s 周期）：电池+CPU 双源取较小值。电池温升慢、反映整机发热；
+                // CPU 只在极端热时参与（阈值 75/85°C，内核 95°C 温控才是主力）。
+                // 豁免档：当前性能比已高于豁免档时不压制，高负载不挡路。
+                if last_thermal_check.elapsed() >= THERMAL_CHECK_INTERVAL {
+                    last_thermal_check = Instant::now();
+                    let (enabled, batt_soft, batt_hard, cpu_soft, cpu_hard, soft_cap, hard_cap, hyst, free_above) = {
+                        let t = &config_clone.read().unwrap().thermal;
+                        (
+                            t.enabled,
+                            t.batt_soft_temp_c,
+                            t.batt_hard_temp_c,
+                            t.cpu_soft_temp_c,
+                            t.cpu_hard_temp_c,
+                            t.soft_perf_cap,
+                            t.hard_perf_cap,
+                            t.hysteresis_c,
+                            t.free_above,
+                        )
+                    };
+                    let cur = thermal_cap_current;
+                    let batt_t = if batt_sensor_exists { read_battery_temp() } else { None };
+                    let cpu_t = temp_sensor_path
+                        .as_ref()
+                        .and_then(|p| crate::utils::read_f64_from_file(p).ok())
+                        .map(|v| (v / 1000.0) as f32);
+                    let new_cap = if !enabled {
+                        1.0
+                    } else {
+                        match (batt_t, cpu_t) {
+                            (Some(b), Some(c)) => eval_thermal_cap(
+                                b, cur, batt_soft, batt_hard, soft_cap, hard_cap, hyst,
+                            )
+                            .min(eval_thermal_cap(
+                                c, cur, cpu_soft, cpu_hard, soft_cap, hard_cap, hyst,
+                            )),
+                            (Some(b), None) => {
+                                eval_thermal_cap(b, cur, batt_soft, batt_hard, soft_cap, hard_cap, hyst)
+                            }
+                            (None, Some(c)) => {
+                                eval_thermal_cap(c, cur, cpu_soft, cpu_hard, soft_cap, hard_cap, hyst)
+                            }
+                            // 双传感器缺失/读失败：保持现状，下轮重试
+                            (None, None) => cur,
+                        }
+                    };
+                    let cap_changed = (new_cap - thermal_cap_current).abs() > f32::EPSILON;
+                    let free_changed = (free_above - thermal_free_current).abs() > f32::EPSILON;
+                    if cap_changed || free_changed {
+                        thermal_cap_current = new_cap;
+                        thermal_free_current = free_above;
+                        cpu_governor.set_thermal_limits(new_cap, free_above);
+                        let fmt = |v: Option<f32>| {
+                            v.map(|t| format!("{:.1}", t))
+                                .unwrap_or_else(|| "-".to_string())
+                        };
+                        log::debug!(
+                            "{}",
+                            t_with_args(
+                                "clg-thermal-cap",
+                                &fluent_args!(
+                                    "batt" => fmt(batt_t),
+                                    "cpu" => fmt(cpu_t),
+                                    "cap" => format!("{:.0}", new_cap * 100.0),
+                                    "free" => format!("{:.0}", free_above * 100.0)
+                                )
+                            )
+                        );
+                    }
+                    // 功耗监控日志：每 2s 无条件写一条（不只在变化时），便于画趋势图
+                    {
+                        let current_mode = mode_clone.lock().unwrap().clone();
+                        crate::logger::log_power(
+                            &batt_t.map(|t| format!("{:.1}", t)).unwrap_or_else(|| "-".to_string()),
+                            &cpu_t.map(|t| format!("{:.1}", t)).unwrap_or_else(|| "-".to_string()),
+                            &format!("{:.0}", thermal_cap_current * 100.0),
+                            &format!("{:.0}", thermal_free_current * 100.0),
+                            &current_mode,
+                            is_screen_on,
+                            cpu_governor.is_active(),
+                        );
+                    }
                 }
 
                 // 触摸事件（事件驱动）：每次醒来先处理触摸队列。on_touch 更新共享
@@ -447,10 +590,12 @@ pub fn start_scheduler_thread(
 
                                 // 让 CLG 接管，动态生成一个低功耗配置
                                 let config_lock = config_clone.read().unwrap();
-                                let mut doze_cfg = get_clg_cfg(&config_lock, "powersave"); 
+                                let mut doze_cfg = get_clg_cfg(&config_lock, "powersave");
                                 doze_cfg.enabled = true;
                                 doze_cfg.perf_floor = 0.0;
-                                doze_cfg.perf_ceil = doze_cfg.perf_ceil.min(0.40); // 锁死天花板最高只给 40% 性能
+                                // 息屏 doze 天花板 0.30：后台任务（sync/JobScheduler）突发时
+                                // 允许短暂借力，但压住"口袋发热"；5 分钟后 scenemode 进一步压到 0.15
+                                doze_cfg.perf_ceil = doze_cfg.perf_ceil.min(0.30); // 锁死天花板最高只给 30% 性能
                                 doze_cfg.smoothing_up = 0.10;           // 升频极其迟钝
                                 doze_cfg.touch_boost_enabled = false;   // 息屏无触摸，关闭触摸升频
                                 
@@ -522,6 +667,14 @@ pub fn start_scheduler_thread(
                             "new" => mode.as_str(),
                             "temp" => temperature
                         )));
+                        // 前台监控日志：每次前台切换都记录，不管模式是否变更
+                        let active_gov = if ak_governor.is_active() { "akmode" }
+                            else if fast_lock.is_active() { "fast" }
+                            else if cpu_governor.is_active() { "clg" }
+                            else { "system" };
+                        crate::logger::log_foreground(
+                            &package_name, &old_mode, &mode, temperature, is_screen_on, active_gov,
+                        );
                         
                         if old_mode != mode {
                             log::info!("{}", t_with_args("scheduler-mode-change-request", &fluent_args!(

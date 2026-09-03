@@ -1,54 +1,59 @@
-# akmode-example.yaml —— 明日方舟特调的参考配置
+# akmode-example.yaml —— 明日方舟特调参考配置
 #
-# 用法：把这份文件复制成同目录的 akmode.yaml 再改。守护进程只认 akmode.yaml，
-# 本文件不参与加载，纯粹当说明书用。
+# 本文件不参与加载，纯粹当字段说明书用。复制成 akmode.yaml 再改。
+# 注意：akmode.yaml 经 include_str! 编译进二进制，磁盘副本不加载，
+# 改参数要改源文件再重新编译。
 #
-# 生效条件：命中 CHIRI_SOC_HINTS（8550）且前台是明日方舟。生效期间主调度（CLG）
-# 让位，改由 akmode 接管；退出前台就交还 CLG。
+# 生效条件：前台是明日方舟（包名命中 special_tuned.txt）。
+# 生效期间 CLG 让位，akmode 接管；退出前台交还 CLG。
 #
-# 档位 = 全局那套模式（powersave/balance/performance/fast），由 rules.yaml 的生效模式
-# 决定（明日方舟 app_modes > global_mode），特调期间固定应用、不自动切换档位；
-# 档位差异仅在升降频策略参数，所有档位都能使用硬件最高档位。
+# 档位 = 全局那套模式（powersave/balance/performance/fast），
+# 由 rules.yaml 生效模式决定（明日方舟 app_modes > global_mode），
+# 特调期间固定应用、不自动切档。
 #
-# 调频机制：激活时统一内核调速器为 schedutil、min 压到硬件最低、max 为硬件最高；
-# 用本档策略参数按负载升降 max（内核频率表逐档移动，可升到硬件最高、降到硬件最低）——
-# schedutil 在 [硬件最低, 动态max] 内自由调频。
-
+# 调频机制：写 schedutil、min 压到硬件最低、max 为硬件最高；
+# 用本档策略参数按负载升降 max（内核频率表逐档移动），
+# schedutil 在 [硬件最低, 动态 max] 内自主调频。
+#
+# 升频 = 任一组内达到 up_core_count 个核心占用率 > up_util_percent
+# 降频 = 任一组内达到 down_core_count 个核心占用率 < down_util_percent
+# 核心数为组内绝对个数：2 = 组内 2 个核心命中即触发；0 = 任一命中；64 = 关闭该方向。
+# 升频前检查实际频率是否已达当前 max（schedutil 余量），达到才升一档。
+# wait_ms 为升降频防抖；after_change_duration_ms 内升降频后 wait_ms 减半。
+#
+# 核心组区间由 common::chiri_core_ranges() 按 SoC 区分：
+#   8550: little 0-2 / big 3-6 / prime 7
+#   8475: little 0-3 / big 4-6 / prime 7
+#   8998: little 0-3 / big 4-7 / 无 prime
 akmode:
-  # 升降频后防抖等待临时减半的持续时间（ms）：发生一次升降频后，此后 wait_ms
-  # 在此时长内按一半执行；超过此时长恢复原 wait_ms。写 0 关闭该特性。
+  # 升降频后 wait_ms 减半持续时长（ms）：发生升降频后 wait_ms 按一半执行，
+  # 超过此时长恢复原值。写 0 关闭该特性。
   after_change_duration_ms: 799
 
-  # 下面只写 balance 一档做示例，其余三档结构完全一样，复制改参数即可。
-  # 每档按核心组（little/big/prime）独立配置升降频参数 + 防抖等待。
-  # 核心组按 CPU ID 硬编码（8550：0-2 小核 little、3-6 大核 big、7 超大核 prime）。
-  #   powersave     = 档 1，最低档
-  #   balance       = 档 2，默认起步档
-  #   performance   = 档 3
-  #   fast          = 档 4，最高档
+  # 下面只写 balance 一档做示例，其余三档结构一样，复制改参数即可。
+  #   powersave   = 档 1（最保守）
+  #   balance     = 档 2（默认起步）
+  #   performance = 档 3
+  #   fast        = 档 4（最激进）
 
-  modename:
-    # 本档升降频防抖等待（ms）：升降条件成立到真正升降 max 之间的等待。
-    # 调小反应快但可能频繁升降，调大更稳但迟钝。每档可以不一样。
-    wait_ms: 120
+  balance:
+    # 本档升降频防抖（ms）：升降条件成立到真正升降 max 之间的等待。
+    # 调小反应快但可能频繁升降，调大更稳但迟钝。
+    wait_ms: 80
 
     little:
-      # 升频核心数：本组内超过这个数量的核心占用率 > up_util_percent 才考虑升 max。
-      # 写 2 = 超过 2 个小核忙起来才考虑升频。调小升频更积极，调大更保守。
+      # 组内达到这个数量的核心忙起来才考虑升频
       up_core_count: 2
-      # 升频占用阈值（%）：上面那批核心的占用率要超过这个值才触发。
-      # 写 80 = 占用率 > 80%。调低更容易升频。
+      # 那批核心的占用率要超过这个百分比才触发
       up_util_percent: 80
-      # 降频核心数：本组内超过这个数量的核心占用率 < down_util_percent 才降 max。
-      # 写 1 = 超过 1 个小核闲下来才考虑降频。调大降频更保守（不容易掉）。
-      down_core_count: 1
-      # 降频占用阈值（%）：上面那批核心的占用率要低于这个值才触发。
-      # 写 60 = 占用率 < 60%。调高更容易降频省电。
+      # 组内达到这个数量的核心闲下来才考虑降频
+      down_core_count: 2
+      # 那批核心的占用率要低于这个百分比才触发
       down_util_percent: 60
 
     big:
       up_core_count: 3
-      up_util_percent: 80
+      up_util_percent: 60
       down_core_count: 2
       down_util_percent: 60
 

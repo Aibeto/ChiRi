@@ -62,11 +62,21 @@ fn main() -> Result<()> {
         config_rel.to_string_lossy().as_bytes(),
     );
 
-    // 导出内部特调白名单（编译期常量）供 WebUI 展示“特调”标签与专属选项：
-    // 每行一条 `包名:特调模式列表(逗号分隔):优先回退模式`，WebUI 只读该文件，不提供修改入口。
+    // 配置快照自愈：调优配置编译期嵌入二进制（common::embedded_config_str），
+    // 磁盘文件只是「嵌入内容 + meta 覆盖」的快照。启动时把嵌入内容写回生效路径：
+    // 文件被篡改 → 还原调优参数（meta 保留用户选择）；文件缺失 → 重建。
+    common::sync_config_snapshot(&config_path);
+
+    // 导出内部特调白名单（编译期嵌入 src/chiri/special_tuned.txt）供 WebUI 展示
+    // “特调”标签与专属选项：每行一条 `包名:特调模式列表(逗号分隔):优先回退模式`。
+    // 只导出精确包名条目（正则条目无法按包名精确查找）；WebUI 只读该文件，不提供修改入口。
     // 仅在 Chiri 专属调度激活时导出——非 Chiri（Yumi）设备不生成该文件，WebUI 据此隐藏特调功能。
     if chiri_active {
-        let special_tuned_content: String = common::SPECIAL_TUNED_MODES
+        let exact: Vec<&common::SpecialTunedEntry> = common::special_tuned_entries()
+            .iter()
+            .filter(|e| e.regex.is_none())
+            .collect();
+        let special_tuned_content: String = exact
             .iter()
             .map(|e| format!("{}:{}:{}\n", e.package, e.modes.join(","), e.fallback))
             .collect();
@@ -78,18 +88,17 @@ fn main() -> Result<()> {
             "{}",
             t_with_args(
                 "main-special-tuned-exported",
-                &fluent_args!("count" => common::SPECIAL_TUNED_MODES.len().to_string())
+                &fluent_args!("count" => exact.len().to_string())
             )
         );
     }
 
     // 4. 立即加载语言与日志（两套 Config 的 meta 结构一致，先用它初始化）
     let (language, loglevel) = if chiri_active {
-        let cfg =
-            chiri::config::Config::from_file(config_path.to_str().unwrap()).unwrap_or_default();
+        let cfg = chiri::config::Config::load(config_path.to_str().unwrap()).unwrap_or_default();
         (cfg.meta.language, cfg.meta.loglevel)
     } else {
-        let cfg = Config::from_file(config_path.to_str().unwrap()).unwrap_or_default();
+        let cfg = Config::load(config_path.to_str().unwrap()).unwrap_or_default();
         (cfg.meta.language, cfg.meta.loglevel)
     };
     load_language(&language);
@@ -133,11 +142,10 @@ fn main() -> Result<()> {
     // 6. 按 SoC 启动对应的调度器（两套互斥，同一事件通道只被其中一个消费）
     let start_result = if chiri_active {
         log::info!("{}", t("main-chiri-scheduler-selected"));
-        let cfg =
-            chiri::config::Config::from_file(config_path.to_str().unwrap()).unwrap_or_default();
+        let cfg = chiri::config::Config::load(config_path.to_str().unwrap()).unwrap_or_default();
         chiri::start_scheduler_thread(rx, Arc::new(RwLock::new(cfg)), ak_active.clone())
     } else {
-        let cfg = Config::from_file(config_path.to_str().unwrap()).unwrap_or_default();
+        let cfg = Config::load(config_path.to_str().unwrap()).unwrap_or_default();
         scheduler::start_scheduler_thread(rx, Arc::new(RwLock::new(cfg)))
     };
     if let Err(e) = start_result {

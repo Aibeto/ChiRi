@@ -16,12 +16,10 @@
  */
 
 use fluent::bundle::FluentBundle;
-use fluent::{FluentResource, FluentArgs};
+use fluent::{FluentArgs, FluentResource};
 use intl_memoizer::concurrent::IntlLangMemoizer;
 use once_cell::sync::Lazy;
-use std::fs;
 use std::sync::RwLock;
-use crate::common;
 
 // 全局静态变量，存储当前的语言包
 static BUNDLE: Lazy<RwLock<FluentBundle<FluentResource, IntlLangMemoizer>>> = Lazy::new(|| {
@@ -29,36 +27,35 @@ static BUNDLE: Lazy<RwLock<FluentBundle<FluentResource, IntlLangMemoizer>>> = La
     RwLock::new(bundle)
 });
 
-/// 核心函数：加载指定语言的文件
-fn load_bundle(lang: &str) -> Result<FluentBundle<FluentResource, IntlLangMemoizer>, anyhow::Error> {
-    // 1. 获取模块根目录
-    let root = common::get_module_root();
-    
-    // 2. 拼接完整路径
-    let ftl_path = root.join(format!("config/i18n/{}.ftl", lang));
+/// 核心函数：加载指定语言的翻译资源。
+/// 语言包编译期嵌入二进制（common::embedded_ftl_str），磁盘 i18n 目录不再被读取。
+fn load_bundle(
+    lang: &str,
+) -> Result<FluentBundle<FluentResource, IntlLangMemoizer>, anyhow::Error> {
+    // 1. 取嵌入的 FTL 内容：zh → zh.ftl，其余语言一律回退 en.ftl
+    let ftl_string = crate::common::embedded_ftl_str(lang).to_string();
+    log::info!("[i18n] Loading embedded language '{}' (zh/en)", lang);
 
-    log::info!("[i18n] Attempting to load language '{}' from: {:?}", lang, ftl_path);
-
-    // 3. 读取文件内容
-    let ftl_string = fs::read_to_string(&ftl_path)
-        .map_err(|e| anyhow::anyhow!("Failed to read FTL file {:?}: {}", ftl_path, e))?;
-
-    // 4. 解析资源
+    // 2. 解析资源
     let resource = FluentResource::try_new(ftl_string)
-        .map_err(|e| anyhow::anyhow!("Failed to parse FTL resource {:?}: {:?}", ftl_path, e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to parse embedded FTL resource: {:?}", e))?;
 
-    // 5. 解析语言标签；非法标签回退 "en"，避免 parse().unwrap() panic
+    // 3. 解析语言标签；非法标签回退 "en"，避免 parse().unwrap() panic
     //    （类型由 FluentBundle 的 locale 参数推断，无需直接依赖 unic-langid）
     let langid = match lang.parse() {
         Ok(id) => id,
         Err(_) => {
-            log::warn!("[i18n] Invalid language tag '{}', falling back to 'en'", lang);
+            log::warn!(
+                "[i18n] Invalid language tag '{}', falling back to 'en'",
+                lang
+            );
             "en".parse().unwrap()
         }
     };
     let mut bundle = FluentBundle::new_concurrent(vec![langid]);
 
-    bundle.add_resource(resource)
+    bundle
+        .add_resource(resource)
         .map_err(|e| anyhow::anyhow!("Failed to add FTL resource: {:?}", e))?;
 
     Ok(bundle)
@@ -67,16 +64,23 @@ fn load_bundle(lang: &str) -> Result<FluentBundle<FluentResource, IntlLangMemoiz
 /// 对外接口：切换语言
 pub fn load_language(lang: &str) {
     log::info!("[i18n] Request to switch language to: '{}'", lang);
-    
+
     match load_bundle(lang) {
         Ok(new_bundle) => {
             let mut bundle_lock = BUNDLE.write().unwrap();
             *bundle_lock = new_bundle;
-            log::info!("[i18n] Successfully loaded and switched to language: {}", lang);
+            log::info!(
+                "[i18n] Successfully loaded and switched to language: {}",
+                lang
+            );
         }
         Err(e) => {
             // 如果加载失败，不会覆盖旧的语言包
-            log::error!("[i18n] Failed to load language '{}': {}. Keeping previous language.", lang, e);
+            log::error!(
+                "[i18n] Failed to load language '{}': {}. Keeping previous language.",
+                lang,
+                e
+            );
         }
     }
 }
@@ -95,11 +99,15 @@ pub fn t(key: &str) -> String {
 
     let mut errors = Vec::new();
     let value = bundle.format_pattern(pattern, None, &mut errors);
-    
+
     if errors.is_empty() {
         value.to_string()
     } else {
-        log::warn!("[i18n] Failed to format message for key '{}': {:?}", key, errors);
+        log::warn!(
+            "[i18n] Failed to format message for key '{}': {:?}",
+            key,
+            errors
+        );
         key.to_string()
     }
 }
@@ -109,25 +117,29 @@ pub fn t_with_args(key: &str, args: &FluentArgs) -> String {
     let bundle = BUNDLE.read().unwrap();
     let msg = match bundle.get_message(key) {
         Some(msg) => msg,
-        None => return key.to_string(), 
+        None => return key.to_string(),
     };
     let pattern = match msg.value() {
         Some(pattern) => pattern,
-        None => return key.to_string(), 
+        None => return key.to_string(),
     };
 
     let mut errors = Vec::new();
     let value = bundle.format_pattern(pattern, Some(args), &mut errors);
-    
+
     if errors.is_empty() {
         value.to_string()
     } else {
-        log::warn!("[i18n] Failed to format message for key '{}': {:?}", key, errors);
+        log::warn!(
+            "[i18n] Failed to format message for key '{}': {:?}",
+            key,
+            errors
+        );
         key.to_string()
     }
 }
 
-#[macro_export] 
+#[macro_export]
 macro_rules! fluent_args {
     ($($key:expr => $value:expr),* $(,)?) => {{
         let mut args = fluent::FluentArgs::new();

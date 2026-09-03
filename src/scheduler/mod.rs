@@ -164,15 +164,19 @@ pub fn start_scheduler_thread(
 
                 let old_lang = config_clone.read().unwrap().meta.language.clone();
                 
-                match Config::from_file(config_path.to_str().unwrap()) {
+                match Config::load(config_path.to_str().unwrap()) {
                     Ok(new_config) => {
                         logger::update_level(&new_config.meta.loglevel);
                         *config_clone.write().unwrap() = new_config;
-                        
+
                         let new_lang = config_clone.read().unwrap().meta.language.clone();
                         if old_lang != new_lang { load_language(&new_lang); }
 
                         log::info!("{}", t("config-reloaded-success"));
+
+                        // 快照自愈：调优参数以嵌入内容为准，磁盘文件被篡改时还原
+                        // （meta 保留外部修改）。内容一致时内部跳过写入，不会成环。
+                        crate::common::sync_config_snapshot(&config_path);
 
                         let scheduler = CpuScheduler::new(config_clone.clone(), sys_path_clone.clone());
                         if let Err(e) = scheduler.apply_system_tweaks() {

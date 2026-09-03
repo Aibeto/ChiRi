@@ -544,6 +544,151 @@ pub fn mode_to_tier(mode: &str) -> u32 {
     }
 }
 
+// ════════════════════════════════════════════════════════════════
+//  热保护配置
+// ════════════════════════════════════════════════════════════════
+
+/// 热保护配置（config.yaml `Thermal` 段）。
+///
+/// 双温度源取较小值：
+/// - 电池温度是主参考——手机壳体发热由电池主导，温升慢但持续，不像 CPU 瞬间飙高又回落
+/// - CPU 温度仅在极端情况参与——大型游戏里 CPU 温度由内核 95°C 温控兜底，
+///   软件层重复压制没意义，阈值设得很高（75/85°C）只防内核兜不住的极端场景
+///
+/// 豁免档 free_above：当前性能上限已高于豁免档时不钳制。
+/// 意味着持续高负载可以冲到硬件最高频——不挡性能的路，只在中低负载区间积热时压一压。
+///
+/// 仅对 CLG 接管模式生效（powersave/balance/performance/doze/scenemode）。
+/// fast/akmode 走自己的路径，不受影响。
+#[derive(Debug, Deserialize, Clone)]
+pub struct ThermalGuardConfig {
+    /// false = 完全不采温、不压制
+    #[serde(default = "crate::utils::default_true")]
+    pub enabled: bool,
+    /// 电池软限（°C）：默认 41°C，手机壳体开始发烫的临界点
+    #[serde(default = "d_batt_soft_temp")]
+    pub batt_soft_temp_c: f32,
+    /// 电池硬限（°C）：默认 45°C，手握明显发烫
+    #[serde(default = "d_batt_hard_temp")]
+    pub batt_hard_temp_c: f32,
+    /// CPU 软限（°C）：默认 75°C，一般游戏不会到这里（内核 95°C 才兜底）
+    #[serde(default = "d_cpu_soft_temp")]
+    pub cpu_soft_temp_c: f32,
+    /// CPU 硬限（°C）：默认 85°C，极端情况才触发
+    #[serde(default = "d_cpu_hard_temp")]
+    pub cpu_hard_temp_c: f32,
+    /// 软限触发后性能上限压到这个比例（0..1）
+    #[serde(default = "d_thermal_soft_cap")]
+    pub soft_perf_cap: f32,
+    /// 硬限触发后性能上限压到这个比例，必须 <= soft_perf_cap
+    #[serde(default = "d_thermal_hard_cap")]
+    pub hard_perf_cap: f32,
+    /// 豁免档（0..1）：当前性能比已超过此值时不钳制。默认 0.80，
+    /// 意味着 sustained load 能冲到 80%+ 硬件频率，只在中低负载积热时压住
+    #[serde(default = "d_thermal_free_above")]
+    pub free_above: f32,
+    /// 回滞（°C）：温度降到 软限 - hysteresis 以下才解除压制。
+    /// 设太小会在阈值附近反复触发/解除，频率抖动
+    #[serde(default = "d_thermal_hysteresis")]
+    pub hysteresis_c: f32,
+}
+
+// Thermal 缺省值：config.yaml 省略该段时回退到此处
+fn d_batt_soft_temp() -> f32 {
+    41.0
+}
+fn d_batt_hard_temp() -> f32 {
+    45.0
+}
+fn d_cpu_soft_temp() -> f32 {
+    75.0
+}
+fn d_cpu_hard_temp() -> f32 {
+    85.0
+}
+fn d_thermal_soft_cap() -> f32 {
+    0.70
+}
+fn d_thermal_hard_cap() -> f32 {
+    0.40
+}
+fn d_thermal_free_above() -> f32 {
+    0.80
+}
+fn d_thermal_hysteresis() -> f32 {
+    3.0
+}
+
+impl Default for ThermalGuardConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            batt_soft_temp_c: d_batt_soft_temp(),
+            batt_hard_temp_c: d_batt_hard_temp(),
+            cpu_soft_temp_c: d_cpu_soft_temp(),
+            cpu_hard_temp_c: d_cpu_hard_temp(),
+            soft_perf_cap: d_thermal_soft_cap(),
+            hard_perf_cap: d_thermal_hard_cap(),
+            free_above: d_thermal_free_above(),
+            hysteresis_c: d_thermal_hysteresis(),
+        }
+    }
+}
+
+impl ThermalGuardConfig {
+    /// 校验并规范化：非有限值回退默认；保证各传感器 soft < hard、hard_cap <= soft_cap、
+    /// 豁免档 >= soft_perf_cap（否则压制完全失效），防止误配。
+    pub fn normalize(&mut self) {
+        // 非有限值（NaN/±Inf，如 YAML 溢出值）回退默认
+        if !self.batt_soft_temp_c.is_finite() {
+            self.batt_soft_temp_c = d_batt_soft_temp();
+        }
+        if !self.batt_hard_temp_c.is_finite() {
+            self.batt_hard_temp_c = d_batt_hard_temp();
+        }
+        if !self.cpu_soft_temp_c.is_finite() {
+            self.cpu_soft_temp_c = d_cpu_soft_temp();
+        }
+        if !self.cpu_hard_temp_c.is_finite() {
+            self.cpu_hard_temp_c = d_cpu_hard_temp();
+        }
+        if !self.soft_perf_cap.is_finite() {
+            self.soft_perf_cap = d_thermal_soft_cap();
+        }
+        if !self.hard_perf_cap.is_finite() {
+            self.hard_perf_cap = d_thermal_hard_cap();
+        }
+        if !self.free_above.is_finite() {
+            self.free_above = d_thermal_free_above();
+        }
+        if !self.hysteresis_c.is_finite() {
+            self.hysteresis_c = d_thermal_hysteresis();
+        }
+        // 电池阈值（主参考）：软限限制在合理区间，硬限必须高于软限
+        self.batt_soft_temp_c = self.batt_soft_temp_c.clamp(25.0, 60.0);
+        if self.batt_hard_temp_c <= self.batt_soft_temp_c {
+            self.batt_hard_temp_c = (self.batt_soft_temp_c + 4.0).min(65.0);
+        }
+        // CPU 阈值（极端参考）：软限限制在合理区间，硬限必须高于软限
+        self.cpu_soft_temp_c = self.cpu_soft_temp_c.clamp(50.0, 95.0);
+        if self.cpu_hard_temp_c <= self.cpu_soft_temp_c {
+            self.cpu_hard_temp_c = (self.cpu_soft_temp_c + 10.0).min(100.0);
+        }
+        // 比例限制在 0..1，硬限压制不高于软限（温度更高反而压得更松是误配）
+        self.soft_perf_cap = self.soft_perf_cap.clamp(0.0, 1.0);
+        self.hard_perf_cap = self.hard_perf_cap.clamp(0.0, 1.0);
+        if self.hard_perf_cap > self.soft_perf_cap {
+            self.hard_perf_cap = self.soft_perf_cap;
+        }
+        // 豁免档低于软限压制值时压制会被完全绕过：豁免档至少抬到 soft_perf_cap
+        self.free_above = self.free_above.clamp(0.0, 1.0);
+        if self.free_above < self.soft_perf_cap {
+            self.free_above = self.soft_perf_cap;
+        }
+        self.hysteresis_c = self.hysteresis_c.clamp(0.0, 20.0);
+    }
+}
+
 /// 特调档位（1..4）→ 模式名，日志展示用
 pub fn tier_to_mode(tier: u32) -> &'static str {
     match tier {
@@ -588,6 +733,11 @@ pub struct Config {
     #[serde(default = "default_scene_mode_delay_secs")]
     pub scene_mode_delay_secs: u64,
 
+    /// 热保护配置：按 CPU 温度动态压低 CLG 性能上限（采样在 scheduler_ipc 线程）。
+    /// 省略该段时用代码默认值（enabled=true，软限 60°C/硬限 70°C）。
+    #[serde(default, rename = "Thermal")]
+    pub thermal: ThermalGuardConfig,
+
     /// 明日方舟特调（akmode）独立调频配置：来自处理器目录 akmode.yaml，与 CLG 完全解耦。
     /// 前台为白名单应用时由 AkmodeGovernor 接管，参数不再走 CLG。
     #[serde(default)]
@@ -600,49 +750,31 @@ fn default_scene_mode_delay_secs() -> u64 {
 }
 
 impl Config {
-    /// 从 YAML 文件加载配置；读取或反序列化失败时返回 Err。
-    /// 加载后合并处理器专属特调文件（SoC 目录 → config/normal/ → 都没有则 akmode 不可用）。
-    /// scenemode 配置同样按 SoC → normal 路径加载。
-    pub fn from_file(path: &str) -> anyhow::Result<Self> {
-        let content = std::fs::read_to_string(path)?;
-        let mut config: Config = serde_yaml::from_str(&content)?;
+    /// 加载生效配置：**基准内容编译期嵌入二进制**（common::embedded_config_str，
+    /// 按命中 SoC 选择，防篡改），磁盘文件只提供 meta 覆盖（loglevel/language，
+    /// WebUI 日志等级切换的落点）；调优字段即使被篡改也不会被读入。
+    ///
+    /// `path` 为生效配置的磁盘快照路径（common::get_config_path()），
+    /// 缺失或损坏时 meta 回退嵌入默认值。加载后合并嵌入的 akmode/scenemode 段。
+    pub fn load(path: &str) -> anyhow::Result<Self> {
+        let mut config: Config = serde_yaml::from_str(crate::common::embedded_config_str())?;
+        let (loglevel, language) = crate::common::read_external_meta(std::path::Path::new(path));
+        if let Some(v) = loglevel {
+            config.meta.loglevel = v;
+        }
+        if let Some(v) = language {
+            config.meta.language = v;
+        }
         config.merge_akmode();
         config.merge_scenemode();
+        config.thermal.normalize();
         Ok(config)
     }
 
-    /// 合并独立特调配置文件（akmode.yaml）中的特调段。
-    /// 路径：SoC 专属目录 → config/normal/，都不存在则置特调不可用（白名单应用回退 CLG）。
+    /// 合并嵌入的特调配置（akmode.yaml，编译期打包进二进制）。
+    /// 嵌入内容随版本发布、始终存在；仅当嵌入 YAML 意外损坏时置特调不可用。
     fn merge_akmode(&mut self) {
-        let path = match crate::common::get_akmode_path() {
-            Some(p) => p,
-            None => {
-                log::warn!(
-                    "{}",
-                    t_with_args(
-                        "config-special-load-failed",
-                        &fluent_args!("path" => "<not found: soc/akmode.yaml, normal/akmode.yaml>".to_string(), "error" => "file not found".to_string())
-                    )
-                );
-                crate::common::set_akmode_available(false);
-                return;
-            }
-        };
-        let content = match std::fs::read_to_string(&path) {
-            Ok(c) => c,
-            Err(e) => {
-                log::warn!(
-                    "{}",
-                    t_with_args(
-                        "config-special-load-failed",
-                        &fluent_args!("path" => path.to_string_lossy().to_string(), "error" => e.to_string())
-                    )
-                );
-                crate::common::set_akmode_available(false);
-                return;
-            }
-        };
-        match serde_yaml::from_str::<Config>(&content) {
+        match serde_yaml::from_str::<Config>(crate::common::embedded_akmode_str()) {
             Ok(special) => {
                 self.akmode = special.akmode;
                 self.akmode.normalize();
@@ -651,7 +783,7 @@ impl Config {
                     "{}",
                     t_with_args(
                         "config-special-merged",
-                        &fluent_args!("path" => path.to_string_lossy().to_string())
+                        &fluent_args!("path" => "<embedded>".to_string())
                     )
                 );
             }
@@ -660,7 +792,7 @@ impl Config {
                     "{}",
                     t_with_args(
                         "config-special-parse-failed",
-                        &fluent_args!("path" => path.to_string_lossy().to_string(), "error" => e.to_string())
+                        &fluent_args!("path" => "<embedded>".to_string(), "error" => e.to_string())
                     )
                 );
                 crate::common::set_akmode_available(false);
@@ -668,30 +800,22 @@ impl Config {
         }
     }
 
-    /// 合并 scenemode 配置：SoC 专属目录 → config/normal/，都不存在则保持 serde 默认值。
+    /// 合并嵌入的 scenemode 配置。只反序列化 scenemode 段（先解析成 Value 再提取）：
+    /// 段缺失时保持 config.yaml 已配置的值，而不是用默认值覆盖。
     fn merge_scenemode(&mut self) {
-        let path = match crate::common::get_scenemode_path() {
-            Some(p) => p,
-            None => return, // 无 scenemode 配置文件，保持 serde 默认值
-        };
-        let content = match std::fs::read_to_string(&path) {
-            Ok(c) => c,
-            Err(_) => return,
-        };
-        // 只反序列化 scenemode 段（先解析成 Value 再提取），不解析整个 Config：
-        // 1) 文件里混入的其它字段不会被反序列化，也不会覆盖当前配置；
-        // 2) scenemode 段缺失时保持 config.yaml 已配置的值，而不是用默认值覆盖。
-        let scene_value = match serde_yaml::from_str::<serde_yaml::Value>(&content) {
+        let scene_value = match serde_yaml::from_str::<serde_yaml::Value>(
+            crate::common::embedded_scenemode_str(),
+        ) {
             Ok(value) => match value.get("scenemode").cloned() {
                 Some(v) => v,
-                None => return, // 段缺失：保持当前已配置的 scenemode
+                None => return, // 嵌入文件无 scenemode 段：保持当前已配置的 scenemode
             },
             Err(e) => {
                 log::warn!(
                     "{}",
                     t_with_args(
                         "config-scenemode-parse-failed",
-                        &fluent_args!("path" => path.to_string_lossy().to_string(), "error" => e.to_string())
+                        &fluent_args!("path" => "<embedded>".to_string(), "error" => e.to_string())
                     )
                 );
                 return;
@@ -704,7 +828,7 @@ impl Config {
                     "{}",
                     t_with_args(
                         "config-scenemode-merged",
-                        &fluent_args!("path" => path.to_string_lossy().to_string())
+                        &fluent_args!("path" => "<embedded>".to_string())
                     )
                 );
             }
@@ -713,7 +837,7 @@ impl Config {
                     "{}",
                     t_with_args(
                         "config-scenemode-parse-failed",
-                        &fluent_args!("path" => path.to_string_lossy().to_string(), "error" => e.to_string())
+                        &fluent_args!("path" => "<embedded>".to_string(), "error" => e.to_string())
                     )
                 );
             }

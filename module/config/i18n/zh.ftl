@@ -128,8 +128,11 @@ clg-writer-invalid = [CLG] P{ $pid } sysfs 写入器无效 (max_valid: { $max_va
 clg-freq-set = [CLG] P{ $pid } 频率调整: { $old_khz }MHz -> { $new_khz }MHz
 clg-freq-write-failed-cached = [CLG] P{ $pid } 频率写入失败，保持缓存值 { $cached_khz }MHz (目标 { $target_khz }MHz)
 clg-watchdog-release = [CLG] 看门狗: 已 { $secs } 秒未收到负载事件，eBPF 负载源疑似失效，已释放 CPU 控制权恢复系统默认调频
-clg-up-skipped = [CLG] P{ $pid } 实际频率={ $cur_khz }MHz 未达当前锁定 { $lock_khz }MHz，忽略本次升频（schedutil 余量，按需升频）
 clg-touch-boost = [CLG] 触摸升频窗口开启：大核性能下限={ $floor } 保持 { $ms }ms
+clg-thermal-cap = [CLG] 热保护压制: 电池={ $batt }°C / CPU={ $cpu }°C，性能上限压至 { $cap }%（≥{ $free } 豁免）
+clg-thermal-no-sensor = [CLG] 热保护: 未找到 CPU 温度传感器，CPU 参考停用
+clg-thermal-no-battery = [CLG] 热保护: 未找到电池温度节点，仅按 CPU 温度压制
+clg-min-write-failed = [CLG] P{ $pid } 写入 scaling_min_freq={ $khz }MHz 失败，空闲频率地板可能偏高
 
 # --- AKMode（明日方舟特调） ---
 akmode-init = [AKMode] 明日方舟特调接管 | 档位={ $mode }

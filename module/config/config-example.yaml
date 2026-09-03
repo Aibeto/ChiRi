@@ -1,184 +1,163 @@
 # ============================================================
-#  Yumi 配置模板示例 (example.yaml)
-#  本文件用于演示 config.yaml 的完整字段结构与各参数含义。
-#  复制后按需修改，重命名为 config.yaml 或 config_<SOC>.yaml 即可生效。
-#  调整参数后会被 config_watcher 热重载，无需重启守护进程。
+# config.yaml 完整字段模板
+# ============================================================
+# 本文件不参与加载（daemon 只认 config.yaml / {soc}/config.yaml），
+# 纯粹当字段说明书用。复制成 config.yaml 再改。
+#
+# 注意：调优配置编译期嵌入二进制（include_str!），磁盘文件只是
+# "嵌入内容 + meta 覆盖"的快照。daemon 启动/重载时会把嵌入内容
+# 写回磁盘，篡改会被还原。唯一允许外部改的是 meta.loglevel 和
+# meta.language（WebUI 日志等级/语言切换落点）。改调优参数要改
+# 这份模板源文件再重新编译。
 # ============================================================
 
-# ---------------------
-#  元数据信息
-# ---------------------
+# ── 元数据 ──────────────────────────────────────────────────
+# 唯一允许外部修改的字段（WebUI 日志等级/语言切换）
 meta:
-  # 配置名称（可选，仅供文档参考，代码不会解析此字段）
-  name: "default_config"
-  # 配置作者（可选，仅供文档参考，代码不会解析此字段）
-  author: "ChiRi"
-  # 日志语言：en / zh，切换后自动加载对应 .ftl 翻译文件
-  language: "zh"
-  # 日志级别：DEBUG / INFO / WARN / ERROR，热重载即时生效
-  loglevel: "INFO"
+  name: "example_config"       # 仅供文档参考，代码不解析
+  author: "ChiRi"              # 仅供文档参考
+  language: "zh"               # en / zh，切换后加载对应 ftl
+  loglevel: "INFO"             # DEBUG / INFO / WARN / ERROR
 
-# ---------------------
-#  功能总开关
-# ---------------------
+# ── 功能开关 ────────────────────────────────────────────────
 function:
-  # cpuidle governor 切换开关
-  # true  = 接管 cpuidle，按 CpuIdle.current_governor 写入 sysfs
-  # false = 跳过 cpuidle 设置
+  # cpuidle governor 切换：true 时把 CpuIdle.current_governor 写入 sysfs
   CpuIdleScalingGovernor: false
-  # IO 优化开关
-  # true  = 写入 I/O 调度器、预读、合并策略等参数到 sysfs
-  # false = 跳过 IO 优化
+  # IO 优化：true 时写入 I/O 调度器、预读、合并策略
   IOOptimization: true
 
-# ---------------------
-#  IO 优化参数
-# ---------------------
+# ── IO 优化 ─────────────────────────────────────────────────
 IO_Settings:
-  # I/O 调度器名称，写入 /sys/block/*/queue/scheduler
-  # 常见值："none"（NVMe/UFS）、"mq-deadline"、"cfq"
-  # 空字符串 "" 表示不切换调度器
+  # I/O 调度器（写入 /sys/block/*/queue/scheduler）
+  # "none"（NVMe/UFS 默认）、"mq-deadline"、"cfq"，空串不切换
   Scheduler: "none"
-  # 预读大小 (kB)，写入 /sys/block/*/queue/read_ahead_kb
-  # 顺序读场景可适当增大（256/512），随机读保持默认即可
-  # 默认值："128"
+  # 预读大小 kB（写入 /sys/block/*/queue/read_ahead_kb）
   read_ahead_kb: "128"
-  # 请求合并策略，写入 /sys/block/*/queue/nomerges
-  # "0" = 不禁用合并（系统默认）
-  # "1" = 仅禁止简单合并
-  # "2" = 完全禁止合并（减少 CPU 开销，适合高速存储）
-  # 默认值："2"
+  # 请求合并：0=不禁用（系统默认）、1=禁止简单合并、2=完全禁止
   nomerges: "2"
-  # IO 统计开关，写入 /sys/block/*/queue/iostats
-  # "0" = 关闭统计（减少开销）
-  # "1" = 开启统计（调试时使用）
-  # 默认值："0"
+  # IO 统计：0=关（省开销）、1=开（调试时用）
   iostats: "0"
 
-# ---------------------
-#  CPU 空闲设置
-# ---------------------
+# ── CPU 空闲调度器 ──────────────────────────────────────────
 CpuIdle:
-  # cpuidle governor 名称，写入 /sys/devices/system/cpu/cpuidle/current_governor
-  # 常见值："menu"（交互设备默认）、"ladder"、"teo"
-  # 空字符串 "" 表示不切换 cpuidle governor（需 FunctionToggles
-  # 中 CpuIdleScalingGovernor 为 true 才生效）
+  # 写入 /sys/devices/system/cpu/cpuidle/current_governor
+  # "menu"（交互设备默认，按预期空闲时长选最深 C 状态）、"ladder"、"teo"
+  # 空串不切换，且 CpuIdleScalingGovernor 须为 true 才生效
   current_governor: ""
 
-# ============================================================
-#  性能模式配置
-#
-#  Yumi 内置四档模式：powersave（省电）、balance（均衡）、
-#  performance（性能）、fast（极速），由用户通过命令切换。
-#  每档模式独立包含一组 cpu_load_governor 参数，结构完全相同，仅数值不同。
-#
-#  CLG (CpuLoadGovernor) 核心逻辑：
-#    每个 tick 采集各 cluster 的最大 util（归一化到 0.0~1.0），
-#    根据以下参数计算目标频率并写入 sysfs：
-#      - util >= up_threshold → 升频区间
-#      - util <= down_threshold → 降频区间
-#      - down_threshold < util < up_threshold → 滞回带（慢调）
-#
-#  以下为一组完整模板，复制后将 key 替换为对应模式名即可。
-# ============================================================
+# ── 息屏省电 ────────────────────────────────────────────────
+# 屏幕熄灭超过该秒数后切到 scenemode 低功耗配置，亮屏恢复原模式。
+# 默认 300（5 分钟）。
+scene_mode_delay_secs: 300
 
-# ⬇ 将此处替换为模式名：powersave / balance / performance / fast
-modename:
+# ── 热保护 ──────────────────────────────────────────────────
+# 电池温度是主参考（壳体发热由电池主导，温升慢但持续）；
+# CPU 温度只在极端热时参与（内核 95°C 温控才是主力）。
+# 豁免档 free_above：当前性能比已高于该值时不压制——高负载不挡路。
+# 仅对 CLG 模式生效（fast/akmode 不受影响）。
+Thermal:
+  enabled: true
+  # 电池软限（°C）：手机壳体开始发烫的临界点
+  batt_soft_temp_c: 41
+  # 电池硬限（°C）：手握明显发烫
+  batt_hard_temp_c: 45
+  # CPU 软限（°C）：一般游戏不会到这里
+  cpu_soft_temp_c: 75
+  # CPU 硬限（°C）：极端情况才触发
+  cpu_hard_temp_c: 85
+  # 软限触发后压到的性能比例
+  soft_perf_cap: 0.70
+  # 硬限触发后压到的性能比例（必须 <= soft_perf_cap）
+  hard_perf_cap: 0.40
+  # 豁免档：当前性能比已超过此值时不压制。默认 0.80
+  free_above: 0.80
+  # 回滞（°C）：温度降到 软限 - hysteresis 以下才解除压制
+  hysteresis_c: 3
+
+# ═══════════════════════════════════════════════════════════
+#  性能模式（CLG 调频参数）
+# ═══════════════════════════════════════════════════════════
+#
+# 四档模式：powersave / balance / performance / fast。
+# 每档独立一组 cpu_load_governor 参数，结构完全相同。
+#
+# CLG 调频语义（动态上限）：
+#   接管时 min 压到硬件最低，之后只写 max（性能上限）。
+#   schedutil 在 [min, max] 内按瞬时负载自主调频——空闲时降到地板，
+#   忙碌时贴近 max。不用等 160ms tick 才降频，内核微秒级就降下来，
+#   空转发热比锁频方案小很多。
+#
+#   perf_floor / perf_ceil / perf_init 约束的是"上限"，
+#   实际空闲频率由 schedutil 自己决定。
+#
+# fast 模式不走 CLG：min=max=硬件最高频硬锁，见 src/chiri/fast.rs。
+# ═══════════════════════════════════════════════════════════
+
+# 替换成 powersave / balance / performance
+powersave:
   cpu_load_governor:
-    # 升频阈值 (0.0~1.0)
-    # 当 cluster 最大 util >= 此值时进入升频区间。
-    # 值越大越难触发升频，省电但响应慢。
-    # 约束：clamp [0.0, 1.0]，若 < down_threshold 则 down 被自动对齐
+    # 升频阈值：cluster 最大 util >= 此值时进入升频区间（0..1）
+    # 调大更难触发升频，省电但响应慢
     up_threshold: 0.85
 
-    # 降频阈值 (0.0~1.0)
-    # 当 util 跌破此值时进入降频区间。
-    # 值越小越难触发降频，性能维持更好但更耗电。
-    # 约束：clamp [0.0, 1.0]，若 > up_threshold 则被自动对齐
+    # 降频阈值：util 跌破此值进入降频区间（0..1）
+    # 调小更难降频，性能维持更好但更耗电
     down_threshold: 0.60
 
-    # 升频平滑系数 (0.0~1.0)
-    # 每 tick 目标性能向新值逼近的比例：
-    #   new_perf = current_perf + (target - current_perf) * smoothing_up
-    # 值越大升频越快（响应迅速），值越小越平滑（避免频率跳变）。
+    # 升频平滑系数（0..1）：每 tick 目标性能只逼近该比例
+    # 大 = 升频快、响应迅速，小 = 平滑、不跳变
     smoothing_up: 0.40
 
-    # 降频平滑系数 (0.0~1.0)
-    # 同上，控制降频速度。值越大降得越快。
-    smoothing_down: 0.50
-
-    # 降频速率限制 (tick 数)
-    # 必须连续多个 tick 都满足降频条件，才真正执行一次降频。
-    # 值越大降频越"谨慎"，防止负载短暂波动导致频繁降频。
+    # 降频速率限制（tick 数）：连续满足降频条件才执行一次
+    # 调大降频更谨慎，防短暂波动导致频繁降频
     down_rate_limit_ticks: 2
 
-    # 升频速率限制 (tick 数)
-    # 同上，控制升频前需要连续确认的 tick 数。
+    # 升频速率限制（tick 数）：连续满足升频条件才执行一次
     up_rate_limit_ticks: 2
 
-    # 性能余量因子 (1.0~3.0)
-    # 当 util 进入 up_threshold 区间后，目标性能 = util * headroom。
-    # headroom 在 [up_threshold - headroom_ramp, up_threshold] 内
-    # 从 1.0 线性渐变到 headroom_factor，避免阶跃。
-    # 相当于给突发负载预留的频率余量，值越大余量越大，功耗越高。
+    # 性能余量因子（>=1）：util 达 up_threshold 后目标性能放大此系数
+    # 给突发负载预留频率余量，调大余量大、功耗高
     headroom_factor: 1.10
 
-    # headroom 过渡带宽度 (0.0~1.0)
-    # 在 [up_threshold - headroom_ramp, up_threshold] 区间内，
-    # headroom 从 1.0 线性渐变到 headroom_factor。
-    # 避免到达 up_threshold 时性能突然阶跃，减少频率振荡。
+    # headroom 过渡带宽度（0..1）：up_threshold 附近线性渐变，
+    # 避免到达阈值时性能突然阶跃
     headroom_ramp: 0.15
 
-    # 性能下限 (0.0~1.0)
-    # 目标性能永远不会低于此值，相当于频率下限。
-    # 值越高保底频率越高，卡顿越少但功耗越大。
-    # 约束：必须 <= perf_ceil
+    # 性能下限（0..1）：目标性能永不低于此值
+    # 保底频率，调高卡顿少但功耗大。必须 <= perf_ceil
     perf_floor: 0.10
 
-    # 性能上限 (0.0~1.0)
-    # 目标性能永远不会超过此值，相当于频率上限。
-    # 值为 1.0 表示允许跑到硬件最高频。
-    # 约束：必须 >= perf_floor
+    # 性能上限（0..1）：目标性能永不高于此值
+    # 1.0 = 允许跑硬件最高频。必须 >= perf_floor
     perf_ceil: 0.70
 
-    # 初始性能 (0.0~1.0)
-    # CLG 接管瞬间的初始性能值，避免从 0 缓慢爬升导致开机卡顿。
-    # 约束：必须在 [perf_floor, perf_ceil] 区间内
+    # 初始性能（0..1）：CLG 接管瞬间的起点
+    # 避免从 0 爬升导致开机卡。必须在 [perf_floor, perf_ceil] 内
     perf_init: 0.30
 
-    # 升频快速通道阈值 (0.0~1.0)
-    # 当 target_perf 超过 current_perf 的幅度大于此值时，直接快速升频。
-    # 用于应对负载突增场景（如应用冷启动）。
+    # 升频快速通道：target_perf 超过 current_perf 幅度大于此值时直接升
+    # 应对冷启动等负载突增
     up_jump_threshold: 0.35
 
-    # 滞回带升频缩放系数 (0.0~1.0)
-    # 滞回带内（down_threshold < util < up_threshold）升频时，
-    # smoothing_up 会按区间位置加权缩放（从 slow_up_scale 线性渐变到 1.0），
-    # 使靠近 down_threshold 一端升频更缓慢，靠近 up_threshold 一端接近全速。
-    # 值越小低负载端升频越保守（更省电），值越大越接近正常升频速度。
+    # 滞回带升频缩放（0..1）：滞回带内靠近 down_threshold 端升频更慢
+    # 调小低负载端更保守，更省电
     slow_up_scale: 0.02
 
-    # 滞回带降频缩放系数 (0.0~1.0)
-    # 滞回带内降频时，smoothing_down 乘以 slow_down_scale 进行缩放。
-    # 防止在临界区间来回振荡，避免高频锁定在某个频率上反复跳动。
-    slow_down_scale: 0.5
-
-    # 极低负载阈值 (0.0~1.0)
-    # 当 util 低于此值时触发快速降频（绕过常规平滑逻辑）。
-    # 用于屏幕关闭或空闲时迅速拉低频率省电。
+    # 极低负载阈值（0..1）：util 低于此值时跳过降频防抖、立即降频
+    # 息屏或空闲时迅速拉低频率
     down_fast_threshold: 0.10
 
-    # 快速降频放大倍数 (1.0~10.0)
-    # 触发快速降频时（util < down_fast_threshold），smoothing_down 乘以该倍数。
-    # 值越大空闲时降频越快，越省电。
-    down_fast_mult: 2.5
-
-    # 尖峰抑制阈值 (0.0~1.0)
-    # 单 tick 内 util 跳升幅度超过此值时，认为是瞬时尖峰而非真实负载。
-    # 增量部分会乘以 spike_decay 进行衰减，防止孤立尖峰瞬间拉满频率。
+    # 尖峰抑制阈值（0..1）：单 tick util 跳升超此值时衰减增量
+    # 防止孤立尖峰瞬间拉满频率
     spike_jump_threshold: 0.35
 
-    # 尖峰衰减比例 (0.0~1.0)
-    # 尖峰增量的保留比例：0.0 = 完全抑制（尖峰无效），1.0 = 不抑制。
-    # 值越小对尖峰的抑制越强，省电但可能影响短时突发响应。
+    # 尖峰衰减比例（0..1）：增量保留比例
+    # 0 = 完全抑制，1 = 不抑制
     spike_decay: 0.30
+
+    # 触摸升频开关：触摸时抬高大核性能上限，窗口内锁定
+    touch_boost_enabled: true
+    # 触摸升频窗口（ms）：触摸后大核保持抬高状态的时长
+    touch_boost_ms: 400
+    # 触摸升频档数：在可用频率表中向上移动的档数
+    touch_boost_tiers: 1

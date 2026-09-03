@@ -129,8 +129,11 @@ clg-writer-invalid = [CLG] P{ $pid } sysfs writer invalid (max_valid: { $max_val
 clg-freq-set = [CLG] P{ $pid } freq change: { $old_khz }MHz -> { $new_khz }MHz
 clg-freq-write-failed-cached = [CLG] P{ $pid } freq write failed, keeping cached { $cached_khz }MHz (target { $target_khz }MHz)
 clg-watchdog-release = [CLG] WATCHDOG: no load events for { $secs }s, eBPF source failed. Releasing CPU control to system defaults.
-clg-up-skipped = [CLG] P{ $pid } actual={ $cur_khz }MHz below locked { $lock_khz }MHz, skipping this raise (schedutil headroom, on-demand up)
 clg-touch-boost = [CLG] Touch boost window open: big-core perf floor={ $floor } held { $ms }ms
+clg-thermal-cap = [CLG] Thermal guard: battery={ $batt }°C / CPU={ $cpu }°C, perf ceiling capped to { $cap }% (>= { $free } exempt)
+clg-thermal-no-sensor = [CLG] Thermal guard: no CPU temperature sensor, CPU reference disabled
+clg-thermal-no-battery = [CLG] Thermal guard: battery temp node not found, CPU-only suppression
+clg-min-write-failed = [CLG] P{ $pid } failed to write scaling_min_freq={ $khz }MHz, idle floor may stay high
 
 # --- AKMode (Arknights special tuning) ---
 akmode-init = [AKMode] Arknights special tuning take over | tier={ $mode }

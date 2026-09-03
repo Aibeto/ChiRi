@@ -195,18 +195,15 @@ fn determine_mode(config: &RulesConfig, current_package: &str) -> String {
     // 白名单应用始终进特调（ChiRi 专属），不管 rules.yaml 配了什么。
     // 给该应用配的普通模式只作为特调起始档，scheduler 侧（get_ak_initial_tier）识别。
     if special_enabled {
-        if let Some(entry) = crate::common::SPECIAL_TUNED_MODES
-            .iter()
-            .find(|e| e.package == current_package)
-        {
+        if let Some(entry) = crate::common::special_tuned_entry(current_package) {
             debug!(
                 "{}",
                 t_with_args(
                     "app-detect-special-fallback",
-                    &fluent_args!("pkg" => current_package, "mode" => entry.fallback)
+                    &fluent_args!("pkg" => current_package, "mode" => entry.fallback.as_str())
                 )
             );
-            return entry.fallback.to_string();
+            return entry.fallback.clone();
         }
     }
     if !config.dynamic_enabled {
@@ -257,10 +254,10 @@ fn determine_mode(config: &RulesConfig, current_package: &str) -> String {
                 "{}",
                 t_with_args(
                     "app-detect-special-fallback",
-                    &fluent_args!("pkg" => current_package, "mode" => mode)
+                    &fluent_args!("pkg" => current_package, "mode" => mode.as_str())
                 )
             );
-            return mode.to_string();
+            return mode;
         }
     }
     let global = config.global_mode.clone();

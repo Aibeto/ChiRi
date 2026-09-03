@@ -78,11 +78,10 @@ struct ClusterState {
     boost_max: u32,
     /// scaling_max_freq 写通道缓存
     max_writer: FastWriter,
-    /// scaling_min_freq 写通道缓存
-    min_writer: FastWriter,
     /// 当前目标性能比 [0,1]，调频时换算成频率档位
     current_perf: f32,
-    /// 当前已成功写入的频率（kHz）；0 表示尚未写入成功，下次 tick 自动重试
+    /// 当前已写入的性能上限（scaling_max_freq，kHz）；0 表示尚未写入成功，下次 tick 自动重试。
+    /// 注意：这是上限而非实际频率，实际频率由 schedutil 在 [硬件最低, 上限] 内自主决定
     current_freq: u32,
     /// 降频确认计数：连续满 down_rate_limit_ticks 才执行降频
     down_wait: u32,
@@ -113,26 +112,18 @@ impl ClusterState {
         }
     }
 
-    /// 写入目标频率（锁频：scaling_max_freq 与 scaling_min_freq 都设为同一值）。
-    /// 升频先拉 max 再拉 min，降频先降 min 再降 max，保证任意中间状态满足 min <= max。
-    /// 锁频配合 schedutil governor：min=max 时 schedutil 无调频空间，频率由本控制器决定。
+    /// 写 scaling_max_freq（性能上限）。
+    /// min 已在 init 时压到硬件最低，之后只调 max。
+    /// schedutil 在 [min, max] 里自己看着办——空闲时降到地板频，忙碌时贴近 max。
+    /// 这比锁频(min=max)好的地方：不用等 160ms tick 才降频，内核微秒级就降下来了，
+    /// 空转发热大幅减少。写 max 也不用管写序问题，因为 min 恒 <= max。
     fn write_freq(&mut self, freq: u32) {
         if freq == self.current_freq {
             return;
         }
         let old_freq = self.current_freq;
-        let ok = if freq >= self.current_freq {
-            // 升频：先拉高 max 再拉高 min
-            let ok_max = self.max_writer.write_value_force(freq);
-            let ok_min = self.min_writer.write_value_force(freq);
-            ok_max && ok_min
-        } else {
-            // 降频：先降 min 再降 max
-            let ok_min = self.min_writer.write_value_force(freq);
-            let ok_max = self.max_writer.write_value_force(freq);
-            ok_max && ok_min
-        };
-        // 仅在两端均写入成功时更新缓存，失败则下次 tick 自动重试
+        let ok = self.max_writer.write_value_force(freq);
+        // 写入成功才更新缓存，失败则下次 tick 自动重试
         if ok {
             self.current_freq = freq;
             debug!(
@@ -171,22 +162,11 @@ impl ClusterState {
     }
 
     /// 频率（kHz）→ [0,1] 性能比例，与 cached_ratios 同口径：(f - fmin)/(fmax - fmin)。
-    /// 在"直接降频为当前实际频率"时用来同步 current_perf，防止状态与实际写入脱节。
+    /// 降频时用来把 current_perf 同步到实际写入的档位，防止状态与写入脱节。
     fn ratio_of_freq(&self, freq: u32) -> f32 {
         let fmin = *self.available_freqs.first().unwrap_or(&0) as f32;
         let fmax = *self.available_freqs.last().unwrap_or(&0) as f32;
         ((freq as f32) - fmin) / (fmax - fmin).max(1.0)
-    }
-
-    /// 读 policy 的当前实际频率（scaling_cur_freq，kHz）
-    fn read_cur_freq(policy_id: i32) -> Option<u32> {
-        let path = format!(
-            "/sys/devices/system/cpu/cpufreq/policy{}/scaling_cur_freq",
-            policy_id
-        );
-        fs::read_to_string(&path)
-            .ok()
-            .and_then(|s| s.trim().parse::<u32>().ok())
     }
 
     /// 将单个 policy 恢复为接管前的原始状态。
@@ -328,6 +308,12 @@ struct CoreGroupWorker {
     load_rx: mpsc::Receiver<Vec<f32>>,
     stop: Arc<AtomicBool>,
     touch: Arc<AtomicTouchState>,
+    /// 热保护性能上限（f32 bit pattern 存 AtomicU32，1.0 = 无压制）。
+    /// scheduler_ipc 线程定期采样电池/CPU 温度后写入，Worker 每次 flush 读取并 clamp
+    thermal_cap: Arc<AtomicU32>,
+    /// 压制豁免档（f32 bit pattern，0..1）：current_perf >= 该值时不钳制，
+    /// 保证任何温度下持续高负载都能到达硬件最高频
+    thermal_free_above: Arc<AtomicU32>,
 }
 
 impl CoreGroupWorker {
@@ -399,37 +385,20 @@ impl CoreGroupWorker {
                 return;
             }
 
-            // schedutil 余量检查（按需升频）：实际频率未追平当前锁定频率时，
-            // 忽略本次升频，等硬件/调度器自然追平后再升，避免提前抬过实际需求。
-            // 触摸升频不受此限制（由 touch state + flush 独立提升）。
-            let cur_freq = ClusterState::read_cur_freq(self.cluster.policy_id)
-                .unwrap_or(self.cluster.current_freq);
-            if cur_freq < self.cluster.current_freq {
-                debug!(
-                    "{}",
-                    t_with_args(
-                        "clg-up-skipped",
-                        &fluent_args!(
-                            "pid" => self.cluster.policy_id.to_string(),
-                            "cur_khz" => (cur_freq / 1000).to_string(),
-                            "lock_khz" => (self.cluster.current_freq / 1000).to_string()
-                        )
-                    )
-                );
-            } else {
-                let is_high_load = util >= self.cfg.up_threshold;
-                let is_significant_jump = target_perf > old_perf + self.cfg.up_jump_threshold;
+            // 动态上限语义：抬高 ceiling 不强制频率跳变（schedutil 按实际需求在
+            // [硬件最低, ceiling] 内取频），无需读取实际频率做余量检查，直接平滑抬升
+            let is_high_load = util >= self.cfg.up_threshold;
+            let is_significant_jump = target_perf > old_perf + self.cfg.up_jump_threshold;
 
-                if is_high_load || is_significant_jump {
-                    self.cluster.current_perf += (target_perf - old_perf) * self.cfg.smoothing_up;
-                } else {
-                    // 滞回带内升频：速率随 util 接近 up_threshold 线性提升
-                    let span = (self.cfg.up_threshold - self.cfg.down_threshold).max(1e-6);
-                    let gap = ((util - self.cfg.down_threshold) / span).clamp(0.0, 1.0);
-                    let speed = self.cfg.smoothing_up
-                        * (self.cfg.slow_up_scale + (1.0 - self.cfg.slow_up_scale) * gap);
-                    self.cluster.current_perf += (target_perf - old_perf) * speed;
-                }
+            if is_high_load || is_significant_jump {
+                self.cluster.current_perf += (target_perf - old_perf) * self.cfg.smoothing_up;
+            } else {
+                // 滞回带内升频：速率随 util 接近 up_threshold 线性提升
+                let span = (self.cfg.up_threshold - self.cfg.down_threshold).max(1e-6);
+                let gap = ((util - self.cfg.down_threshold) / span).clamp(0.0, 1.0);
+                let speed = self.cfg.smoothing_up
+                    * (self.cfg.slow_up_scale + (1.0 - self.cfg.slow_up_scale) * gap);
+                self.cluster.current_perf += (target_perf - old_perf) * speed;
             }
         } else {
             self.cluster.up_wait = 0;
@@ -438,23 +407,19 @@ impl CoreGroupWorker {
             if self.cluster.down_wait >= self.cfg.down_rate_limit_ticks
                 || util < self.cfg.down_fast_threshold
             {
-                // 直接降频为当前目标频率（敢于降频，能效优先）：
-                // 不做平滑渐变，一步到位写目标档；目标不高于当前实际频率，
-                // 避免降频写序（min 先降）中间态反而瞬时抬升
-                let mut target_freq = self.cluster.find_nearest_freq(target_perf);
-                if let Some(actual) = ClusterState::read_cur_freq(self.cluster.policy_id) {
-                    if actual < target_freq {
-                        target_freq = actual;
-                    }
-                }
+                // 直接降上限（能效优先）：不做平滑渐变，一步到位写目标档。
+                // 降 ceiling 只收窄 schedutil 可用区间，不会把实际频率抬上去，
+                // 无需读取 scaling_cur_freq 做钳制
+                let target_freq = self.cluster.find_nearest_freq(target_perf);
                 self.cluster.current_perf = self.cluster.ratio_of_freq(target_freq);
             }
         }
     }
 
-    /// backset 统一写频：把当前目标性能比换算成频率档位并写回 sysfs。
-    /// 触摸升频在写频前由 Worker 检查共享状态；触摸事件经 on_touch 广播
-    /// 空负载包唤醒 Worker，使本次 flush 在触摸后立即执行、升频即时生效。
+    /// 把 current_perf 转成实际频率并写 sysfs。每 tick 调一次。
+    /// 执行顺序：触摸升频检查 → 热保护 clamp → 性能区间 clamp → 写频。
+    /// 热保护在最后一步 clamp：低于豁免档才压，高于豁免档不管——
+    /// 持续高负载会平滑涨到豁免档以上，这时温度再高也不挡路（内核兜底）。
     fn flush(&mut self, core_utils: &[f32], log_counter: &mut u32) {
         // 触摸升频：Worker 自主检查共享的 AtomicTouchState
         if self.cfg.touch_boost_enabled {
@@ -467,6 +432,13 @@ impl CoreGroupWorker {
             .cluster
             .current_perf
             .clamp(self.cfg.perf_floor, self.cfg.perf_ceil);
+        // 热压制（带豁免带）：cap 由 scheduler_ipc 按电池/CPU 温度写入，允许击穿
+        // perf_floor（发热优先于保底性能）；>= 豁免档不钳制，保留到达最高频的能力
+        let cap = f32::from_bits(self.thermal_cap.load(Ordering::Relaxed));
+        let free_above = f32::from_bits(self.thermal_free_above.load(Ordering::Relaxed));
+        if self.cluster.current_perf < free_above {
+            self.cluster.current_perf = self.cluster.current_perf.min(cap);
+        }
         let target_freq = self.cluster.find_nearest_freq(self.cluster.current_perf);
         self.cluster.write_freq(target_freq);
 
@@ -502,6 +474,8 @@ impl CoreGroupWorker {
         boost_frequencies: &[u32],
         core_ranges: crate::common::CoreGroupRanges,
         touch: Arc<AtomicTouchState>,
+        thermal_cap: Arc<AtomicU32>,
+        thermal_free_above: Arc<AtomicU32>,
         stop: Arc<AtomicBool>,
     ) -> Option<(PolicyRestore, (JoinHandle<()>, mpsc::SyncSender<Vec<f32>>))> {
         let pid = policy_id;
@@ -554,7 +528,7 @@ impl CoreGroupWorker {
             "/sys/devices/system/cpu/cpufreq/policy{}/scaling_max_freq",
             pid
         ));
-        let min_writer = FastWriter::new(format!(
+        let mut min_writer = FastWriter::new(format!(
             "/sys/devices/system/cpu/cpufreq/policy{}/scaling_min_freq",
             pid
         ));
@@ -597,6 +571,19 @@ impl CoreGroupWorker {
         // 写入 schedutil governor
         let _ = crate::utils::try_write_file(&gov_path, "schedutil");
 
+        // 动态上限接管：min 一次性压到硬件最低并保持（空闲时 schedutil 可降到地板频率），
+        // 之后仅由 write_freq 调整 max。先降 min 再定 max，保证中间态 min <= max。
+        let hw_min = *freqs.first().unwrap();
+        if !min_writer.write_value_force(hw_min) {
+            warn!(
+                "{}",
+                t_with_args(
+                    "clg-min-write-failed",
+                    &fluent_args!("pid" => pid.to_string(), "khz" => (hw_min / 1000).to_string())
+                )
+            );
+        }
+
         let init_perf = cfg.perf_init.clamp(cfg.perf_floor, cfg.perf_ceil);
         let boost_max = boost_frequencies.iter().copied().max().unwrap_or(0);
         let mut cluster = ClusterState {
@@ -606,7 +593,6 @@ impl CoreGroupWorker {
             cached_ratios,
             boost_max,
             max_writer,
-            min_writer,
             current_perf: init_perf,
             current_freq: 0,
             down_wait: 0,
@@ -615,8 +601,8 @@ impl CoreGroupWorker {
         };
 
         let init_freq = cluster.find_nearest_freq(init_perf);
-        let init_ok = cluster.max_writer.write_value_force(init_freq)
-            && cluster.min_writer.write_value_force(init_freq);
+        // 初始接管只写 max=perf_init 档（min 已在上面压到硬件最低）
+        let init_ok = cluster.max_writer.write_value_force(init_freq);
         if init_ok {
             cluster.current_freq = init_freq;
         }
@@ -652,6 +638,8 @@ impl CoreGroupWorker {
             load_rx,
             stop: stop.clone(),
             touch,
+            thermal_cap,
+            thermal_free_above,
         };
 
         let handle = thread::Builder::new()
@@ -716,6 +704,11 @@ pub struct CpuLoadGovernor {
     stop: Arc<AtomicBool>,
     /// 触摸升频状态（跨线程共享，Worker 自主读取）
     touch: Arc<AtomicTouchState>,
+    /// 热保护性能上限（f32 bit pattern，1.0 = 无压制）。
+    /// scheduler_ipc 按电池/CPU 温度更新，Worker 每次 flush 读取；跨 init/reload 生命周期保持
+    thermal_cap: Arc<AtomicU32>,
+    /// 压制豁免档（f32 bit pattern）：ceiling >= 豁免档不钳制，保证可达硬件最高频
+    thermal_free_above: Arc<AtomicU32>,
     /// 是否处于接管状态（至少一个 Worker 启动成功才为 true）
     active: bool,
 }
@@ -729,8 +722,19 @@ impl CpuLoadGovernor {
             restores: Vec::new(),
             stop: Arc::new(AtomicBool::new(false)),
             touch: Arc::new(AtomicTouchState::new()),
+            thermal_cap: Arc::new(AtomicU32::new(1.0_f32.to_bits())),
+            thermal_free_above: Arc::new(AtomicU32::new(0.80_f32.to_bits())),
             active: false,
         }
+    }
+
+    /// 下发热保护参数。scheduler_ipc 每 2s 调一次。
+    /// Worker flush 时读这两个原子量：低于豁免档才压到 cap，高于就不管。
+    pub fn set_thermal_limits(&self, cap: f32, free_above: f32) {
+        self.thermal_cap
+            .store(cap.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
+        self.thermal_free_above
+            .store(free_above.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
     }
 
     /// CLG 当前是否已接管 CPU 频率
@@ -738,11 +742,8 @@ impl CpuLoadGovernor {
         self.active
     }
 
-    /// 接管全部 cpufreq policy：
-    /// 1. 先停止旧 Worker 并恢复系统状态；
-    /// 2. 逐个 policy 读取可用频率、记录原始状态快照；
-    /// 3. 为每个 policy 创建独立 Worker 线程（写入 schedutil governor 并按 perf_init 锁频）；
-    /// 4. 任一 Worker 启动成功即标记 active。
+    /// 接管所有 cpufreq policy：停旧 Worker → 快照原始状态 → 写 schedutil →
+    /// min 压到硬件最低 → max 按 perf_init 设初始值 → 为每个 policy 起 Worker 线程。
     pub fn init_policies(&mut self, gov_cfg: &CpuLoadGovernorConfig) {
         self.stop_workers();
         self.cfg = gov_cfg.clone();
@@ -751,7 +752,7 @@ impl CpuLoadGovernor {
         let policies = crate::chiri::get_cpu_policies();
         let core_ranges = crate::common::chiri_core_ranges();
 
-        // 全新 stop/touch 实例
+        // 全新 stop/touch 实例；thermal_cap 跨 init 生命周期保持（字段本身复用）
         let stop = Arc::new(AtomicBool::new(false));
         let touch = Arc::new(AtomicTouchState::new());
 
@@ -762,6 +763,8 @@ impl CpuLoadGovernor {
                 &policy.boost_frequencies,
                 core_ranges.clone(),
                 touch.clone(),
+                self.thermal_cap.clone(),
+                self.thermal_free_above.clone(),
                 stop.clone(),
             );
 
@@ -828,6 +831,8 @@ impl CpuLoadGovernor {
                 &policy.boost_frequencies,
                 core_ranges.clone(),
                 touch.clone(),
+                self.thermal_cap.clone(),
+                self.thermal_free_above.clone(),
                 stop.clone(),
             );
             if let Some((restore, (handle, load_tx))) = result {

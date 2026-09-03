@@ -219,7 +219,7 @@ impl CpuLoadGovernor {
                 hw_max: *freqs.last().unwrap(),
             });
 
-            let _ = crate::utils::try_write_file(&gov_path, "schedutil");
+            let _ = crate::utils::try_write_file(&gov_path, "performance");
 
             let init_perf = self.cfg.perf_init.clamp(self.cfg.perf_floor, self.cfg.perf_ceil);
             let boost_max = policy.boost_frequencies.iter().copied().max().unwrap_or(0);

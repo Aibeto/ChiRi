@@ -1,0 +1,18 @@
+# ChiRi 内部特调白名单 —— 经 include_str! 编译进守护进程二进制。
+# 运行时磁盘上任何同名文件都只是导出快照，改动不生效（防篡改）。
+#
+# 格式：每行一条 `匹配器:模式列表(逗号分隔):优先回退模式`
+#   匹配器     = 精确包名；或 "re:" 前缀 + 正则表达式（匹配器内不要包含 ':'，
+#                正则自身忽略大小写请写 (?i) 前缀）
+#   模式列表   = 该应用可用的特调模式，须已在 chiri Config::get_mode 注册
+#   优先回退   = 用户未显式配置该应用时采用的模式，必须在模式列表内
+#
+# 匹配顺序：精确包名优先（按文件内顺序），未命中再按正则条目（按文件内顺序）。
+# WebUI 导出的 special_tuned.txt 只包含精确条目（正则条目无法按包名精确查找）。
+#
+# 明日方舟国服
+com.hypergryph.arknights:akmode:akmode
+# 明日方舟（Yostar）
+com.YoStarJP.Arknights:akmode:akmode
+# 兜底：任何包名含 arknights（忽略大小写）的应用，覆盖台服/Mod 变体等
+re:(?i)arknights:akmode:akmode

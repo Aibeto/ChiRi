@@ -211,3 +211,113 @@ pub fn update_level(level_str: &str) {
         }
     }
 }
+
+// ════════════════════════════════════════════════════════════════
+//  辅助文件日志：功耗监控 / 前台监控独立日志
+// ════════════════════════════════════════════════════════════════
+
+/// 功耗监控日志路径（CSV 格式，供 WebUI/脚本分析）
+const POWER_LOG_REL: &str = "logs/power.log";
+/// 前台监控日志路径
+const FG_LOG_REL: &str = "logs/foreground.log";
+/// 辅助日志单文件上限：1MB，保留 1 份备份（够用，不浪费磁盘）
+const AUX_LOG_MAX_BYTES: u64 = 1024 * 1024;
+
+/// 向辅助日志文件追加一行（CSV 格式），文件不存在自动创建含表头。
+/// 写失败静默跳过，不阻塞主流程。
+pub fn append_aux_log(rel_path: &str, header: &str, line: &str) {
+    let root = common::get_module_root();
+    let path = root.join(rel_path);
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    // 首次写入：文件不存在就先写表头
+    if !path.exists() {
+        if let Ok(mut f) = fs::OpenOptions::new().create(true).write(true).open(&path) {
+            let _ = f.write_all(header.as_bytes());
+            let _ = f.write_all(b"\n");
+            let _ = f.flush();
+        }
+    }
+    // 超限时简单轮转：path -> path.1
+    if fs::metadata(&path).map(|m| m.len()).unwrap_or(0) >= AUX_LOG_MAX_BYTES {
+        let bak = root.join(format!("{}.1", rel_path));
+        let _ = fs::remove_file(&bak);
+        let _ = fs::rename(&path, &bak);
+        if let Ok(mut f) = fs::OpenOptions::new().create(true).write(true).open(&path) {
+            let _ = f.write_all(header.as_bytes());
+            let _ = f.write_all(b"\n");
+            let _ = f.flush();
+        }
+    }
+    if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = f.write_all(line.as_bytes());
+        let _ = f.write_all(b"\n");
+        let _ = f.flush();
+    }
+}
+
+/// 写功耗监控日志（CSV 一行）。
+/// 字段：timestamp,batt_temp,cpu_temp,thermal_cap_pct,thermal_free_pct,mode,screen_on,clg_active
+pub fn log_power(
+    batt_temp: &str,
+    cpu_temp: &str,
+    thermal_cap: &str,
+    thermal_free: &str,
+    mode: &str,
+    screen_on: bool,
+    clg_active: bool,
+) {
+    let ts = format_now();
+    let header =
+        "timestamp,batt_temp,cpu_temp,thermal_cap_pct,thermal_free_pct,mode,screen_on,clg_active";
+    let line = format!(
+        "{},{},{},{},{},{},{},{}",
+        ts,
+        batt_temp,
+        cpu_temp,
+        thermal_cap,
+        thermal_free,
+        mode,
+        if screen_on { "1" } else { "0" },
+        if clg_active { "1" } else { "0" },
+    );
+    append_aux_log(POWER_LOG_REL, header, &line);
+}
+
+/// 写前台监控日志（CSV 一行）。
+/// 字段：timestamp,package,old_mode,new_mode,temperature,screen_on,active_governor
+pub fn log_foreground(
+    package: &str,
+    old_mode: &str,
+    new_mode: &str,
+    temperature: f64,
+    screen_on: bool,
+    active_governor: &str,
+) {
+    let ts = format_now();
+    let header = "timestamp,package,old_mode,new_mode,temperature,screen_on,active_governor";
+    let line = format!(
+        "{},{},{},{},{:.1},{},{}",
+        ts,
+        package,
+        old_mode,
+        new_mode,
+        temperature,
+        if screen_on { "1" } else { "0" },
+        active_governor,
+    );
+    append_aux_log(FG_LOG_REL, header, &line);
+}
+
+/// HH:MM:SS.mmm 格式本地时间（避免引入 chrono 依赖）
+fn format_now() -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let total_sec = now.as_secs() % 86400;
+    let h = total_sec / 3600;
+    let m = (total_sec % 3600) / 60;
+    let s = total_sec % 60;
+    format!("{:02}:{:02}:{:02}.{:03}", h, m, s, now.subsec_millis())
+}

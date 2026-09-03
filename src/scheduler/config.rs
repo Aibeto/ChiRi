@@ -232,9 +232,19 @@ pub struct Config {
 }
 
 impl Config {
-    pub fn from_file(path: &str) -> anyhow::Result<Self> {
-        let content = std::fs::read_to_string(path)?;
-        let config: Config = serde_yaml::from_str(&content)?;
+    /// 加载生效配置：基准内容编译期嵌入二进制（common::embedded_config_str，
+    /// 非 ChiRi SoC 用默认 config.yaml，内容与原磁盘文件一致，防篡改），
+    /// 磁盘文件只提供 meta 覆盖（loglevel/language）。`path` 为生效配置的
+    /// 磁盘快照路径（common::get_config_path()），缺失时 meta 回退嵌入默认值。
+    pub fn load(path: &str) -> anyhow::Result<Self> {
+        let mut config: Config = serde_yaml::from_str(crate::common::embedded_config_str())?;
+        let (loglevel, language) = crate::common::read_external_meta(std::path::Path::new(path));
+        if let Some(v) = loglevel {
+            config.meta.loglevel = v;
+        }
+        if let Some(v) = language {
+            config.meta.language = v;
+        }
         Ok(config)
     }
 
