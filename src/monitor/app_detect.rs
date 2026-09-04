@@ -84,6 +84,12 @@ pub fn get_current_pid() -> i32 {
     CURRENT_PID.load(Ordering::Relaxed)
 }
 
+/// 当前前台包名（实时，含同模式切换——set_current_package 在包名变化即更新）。
+/// 供 scheduler_ipc 的 devimp snap 行等消费，避免各处自行维护过期副本。
+pub fn get_current_package() -> String {
+    CURRENT_PACKAGE.lock().unwrap().clone()
+}
+
 // 在检测到新包名时更新它
 fn set_current_package(pkg: &str, pid: i32) {
     *CURRENT_PACKAGE.lock().unwrap() = pkg.to_string();

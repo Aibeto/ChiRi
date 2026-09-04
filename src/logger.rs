@@ -732,10 +732,8 @@ pub fn devimp_snap(
     devimp_write_line(r);
 }
 
-/// place 行：线程放置与占用率快照（每再平衡轮，前台 + Top-K 后台逐线程一行）。
-/// 低开销亲和版（affinity.rs）已不再逐线程输出 place（改以 aff 行追踪迁移、
-/// core 行追踪核水位），此 API 保留待需要逐线程放置明细时恢复。
-#[allow(dead_code, clippy::too_many_arguments)]
+/// place 行：线程放置快照（低频，affinity 缓存数据输出：包名/线程名/落点核）
+#[allow(clippy::too_many_arguments)]
 pub fn devimp_place(pid: i32, pkg: &str, tid: i32, comm: &str, core: i32, util_pct: &str) {
     let mut r = DevRow::new("place");
     r.set(D_PID, pid.to_string())

@@ -497,8 +497,11 @@ pub fn start_scheduler_thread(
             let mut last_load_event = Instant::now();
             // 最近一次 SystemLoadUpdate 的逐核 util 快照（按核亲和选核输入）
             let mut last_core_utils: Vec<f32> = Vec::new();
-            // 最近一次前台包名（devimp snap 行记录用，ModeChange 事件更新）
-            let mut last_fg_package = String::new();
+            // 温度缓存（1s snap 块读取一次，status/devimp/thermal 三处共用）：
+            // 避免电池/CPU 温度文件每秒被读 2 遍（thermal 2s 块复用 ≤1s 旧值，
+            // 温度变化秒级，对带回滞的判定无影响）
+            let mut last_batt_temp: Option<f32> = None;
+            let mut last_cpu_temp: Option<f32> = None;
             let loop_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             loop {
                 // 当前模式文件自愈：每 5 秒重写一次（即便内容未变也重写），
@@ -589,14 +592,20 @@ pub fn start_scheduler_thread(
                             .unwrap_or_else(|| "-".to_string())
                     };
                     let current_mode = mode_clone.lock().unwrap().clone();
+                    // 温度本秒读取一次，status/devimp/thermal（2s）三处共用
+                    last_batt_temp = if batt_sensor_exists { read_battery_temp() } else { None };
+                    last_cpu_temp = temp_sensor_path
+                        .as_ref()
+                        .and_then(|p| crate::utils::read_f64_from_file(p).ok())
+                        .map(|v| (v / 1000.0) as f32);
+                    // 前台包名实时取自 app_detect（含同模式切换；ModeChange 仅在
+                    // 模式变化时才有事件，用事件维护会写过期包名）
+                    let fg_package = crate::monitor::app_detect::get_current_package();
                     crate::logger::status_log_snapshot(
                         &current_mode,
                         is_screen_on,
-                        read_battery_temp(),
-                        temp_sensor_path
-                            .as_ref()
-                            .and_then(|p| crate::utils::read_f64_from_file(p).ok())
-                            .map(|v| (v / 1000.0) as f32),
+                        last_batt_temp,
+                        last_cpu_temp,
                         &format!("{:.0}", thermal_cap_current * 100.0),
                         &format!("{:.0}", thermal_free_current * 100.0),
                         cpu_governor.is_active(),
@@ -616,15 +625,9 @@ pub fn start_scheduler_thread(
                     if crate::logger::devimp_active() {
                         crate::logger::devimp_snap(
                             is_screen_on,
-                            &last_fg_package,
-                            &fmt_opt(read_battery_temp(), 1),
-                            &fmt_opt(
-                                temp_sensor_path
-                                    .as_ref()
-                                    .and_then(|p| crate::utils::read_f64_from_file(p).ok())
-                                    .map(|v| (v / 1000.0) as f32),
-                                1,
-                            ),
+                            &fg_package,
+                            &fmt_opt(last_batt_temp, 1),
+                            &fmt_opt(last_cpu_temp, 1),
                             &format!("{:.0}", thermal_cap_current * 100.0),
                             cpu_governor.is_active(),
                             &fmt_opt(Some(tm.psi_cpu_some()), 2),
@@ -679,11 +682,10 @@ pub fn start_scheduler_thread(
                         )
                     };
                     let cur = thermal_cap_current;
-                    let batt_t = if batt_sensor_exists { read_battery_temp() } else { None };
-                    let cpu_t = temp_sensor_path
-                        .as_ref()
-                        .and_then(|p| crate::utils::read_f64_from_file(p).ok())
-                        .map(|v| (v / 1000.0) as f32);
+                    // 复用 snap 块（1s）缓存的温度，不再重复读文件（≤1s 旧值，
+                    // 对带回滞的秒级热判定无影响）
+                    let batt_t = last_batt_temp;
+                    let cpu_t = last_cpu_temp;
                     let new_cap = if !enabled {
                         1.0
                     } else {
@@ -972,7 +974,6 @@ pub fn start_scheduler_thread(
                             *current_mode_lock = mode.clone();
                             drop(current_mode_lock);
 
-                            last_fg_package = package_name.clone();
                             crate::logger::set_devimp_mode(&mode);
                             crate::logger::devimp_event(
                                 "mode_change",

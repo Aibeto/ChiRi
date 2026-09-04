@@ -251,6 +251,8 @@ fn clk_tck() -> f32 {
 struct ThreadState {
     /// 归属进程 PID（后台候选建档时为 0）
     pid: i32,
+    /// 线程名（首见 stat 采样缓存，devimp place 行复用，避免重复读 stat）
+    comm: String,
     /// 前台关键线程（prime 池）；后台为 false
     is_key: bool,
     /// 当前钉核号；-1 = 未钉
@@ -293,6 +295,9 @@ pub struct AffinityManager {
     last_fg_pid: i32,
     last_boost: bool,
     self_pid: u32,
+    /// 前台进程 cmdline 缓存（每轮 rebalance 刷新一次，aff/place 行共用，
+    /// 避免每次钉核重读 /proc/<pid>/cmdline）
+    fg_cmdline: String,
 }
 
 impl AffinityManager {
@@ -315,6 +320,7 @@ impl AffinityManager {
             last_fg_pid: 0,
             last_boost: false,
             self_pid: std::process::id(),
+            fg_cmdline: String::new(),
         }
     }
 
@@ -460,7 +466,17 @@ impl AffinityManager {
         }
     }
 
-    fn pin_core(&mut self, tid: i32, core: usize, prev_home: i16, pid: i32, reason: &str) {
+    /// 钉线程到单核。`pkg` 由调用方传入（前台为缓存的 fg_cmdline，后台为 "-"），
+    /// 避免每次钉核都重读 /proc cmdline。
+    fn pin_core(
+        &mut self,
+        tid: i32,
+        core: usize,
+        prev_home: i16,
+        pid: i32,
+        pkg: &str,
+        reason: &str,
+    ) {
         if !set_tid_affinity(tid, &[core]) {
             return;
         }
@@ -472,15 +488,10 @@ impl AffinityManager {
             st.home = core as i16;
             st.last_move = Instant::now();
         }
-        let cmdline = if pid > 0 {
-            read_cmdline(pid)
-        } else {
-            "-".to_string()
-        };
         crate::logger::devimp_aff(
             if pid == 0 { "promote" } else { "pin" },
             pid,
-            &cmdline,
+            pkg,
             tid,
             "-",
             &fmt_home(prev_home),
@@ -490,7 +501,10 @@ impl AffinityManager {
         );
     }
 
-    fn unpin_core(&mut self, tid: i32, prev_home: i16, pid: i32) {
+    /// 解除单核钉定：恢复全核掩码。`pkg` 由调用方传入（当前前台线程传缓存
+    /// fg_cmdline；cleanup/demote 场景 pid 可能已不属于当前前台，传 "-" 以免
+    /// 日志错误归属）。
+    fn unpin_core(&mut self, tid: i32, prev_home: i16, pid: i32, pkg: &str) {
         let ranges = crate::common::chiri_core_ranges();
         let all: Vec<usize> = (0..ranges.prime.end.max(ranges.big.end)).collect();
         if prev_home >= 0 {
@@ -503,7 +517,7 @@ impl AffinityManager {
             st.last_busy = None;
         }
         if set_tid_affinity(tid, &all) {
-            crate::logger::devimp_aff("restore", pid, "-", tid, "-", "-", "full", "-", "reset");
+            crate::logger::devimp_aff("restore", pid, pkg, tid, "-", "-", "full", "-", "reset");
         }
     }
 
@@ -522,7 +536,7 @@ impl AffinityManager {
             let _ = self.move_tid_group(tid, &orig);
         }
         if home >= 0 {
-            self.unpin_core(tid, home, pid);
+            self.unpin_core(tid, home, pid, "-");
         }
         self.threads.remove(&tid);
     }
@@ -568,12 +582,16 @@ impl AffinityManager {
         // —— 前台：每轮 1 次 read_dir，新增线程才读 stat ——
         if fg_pid > 0 {
             let fg_cmdline = read_cmdline(fg_pid);
+            // cmdline 缓存：aff/place 行共用，钉核不再重读 /proc
+            self.fg_cmdline = fg_cmdline.clone();
             let fg_ok =
                 !fg_cmdline.is_empty() && !crate::common::is_affinity_blacklisted(&fg_cmdline);
             let pin_fg = fg_ok && boost && screen_on;
 
             if fg_ok {
                 let task_dir = format!("/proc/{fg_pid}/task");
+                // 每轮克隆一次供两处 pin_core 复用（避免分支内重复克隆）
+                let pkg = self.fg_cmdline.clone();
                 match std::fs::read_dir(&task_dir) {
                     Ok(rd) => {
                         let mut seen = HashSet::new();
@@ -587,6 +605,7 @@ impl AffinityManager {
                             let fresh = !self.threads.contains_key(&tid);
                             let st = self.threads.entry(tid).or_insert_with(|| ThreadState {
                                 pid: fg_pid,
+                                comm: String::new(),
                                 is_key: false,
                                 home: -1,
                                 promoted: false,
@@ -602,16 +621,18 @@ impl AffinityManager {
                             // tid 归属变化（PID 复用）视作新线程
                             if st.pid != fg_pid {
                                 st.pid = fg_pid;
+                                st.comm.clear();
                                 st.home = -1;
                                 st.promoted = false;
                                 st.moved_group = false;
                                 st.last_move = now - MIN_MIGRATE_INTERVAL;
                             }
                             st.last_seen = now;
-                            // 新增线程才读 stat（判关键线程 / 建档 ticks）
+                            // 新增线程才读 stat（判关键线程 / 建档 ticks + comm 缓存）
                             if fresh || st.last_ticks == 0 {
                                 if let Some(s) = sample_one_tid(tid) {
                                     st.is_key = is_key_thread(tid, fg_pid, &s.comm);
+                                    st.comm = s.comm;
                                     st.last_ticks = s.ticks;
                                     st.last_sample = now;
                                 }
@@ -625,18 +646,25 @@ impl AffinityManager {
                             if pin_fg {
                                 if !core_ok {
                                     if let Some(core) = self.pick_core(pool) {
-                                        self.pin_core(tid, core, home, fg_pid, "fg_pin");
+                                        self.pin_core(tid, core, home, fg_pid, &pkg, "fg_pin");
                                     }
                                 } else if now.duration_since(st.last_move) >= MIN_MIGRATE_INTERVAL
                                     && self.core_utils.get(home as usize).copied().unwrap_or(0.0)
                                         > HOME_OVERLOAD_UTIL
                                 {
                                     if let Some(core) = self.pick_core(pool) {
-                                        self.pin_core(tid, core, home, fg_pid, "home_overload");
+                                        self.pin_core(
+                                            tid,
+                                            core,
+                                            home,
+                                            fg_pid,
+                                            &pkg,
+                                            "home_overload",
+                                        );
                                     }
                                 }
                             } else if home >= 0 {
-                                self.unpin_core(tid, home, fg_pid);
+                                self.unpin_core(tid, home, fg_pid, &pkg);
                             }
                         }
                         // 已消失线程：立即清理释放钉核计数
@@ -713,123 +741,127 @@ impl AffinityManager {
                         }
                     }
                 }
-                if bg.is_empty() {
-                    return;
-                }
-                let little_max = ranges
-                    .little
-                    .clone()
-                    .filter_map(|c| self.core_utils.get(c).copied())
-                    .fold(0.0_f32, f32::max);
-                let big_max = ranges
-                    .big
-                    .clone()
-                    .filter_map(|c| self.core_utils.get(c).copied())
-                    .fold(0.0_f32, f32::max);
-                let promote_thresh = if little_max > LITTLE_HIGH_WATER {
-                    LITTLE_PROMOTE_UTIL_PCT
-                } else {
-                    PROMOTE_UTIL_PCT
-                };
-                let big_pressure = boost && big_max > BIG_HIGH_WATER;
-                let clk = clk_tck();
-                let n = bg.len();
-                self.bg_cursor %= n;
-                let end = (self.bg_cursor + BG_SCAN_WINDOW).min(n);
-                for (tid, group) in &bg[self.bg_cursor..end] {
-                    // 已 promote / 前台线程跳过（前者走复查，后者走前台路径）
-                    if let Some(st) = self.threads.get(tid) {
-                        if st.promoted || st.pid > 0 {
+                // bg 为空只跳过候选扫描：不得 return——否则会跳过 rebalance 尾部的
+                // 失联清理（promoted 线程将滞留大核无法 demote）与 devimp 输出
+                if !bg.is_empty() {
+                    let little_max = ranges
+                        .little
+                        .clone()
+                        .filter_map(|c| self.core_utils.get(c).copied())
+                        .fold(0.0_f32, f32::max);
+                    let big_max = ranges
+                        .big
+                        .clone()
+                        .filter_map(|c| self.core_utils.get(c).copied())
+                        .fold(0.0_f32, f32::max);
+                    let promote_thresh = if little_max > LITTLE_HIGH_WATER {
+                        LITTLE_PROMOTE_UTIL_PCT
+                    } else {
+                        PROMOTE_UTIL_PCT
+                    };
+                    let big_pressure = boost && big_max > BIG_HIGH_WATER;
+                    let clk = clk_tck();
+                    let n = bg.len();
+                    self.bg_cursor %= n;
+                    let end = (self.bg_cursor + BG_SCAN_WINDOW).min(n);
+                    for (tid, group) in &bg[self.bg_cursor..end] {
+                        // 已 promote / 前台线程跳过（前者走复查，后者走前台路径）
+                        if let Some(st) = self.threads.get(tid) {
+                            if st.promoted || st.pid > 0 {
+                                continue;
+                            }
+                        }
+                        let Some(s) = sample_one_tid(*tid) else {
+                            continue;
+                        };
+                        if crate::common::is_affinity_blacklisted(&s.comm) {
                             continue;
                         }
-                    }
-                    let Some(s) = sample_one_tid(*tid) else {
-                        continue;
-                    };
-                    if crate::common::is_affinity_blacklisted(&s.comm) {
-                        continue;
-                    }
-                    // 进程级黑名单：首见读一次并缓存
-                    if !self.bg_checked.contains(tid) {
-                        if crate::common::is_affinity_blacklisted(&read_cmdline(*tid)) {
+                        // 进程级黑名单：首见读一次并缓存
+                        if !self.bg_checked.contains(tid) {
+                            if crate::common::is_affinity_blacklisted(&read_cmdline(*tid)) {
+                                self.bg_checked.insert(*tid);
+                                continue;
+                            }
                             self.bg_checked.insert(*tid);
-                            continue;
                         }
-                        self.bg_checked.insert(*tid);
-                    }
-                    let busy = match self.threads.get_mut(tid) {
-                        // 首见：建档并记基准，本轮无 util 不判 promote
-                        None => {
-                            self.threads.insert(
-                                *tid,
-                                ThreadState {
-                                    pid: 0,
-                                    is_key: false,
-                                    home: -1,
-                                    promoted: false,
-                                    orig_group: group.clone(),
-                                    moved_group: false,
-                                    last_busy: None,
-                                    low_streak: 0,
-                                    last_ticks: s.ticks,
-                                    last_sample: now,
-                                    last_move: now - MIN_MIGRATE_INTERVAL,
-                                    last_seen: now,
-                                },
-                            );
-                            continue;
-                        }
-                        // 再次命中：窗口 util = ticks 增量/间隔秒/CLK_TCK×100
-                        Some(st) => {
-                            st.last_seen = now;
-                            let dt = now.duration_since(st.last_sample).as_secs_f32().max(0.001);
-                            let util = ((s.ticks.saturating_sub(st.last_ticks)) as f32 / clk / dt
-                                * 100.0)
-                                .min(100.0);
-                            st.last_ticks = s.ticks;
-                            st.last_sample = now;
-                            // 两窗防抖（不依赖采样间隔——分片下同线程两次被采到可能
-                            // 相隔很久）：本次忙且上次采样忙 → promote；期间采到低负载
-                            // 则清除忙标记，防止瞬时忙/抖动被 promote。
-                            let was_busy = st.last_busy.is_some();
-                            if util >= promote_thresh {
-                                st.last_busy = Some(now);
-                            } else if util < DEMOTE_UTIL_PCT {
-                                st.last_busy = None;
+                        let busy = match self.threads.get_mut(tid) {
+                            // 首见：建档并记基准，本轮无 util 不判 promote
+                            None => {
+                                self.threads.insert(
+                                    *tid,
+                                    ThreadState {
+                                        pid: 0,
+                                        comm: s.comm,
+                                        is_key: false,
+                                        home: -1,
+                                        promoted: false,
+                                        orig_group: group.clone(),
+                                        moved_group: false,
+                                        last_busy: None,
+                                        low_streak: 0,
+                                        last_ticks: s.ticks,
+                                        last_sample: now,
+                                        last_move: now - MIN_MIGRATE_INTERVAL,
+                                        last_seen: now,
+                                    },
+                                );
+                                continue;
                             }
-                            // 滞回带（demote..promote 之间）保持上次忙标记不变
-                            if was_busy && util >= promote_thresh && !big_pressure {
-                                Some(util)
-                            } else {
-                                None
+                            // 再次命中：窗口 util = ticks 增量/间隔秒/CLK_TCK×100
+                            Some(st) => {
+                                st.last_seen = now;
+                                let dt =
+                                    now.duration_since(st.last_sample).as_secs_f32().max(0.001);
+                                let util =
+                                    ((s.ticks.saturating_sub(st.last_ticks)) as f32 / clk / dt
+                                        * 100.0)
+                                        .min(100.0);
+                                st.last_ticks = s.ticks;
+                                st.last_sample = now;
+                                // 两窗防抖（不依赖采样间隔——分片下同线程两次被采到可能
+                                // 相隔很久）：本次忙且上次采样忙 → promote；期间采到低负载
+                                // 则清除忙标记，防止瞬时忙/抖动被 promote。
+                                let was_busy = st.last_busy.is_some();
+                                if util >= promote_thresh {
+                                    st.last_busy = Some(now);
+                                } else if util < DEMOTE_UTIL_PCT {
+                                    st.last_busy = None;
+                                }
+                                // 滞回带（demote..promote 之间）保持上次忙标记不变
+                                if was_busy && util >= promote_thresh && !big_pressure {
+                                    Some(util)
+                                } else {
+                                    None
+                                }
                             }
-                        }
-                    };
-                    if let Some(util) = busy {
-                        // 移入 top-app 使 big 核可见，再按当前核心占用选核钉定
-                        let moved = self.move_tid_group(*tid, GROUP_TOP_APP);
-                        if let Some(st) = self.threads.get_mut(tid) {
-                            st.moved_group = moved;
-                            st.promoted = true;
-                        }
-                        if let Some(core) = self.pick_core(&big_pool) {
-                            self.pin_core(*tid, core, -1, 0, "bg_busy");
-                        }
-                        debug!(
-                            "{}",
-                            t_with_args(
-                                "affinity-promoted",
-                                &fluent_args!(
-                                    "tid" => tid.to_string(),
-                                    "util" => format!("{:.1}", util)
+                        };
+                        if let Some(util) = busy {
+                            // 移入 top-app 使 big 核可见，再按当前核心占用选核钉定
+                            let moved = self.move_tid_group(*tid, GROUP_TOP_APP);
+                            if let Some(st) = self.threads.get_mut(tid) {
+                                st.moved_group = moved;
+                                st.promoted = true;
+                            }
+                            if let Some(core) = self.pick_core(&big_pool) {
+                                self.pin_core(*tid, core, -1, 0, "-", "bg_busy");
+                            }
+                            debug!(
+                                "{}",
+                                t_with_args(
+                                    "affinity-promoted",
+                                    &fluent_args!(
+                                        "tid" => tid.to_string(),
+                                        "util" => format!("{:.1}", util)
+                                    )
                                 )
-                            )
-                        );
+                            );
+                        }
                     }
-                }
-                self.bg_cursor = if end < n { end } else { 0 };
-                if self.bg_checked.len() > 512 {
-                    self.bg_checked.clear();
+                    self.bg_cursor = if end < n { end } else { 0 };
+                    if self.bg_checked.len() > 512 {
+                        self.bg_checked.clear();
+                    }
                 }
             }
         }
@@ -845,8 +877,30 @@ impl AffinityManager {
             self.cleanup_thread(tid);
         }
 
-        // —— devimp core 行（低频） ——
+        // —— devimp 低频输出（每 DEVL_ROW_EVERY_ROUNDS 轮，全部复用缓存数据，
+        // 零新增文件读）：place 行 = 前台线程放置快照（包名/线程名/落点核均
+        // 来自缓存），core 行 = 逐核 util + 钉核计数 ——
         if t % DEVL_ROW_EVERY_ROUNDS == 0 {
+            if fg_pid > 0 {
+                for (tid, st) in &self.threads {
+                    if st.pid != fg_pid {
+                        continue;
+                    }
+                    let comm = if st.comm.is_empty() {
+                        "-"
+                    } else {
+                        st.comm.as_str()
+                    };
+                    crate::logger::devimp_place(
+                        fg_pid,
+                        &self.fg_cmdline,
+                        *tid,
+                        comm,
+                        st.home as i32,
+                        "-",
+                    );
+                }
+            }
             for cpu in 0..max_cpu {
                 let util = self
                     .core_utils
@@ -882,7 +936,7 @@ impl AffinityManager {
             }
         }
         if home >= 0 {
-            self.unpin_core(tid, home, 0);
+            self.unpin_core(tid, home, 0, "-");
         }
         debug!(
             "{}",

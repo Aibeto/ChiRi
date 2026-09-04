@@ -100,6 +100,11 @@ const onSelectLoglevel = async (a: any) => {
         <van-cell :title="t('author')" :value="meta.author || '-'" />
         <van-cell :title="t('log_language')" :value="languageLabel" />
         <van-cell :title="t('log_level')" :value="loglevelLabel" is-link clickable @click="showLoglevelSheet = true" />
+        <van-cell center :title="t('dev_record')" :label="t('dev_record_hint')">
+          <template #right-icon>
+            <van-switch v-model="devRecord" size="22" @change="onDevRecordChange" />
+          </template>
+        </van-cell>
       </van-cell-group>
 
       <div class="hint">{{ t('config_info_hint') }}</div>
