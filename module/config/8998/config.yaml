@@ -1,4 +1,4 @@
-# ============================================================
+﻿# ============================================================
 # MSM8998（骁龙 835）处理器独立配置
 # 核心分布：4×A73 大核 + 4×A53 小核，CPU ID 0-3 小核 / 4-7 大核（无超大核）。
 # 核心组区间按命中 SoC 在代码中区分（common::chiri_core_ranges），akmode 的 prime 组不生效。
@@ -37,6 +37,22 @@ CpuIdle:
 # 息屏进入 scenemode 的延迟（秒）：屏幕熄灭超过该时长后切换到 scenemode 省电配置，
 # 亮屏即恢复原模式。默认 300（5 分钟）。
 scene_mode_delay_secs: 300
+
+# CPU 亲和与线程迁移（ChiRi 专属）：boost 模式（performance/fast/特调）下
+# top-app/foreground cpuset 收窄到大核+超大核、后台分组压小核；normal/doze 恢复
+# 系统布局仅保留后台压小核。所有写入先快照，release/开关关闭时还原。
+Affinity:
+  enabled: true
+  # boost 模式下 top-app 的 cpu.uclamp.min 百分比（0 = 不启用；
+  # uclamp.min 会让 schedutil 独立于 CLG 抬频，默认关闭避免与动态上限语义打架）
+  top_app_uclamp_min_pct: 0
+  # 把前台进程全部线程迁移（sched_setaffinity）到大核+超大核，退出 boost 恢复全核
+  pin_foreground_threads: true
+
+# core_ctl 核心在线接管（ChiRi 专属）：boost 模式下把各 cluster 的 min_cpus
+# 抬到全组常在线，防厂商热插拔与 ChiRi 调频打架；退出 boost 恢复快照。
+CoreCtl:
+  enabled: true
 
 # 热保护：电池温度为主参考（高权重，反映整机持续发热、变化缓慢不随游戏瞬时负载抖动）；
 # CPU 温度仅作极端参考（大型游戏中 CPU 由内核 95°C 级温控兜底，这里只在极端热时参与）。

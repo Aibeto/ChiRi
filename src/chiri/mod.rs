@@ -32,7 +32,7 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -48,6 +48,8 @@ const CLG_STALE_MAX: Duration = Duration::from_secs(5);
 const EVENT_POLL_MS: Duration = Duration::from_millis(100);
 /// 热保护温度采样间隔：2s 一次，温度变化缓慢，更密的采样只浪费 IO。
 const THERMAL_CHECK_INTERVAL: Duration = Duration::from_secs(2);
+/// 遥测 CSV 落盘间隔：1s 一次（功耗统计精度 1s；telemetry 线程 1s 刷新共享原子量）。
+const TELEMETRY_LOG_INTERVAL: Duration = Duration::from_secs(1);
 /// 电池温度节点（Android 标准电源供给接口，毫摄氏度）。
 /// 电池温度为主参考：反映整机持续发热，变化缓慢、不随游戏瞬时负载抖动
 const BATT_TEMP_PATH: &str = "/sys/class/power_supply/battery/temp";
@@ -90,8 +92,10 @@ pub mod scheduler;
 // FAS（帧感知调度）暂时禁用：功能存在 bug，需关闭调试。
 // 恢复时：取消下行注释，并恢复下方所有 `FAS`/`fas_controller` 相关调用。
 // pub mod fas;
-pub mod cpu_load_governor;
+pub mod affinity;
 pub mod akmode;
+pub mod core_ctl;
+pub mod cpu_load_governor;
 pub mod touch_detect;
 pub mod fast;
 
@@ -179,6 +183,27 @@ pub(super) fn auto_compute_capacity_weights(policies: &[CpuPolicy]) -> Option<Ve
     }).collect())
 }
 
+/// 按当前模式判定是否为 boost 类模式（亲和收窄/core_ctl 保大核的判定口径）：
+/// performance / fast / 特调（akmode）为 boost，powersave/balance 及未知模式为 normal。
+fn is_boost_mode(mode: &str) -> bool {
+    mode == "performance" || mode == "fast" || crate::common::is_special_mode(mode)
+}
+
+/// 应用 CPU 亲和布局与 core_ctl 在线策略（ChiRi 专属，跟随模式/屏幕/前台 PID）。
+/// 内部带去重：布局与 PID 未变化时无 sysfs 写入，可安全周期性调用。
+fn apply_affinity_and_corectl(
+    affinity: &mut affinity::AffinityManager,
+    corectl: &mut core_ctl::CoreCtlManager,
+    config: &Config,
+    mode: &str,
+    screen_on: bool,
+    fg_pid: i32,
+) {
+    let boost = is_boost_mode(mode);
+    affinity.apply(screen_on, fg_pid, &config.affinity, boost);
+    corectl.set_boost(config.core_ctl.enabled && boost);
+}
+
 /// 启动 Chiri 调度线程组（由 main.rs 调用）：
 /// - `config_watcher` 线程：监听 config 目录，热重载 Config 并重放一次性系统调整
 /// - `scheduler_ipc` 线程：消费 `DaemonEvent` 状态机，驱动 CLG 接管/释放/配置切换
@@ -217,6 +242,10 @@ pub fn start_scheduler_thread(
     let sys_path_exist = Arc::new(utils::SysPathExist::new());
     // 触摸事件通道（事件驱动）：触摸检测线程发送触摸事件，scheduler_ipc 即时处理并触发大核升频
     let (touch_tx, touch_rx) = mpsc::sync_channel::<()>(8);
+    // config.yaml 热重载联动标志：config_watcher 成功重载后置位，scheduler_ipc 轮询消费。
+    // 修复此前「config.yaml 调参要等下次 ModeChange/规则重载才应用到运行中的 CLG/akmode」的
+    // 热更新断链——现在调参保存后 100ms 内即按当前模式重载调度器配置。
+    let config_dirty = Arc::new(AtomicBool::new(false));
 
     // 启动时立即应用一次性系统调整（cpuidle / IO / 屏蔽系统自带触摸升频），
     // 避免首次配置变更前这些调整处于未生效状态（config_watcher 仅在配置变化后重放）
@@ -244,12 +273,21 @@ pub fn start_scheduler_thread(
     // ==========================================
     let config_clone = shared_config.clone();
     let sys_path_clone = sys_path_exist.clone();
-    
+    let dirty_clone = config_dirty.clone();
+
     thread::Builder::new()
         .name("config_watcher".to_string())
         .spawn(move || {
+            // 监听生效配置的父目录而非固定的 config/ 根目录：ChiRi 机型的生效配置在
+            // 处理器子目录（如 config/8550/config.yaml），inotify 目录监听不递归，
+            // 监听根目录收不到子目录内文件的 CLOSE_WRITE/MOVED_TO——导致 8550/8475/8998
+            // 上 WebUI 改 meta.loglevel/language 的热重载完全失效。
+            let watch_dir = config_path
+                .parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or(config_dir);
             loop {
-                if let Err(e) = utils::watch_path(&config_dir) {
+                if let Err(e) = utils::watch_path(&watch_dir) {
                     log::error!("{}", t_with_args("config-watch-error", &fluent_args!("error" => e.to_string())));
                     // 退避后再重试，避免持续错误时忙循环刷 CPU
                     thread::sleep(std::time::Duration::from_secs(2));
@@ -258,7 +296,7 @@ pub fn start_scheduler_thread(
                 log::info!("{}", t("config-reloading"));
 
                 let old_lang = config_clone.read().unwrap().meta.language.clone();
-                
+
                 match Config::load(config_path.to_str().unwrap()) {
                     Ok(new_config) => {
                         logger::update_level(&new_config.meta.loglevel);
@@ -277,6 +315,9 @@ pub fn start_scheduler_thread(
                         if let Err(e) = scheduler.apply_system_tweaks() {
                             log::error!("{}", t_with_args("config-apply-tweaks-failed", &fluent_args!("error" => e.to_string())));
                         }
+
+                        // 通知 scheduler_ipc：运行中的 CLG/akmode/亲和/core_ctl 需按新配置重载
+                        dirty_clone.store(true, Ordering::Release);
                     }
                     Err(load_err) => log::error!("{}", t_with_args("config-reload-fail", &fluent_args!("error" => load_err.to_string()))),
                 }
@@ -290,12 +331,13 @@ pub fn start_scheduler_thread(
     // ==========================================
     let config_clone = shared_config.clone();
     let mode_clone = shared_mode_name.clone();
+    let dirty_ipc = config_dirty.clone();
 
     thread::Builder::new()
         .name("scheduler_ipc".to_string())
         .spawn(move || {
             log::info!("{}", t("scheduler-ipc-started"));
-            
+
             let root = common::get_module_root();
             // 当前模式持久化文件：每次模式切换时写入，供外部（如 WebUI）读取当前状态。
             // 自愈：常态下每 5 秒重写一次（见循环内 MODE_FILE_REWRITE_INTERVAL 分支），
@@ -308,7 +350,7 @@ pub fn start_scheduler_thread(
                 let mode = mode_clone.lock().unwrap().clone();
                 let _ = utils::try_write_file(&mode_file_path, mode.as_bytes());
             }
-            
+
             // let mut fas_controller = crate::scheduler::fas::FasController::new(); // FAS 暂禁用
             let mut cpu_governor = crate::chiri::cpu_load_governor::CpuLoadGovernor::new();
             // 明日方舟特调（akmode）：独立于 CLG 的 4 档齿轮调度器，前台为白名单应用时接管。
@@ -319,6 +361,16 @@ pub fn start_scheduler_thread(
             // 极速模式（fast）专属锁频器：与 CLG 完全独立，不读 yaml 调频参数，
             // 直接锁所有 cluster 的 min=max=硬件最高频，每 5 秒重写防止外部篡改。
             let mut fast_lock = crate::chiri::fast::FastLock::new();
+
+            // CPU 亲和与线程迁移控制器 + core_ctl 核心在线接管（ChiRi 专属）
+            let mut affinity_mgr = affinity::AffinityManager::new(sys_path_exist.clone());
+            let mut corectl_mgr = core_ctl::CoreCtlManager::new();
+
+            // 最近一次 eBPF 扩展探针统计（BpfStats 事件 2s 一次增量），随遥测 CSV 落盘
+            let mut last_bpf_stats: (u32, u32, u32) = (0, 0, 0);
+            // 遥测 CSV 落盘计时（1s 精度）与 debug 摘要计数（每 20 行 = 20s 一条）
+            let mut last_telemetry_log = Instant::now();
+            let mut telemetry_log_counter: u32 = 0;
 
             // ==== FAS 暂禁用：以下变量仅服务于 FAS 调度，暂注释 ====
             // let rules_path = crate::monitor::config::get_rules_path();
@@ -397,6 +449,18 @@ pub fn start_scheduler_thread(
                         log::info!("{}", t_with_args("scheduler-clg-init", &fluent_args!("mode" => current_mode.clone())));
                     }
                 }
+                // 启动即按初始模式应用亲和布局与 core_ctl 在线策略
+                {
+                    let cfg = config_clone.read().unwrap();
+                    apply_affinity_and_corectl(
+                        &mut affinity_mgr,
+                        &mut corectl_mgr,
+                        &cfg,
+                        &current_mode,
+                        is_screen_on,
+                        crate::monitor::app_detect::get_current_pid(),
+                    );
+                }
             }
             
             // 事件循环包在 catch_unwind 中：panic 被捕获并记录，
@@ -411,6 +475,111 @@ pub fn start_scheduler_thread(
                     let mode = mode_clone.lock().unwrap().clone();
                     let _ = utils::try_write_file(&mode_file_path, mode.as_bytes());
                     last_mode_file_write = Instant::now();
+                }
+
+                // config.yaml 热重载联动：config_watcher 成功重载后置位。
+                // 与 ConfigReload（rules.yaml）同口径：亮屏时按当前模式把新配置应用到
+                // 运行中的 CLG/akmode，并刷新亲和/core_ctl（息屏不覆盖 Doze，亮屏事件补上）。
+                if dirty_ipc.swap(false, Ordering::AcqRel) && is_screen_on {
+                    let current_mode = mode_clone.lock().unwrap().clone();
+                    let config_lock = config_clone.read().unwrap();
+                    log::debug!(
+                        "{}",
+                        t_with_args(
+                            "scheduler-config-dirty-reload",
+                            &fluent_args!("mode" => current_mode.clone())
+                        )
+                    );
+                    if crate::common::is_special_mode(&current_mode) {
+                        // 特调运行中：按新配置重载 akmode（档位仍由 rules.yaml 决定）
+                        if ak_governor.is_active() {
+                            let ak_cfg = config_lock.get_akmode().clone();
+                            let initial_tier = get_ak_initial_tier();
+                            ak_governor.reload_config(&ak_cfg, initial_tier);
+                        }
+                    } else if current_mode == "fast" {
+                        // fast_lock 不读 yaml 调参，仅需确保 CLG 未意外持有
+                        if cpu_governor.is_active() { cpu_governor.release(); }
+                    } else {
+                        let clg_cfg = get_clg_cfg(&config_lock, &current_mode);
+                        if clg_cfg.enabled {
+                            if cpu_governor.is_active() { cpu_governor.reload_config(&clg_cfg); }
+                            else { cpu_governor.init_policies(&clg_cfg); }
+                        } else if cpu_governor.is_active() {
+                            cpu_governor.release();
+                        }
+                    }
+                    drop(config_lock);
+                    // 亲和布局/core_ctl 可能随新配置开关变化，刷新一次
+                    let cfg = config_clone.read().unwrap();
+                    apply_affinity_and_corectl(
+                        &mut affinity_mgr,
+                        &mut corectl_mgr,
+                        &cfg,
+                        &current_mode,
+                        is_screen_on,
+                        crate::monitor::app_detect::get_current_pid(),
+                    );
+                }
+
+                // 亲和周期刷新：boost 模式下前台 App 同模式切换不产生 ModeChange 事件，
+                // 这里每 2s 用最新前台 PID 兜底重迁移（内部去重，PID 未变时无写入）
+                if last_thermal_check.elapsed() >= THERMAL_CHECK_INTERVAL {
+                    let cfg = config_clone.read().unwrap();
+                    let current_mode = mode_clone.lock().unwrap().clone();
+                    apply_affinity_and_corectl(
+                        &mut affinity_mgr,
+                        &mut corectl_mgr,
+                        &cfg,
+                        &current_mode,
+                        is_screen_on,
+                        crate::monitor::app_detect::get_current_pid(),
+                    );
+                }
+
+                // 遥测落盘（1s 精度）：PSI / GPU busy% / 电池功耗 + eBPF 扩展计数。
+                // telemetry 线程 1s 刷新共享原子量；OPlus 机型功耗优先走 bcc_parms
+                // 私有节点（标准 power_supply 节点约 10s 才刷新，1s 采样必须绕开）。
+                if last_telemetry_log.elapsed() >= TELEMETRY_LOG_INTERVAL {
+                    last_telemetry_log = Instant::now();
+                    let tm = crate::monitor::telemetry::telemetry();
+                    let fmt_opt = |v: Option<f32>, digits: &str| {
+                        v.map(|x| format!("{:.*}", digits.parse::<usize>().unwrap_or(1), x))
+                            .unwrap_or_else(|| "-".to_string())
+                    };
+                    let current_mode = mode_clone.lock().unwrap().clone();
+                    crate::logger::log_telemetry(
+                        &fmt_opt(Some(tm.psi_cpu_some()), "2"),
+                        &fmt_opt(Some(tm.psi_io_some()), "2"),
+                        &fmt_opt(Some(tm.psi_mem_some()), "2"),
+                        &fmt_opt(tm.gpu_busy(), "0"),
+                        last_bpf_stats.0,
+                        last_bpf_stats.1,
+                        last_bpf_stats.2,
+                        &fmt_opt(tm.batt_current_ma(), "0"),
+                        &fmt_opt(tm.batt_voltage_v(), "3"),
+                        &fmt_opt(tm.batt_power_w(), "2"),
+                        &current_mode,
+                    );
+                    telemetry_log_counter += 1;
+                    if telemetry_log_counter % 20 == 0 && log::log_enabled!(log::Level::Debug) {
+                        log::debug!(
+                            "{}",
+                            t_with_args(
+                                "telemetry-summary",
+                                &fluent_args!(
+                                    "cpu" => format!("{:.1}", tm.psi_cpu_some()),
+                                    "io" => format!("{:.1}", tm.psi_io_some()),
+                                    "mem" => format!("{:.1}", tm.psi_mem_some()),
+                                    "gpu" => fmt_opt(tm.gpu_busy(), "0"),
+                                    "wakeups" => last_bpf_stats.0.to_string(),
+                                    "migrations" => last_bpf_stats.1.to_string(),
+                                    "freq" => last_bpf_stats.2.to_string(),
+                                    "power" => fmt_opt(tm.batt_power_w(), "2")
+                                )
+                            )
+                        );
+                    }
                 }
 
                 // 热保护（2s 周期）：电池+CPU 双源取较小值。电池温升慢、反映整机发热；
@@ -598,8 +767,20 @@ pub fn start_scheduler_thread(
                                 doze_cfg.perf_ceil = doze_cfg.perf_ceil.min(0.30); // 锁死天花板最高只给 30% 性能
                                 doze_cfg.smoothing_up = 0.10;           // 升频极其迟钝
                                 doze_cfg.touch_boost_enabled = false;   // 息屏无触摸，关闭触摸升频
-                                
+
                                 cpu_governor.init_policies(&doze_cfg);
+                            }
+                            // 亲和/core_ctl 跟随息屏：top-app 恢复快照、后台压小核（特调保持 boost 布局）
+                            {
+                                let cfg = config_clone.read().unwrap();
+                                apply_affinity_and_corectl(
+                                    &mut affinity_mgr,
+                                    &mut corectl_mgr,
+                                    &cfg,
+                                    &current_mode,
+                                    false,
+                                    crate::monitor::app_detect::get_current_pid(),
+                                );
                             }
                         } else {
                             log::info!("{}", t("scheduler-doze-restore"));
@@ -651,14 +832,26 @@ pub fn start_scheduler_thread(
                                 else { cpu_governor.release(); }
                             } else {
                                 // ==== FAS 暂禁用：原恢复 fas 时释放 CLG 并清空模式，现保持 CLG 接管 ====
-                                // cpu_governor.release(); 
+                                // cpu_governor.release();
                                 // *mode_clone.lock().unwrap() = String::new();
+                            }
+                            // 亲和/core_ctl 跟随亮屏恢复：亮屏强制重迁移前台线程
+                            {
+                                let cfg = config_clone.read().unwrap();
+                                apply_affinity_and_corectl(
+                                    &mut affinity_mgr,
+                                    &mut corectl_mgr,
+                                    &cfg,
+                                    &current_mode,
+                                    true,
+                                    crate::monitor::app_detect::get_current_pid(),
+                                );
                             }
                         }
                     },
 
                     // --- 2. 前台模式切换事件 ---
-                    DaemonEvent::ModeChange { package_name, pid: _, mode, temperature } => {
+                    DaemonEvent::ModeChange { package_name, pid, mode, temperature } => {
                         let mut current_mode_lock = mode_clone.lock().unwrap();
                         let old_mode = current_mode_lock.clone();
                         log::debug!("{}", t_with_args("scheduler-event-mode-change", &fluent_args!(
@@ -682,9 +875,22 @@ pub fn start_scheduler_thread(
                             )));
                             
                             *current_mode_lock = mode.clone();
-                            drop(current_mode_lock); 
+                            drop(current_mode_lock);
 
                             let _ = utils::try_write_file(&mode_file_path, mode.as_bytes());
+
+                            // 亲和布局/core_ctl 跟随模式切换（含前台 PID 变化的线程重迁移）
+                            {
+                                let cfg = config_clone.read().unwrap();
+                                apply_affinity_and_corectl(
+                                    &mut affinity_mgr,
+                                    &mut corectl_mgr,
+                                    &cfg,
+                                    &mode,
+                                    is_screen_on,
+                                    pid,
+                                );
+                            }
 
                             // 特调模式激活打点：仅 ChiRi 白名单应用可进入，info 级便于用户定位
                             if crate::common::is_special_mode(&mode) {
@@ -926,6 +1132,25 @@ pub fn start_scheduler_thread(
                                 }
                             }
                         }
+                        // 亲和/core_ctl 与配置联动（开关变化时切换布局；内部去重）
+                        {
+                            let cfg = config_clone.read().unwrap();
+                            apply_affinity_and_corectl(
+                                &mut affinity_mgr,
+                                &mut corectl_mgr,
+                                &cfg,
+                                &current_mode,
+                                is_screen_on,
+                                crate::monitor::app_detect::get_current_pid(),
+                            );
+                        }
+                    }
+
+                    // --- 6. eBPF 扩展探针统计（ChiRi 专属遥测，2s 一次增量）---
+                    DaemonEvent::BpfStats { wakeups, migrations, freq_transitions } => {
+                        // 仅缓存供遥测 CSV/摘要落盘，不参与调频决策，也不刷新 CLG 看门狗心跳
+                        // （探针加载失败时增量为 0，不影响任何控制路径）
+                        last_bpf_stats = (wakeups, migrations, freq_transitions);
                     }
                 }
 
@@ -949,6 +1174,9 @@ pub fn start_scheduler_thread(
             cpu_governor.release();
             ak_governor.release();
             fast_lock.release();
+            // 亲和布局与 core_ctl 同步恢复系统原始状态
+            corectl_mgr.release();
+            affinity_mgr.release();
             // ==== FAS 暂禁用 ====
             // fas_controller.reset_all_freqs();
             // fas_controller.clear_game();

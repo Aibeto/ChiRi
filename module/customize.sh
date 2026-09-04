@@ -37,6 +37,9 @@ MSG_HOT_UPDATE_DONE="Hot update completed successfully!"
 MSG_FULL_INSTALL="Proceeding with full installation..."
 MSG_HOT_UPDATE_UNAVAILABLE="Hot update unavailable, falling back to full installation..."
 MSG_RESTARTING_SCHEDULER="Restarting scheduler..."
+MSG_VERIFY_SERVICE="Verifying daemon service..."
+MSG_SERVICE_FAIL="Daemon did not start! Please reboot the device to complete the update."
+MSG_HOT_UPDATE_HINT="(The installer will now report a failure on purpose: this prevents the manager from flagging the module as updated/reboot-required. WebUI and Action stay available.)"
 
 if echo "$CURRENT_LOCALE" | $BUSYBOX grep -qi "zh"; then
   LANG_CODE="zh"
@@ -55,6 +58,9 @@ if echo "$CURRENT_LOCALE" | $BUSYBOX grep -qi "zh"; then
   MSG_FULL_INSTALL="继续完整安装流程..."
   MSG_HOT_UPDATE_UNAVAILABLE="热更新不可用，回退到完整安装..."
   MSG_RESTARTING_SCHEDULER="正在重启调度..."
+  MSG_VERIFY_SERVICE="正在确认调度服务启动..."
+  MSG_SERVICE_FAIL="守护进程未能启动！请重启设备以完成更新。"
+  MSG_HOT_UPDATE_HINT="（安装器随后显示“安装失败”为预期行为：防止管理器把热更新识别为模块更新而提示重启、隐藏 WebUI 与 Action。）"
 fi
 
 # --- 欢迎信息 ---
@@ -170,9 +176,9 @@ if [ "$HOT_UPDATE_AVAILABLE" = "true" ]; then
         return 0
     }
     
-    # 等待用户按键选择
+    # 等待用户按键选择（脚本顶层非函数环境，不能用 local）
     detect_volume_key
-    local choice_result=$?
+    choice_result=$?
     
     # 检查是否检测到多个按键事件（错误）
     if [ $choice_result -eq 2 ]; then
@@ -258,12 +264,39 @@ if [ "$HOT_UPDATE_AVAILABLE" = "true" ]; then
             fi
         fi
         sleep 2
-        
+
+        # 4. 确认服务启动状态：watchdog nohup 拉起 daemon 有延迟，轮询最多 ~6s
+        ui_print "$MSG_VERIFY_SERVICE"
+        SERVICE_OK=false
+        CHECK_ROUND=0
+        while [ $CHECK_ROUND -lt 3 ]; do
+            sleep 2
+            if [ -x "/system/bin/pidof" ]; then
+                DAEMON_PID=$(/system/bin/pidof yumi 2>/dev/null)
+            elif [ -n "$BUSYBOX" ]; then
+                DAEMON_PID=$($BUSYBOX pgrep -x yumi 2>/dev/null)
+            else
+                DAEMON_PID=""
+            fi
+            if [ -n "$DAEMON_PID" ]; then
+                SERVICE_OK=true
+                break
+            fi
+            CHECK_ROUND=$((CHECK_ROUND + 1))
+        done
+
         ui_print " "
-        ui_print "$MSG_HOT_UPDATE_DONE"
-        
-        # 热更新完成，跳过后续安装步骤
-        return 0
+        if [ "$SERVICE_OK" = "true" ]; then
+            ui_print "$MSG_HOT_UPDATE_DONE"
+        else
+            ui_print "$MSG_SERVICE_FAIL"
+        fi
+        ui_print "$MSG_HOT_UPDATE_HINT"
+
+        # 5. 按报错退出：安装器视本次安装为失败，中止后续“完整安装”——
+        #    不覆盖上面已热替换的模块目录、不写 update 标记，管理器不会把
+        #    热更新识别为“模块更新”（不提示重启，WebUI 与 Action 保持可用）。
+        exit 1
     fi
 else
     # 热更新不可用，显示提示信息

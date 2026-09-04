@@ -196,3 +196,29 @@ fast-watchdog-release = [Fast] load source timeout ({ $secs }s), releasing fast 
 
 # --- Logger ---
 log-level-updated = Log level updated to: { $level }
+
+# --- Affinity (CPU affinity & thread migration) ---
+affinity-boost-applied = [Affinity] boost layout applied: top-app/foreground → { $big }, background groups → { $little }
+affinity-normal-restore = [Affinity] normal affinity layout restored (background kept on little cores)
+affinity-pin-threads = [Affinity] foreground pid={ $pid } threads migrated: { $pinned }/{ $total }
+affinity-pin-failed = [Affinity] no migratable threads for foreground pid={ $pid } (process may have exited)
+affinity-threads-restored = [Affinity] restored full-core affinity for { $count } threads of pid={ $pid }
+affinity-write-failed = [Affinity] cpuset write failed: { $path }
+affinity-released = [Affinity] takeover released, system affinity config restored
+
+# --- CoreCtl (core_ctl online control) ---
+corectl-boost-on = [CoreCtl] boost: min_cpus raised to full-cluster online on { $count } clusters
+corectl-boost-off = [CoreCtl] core_ctl min_cpus snapshots restored
+corectl-unavailable = [CoreCtl] no usable core_ctl node found, takeover skipped
+corectl-write-failed = [CoreCtl] core_ctl write failed: { $path }
+
+# --- Telemetry ---
+monitor-thread-start-telemetry = [Main] starting telemetry monitor thread (PSI/GPU/battery)...
+telemetry-oplus-bcc = [Telemetry] OPlus private node bcc_parms detected, battery power reads use real-time BCC data (bypassing the 10s cache of standard power_supply nodes)
+telemetry-probe-attached = [CPU Monitor] eBPF telemetry probe attached: { $name }
+telemetry-probe-failed = [CPU Monitor] eBPF telemetry probe { $name } attach failed (tracepoint may be missing): { $error }
+telemetry-map-missing = [CPU Monitor] map { $name } missing from eBPF binary (binary/daemon version skew), its counters stay 0
+telemetry-summary = [Telemetry] PSI cpu={ $cpu }% io={ $io }% mem={ $mem }% | GPU={ $gpu }% | wakeups={ $wakeups } migrations={ $migrations } freq={ $freq } | battery { $power }W
+
+# --- Config hot-reload sync ---
+scheduler-config-dirty-reload = [Scheduler] config.yaml hot reload synced to scheduler (mode={ $mode })

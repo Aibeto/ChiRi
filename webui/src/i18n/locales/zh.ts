@@ -31,7 +31,7 @@ export default {
   author: '作者',
   log_language: '日志语言',
   log_level: '日志等级',
-  config_info_hint: '其余参数请在设备上直接编辑配置文件（路径见上），保存后守护进程会自动热重载生效。',
+  config_info_hint: '其他参数暂不支持修改',
   loglevel_updated: '日志等级已更新',
   app_rules_saved: '应用规则已保存',
   switch_success: '已请求切换到: {mode}',

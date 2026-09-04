@@ -38,6 +38,17 @@ const SAMPLE_MS_TUNED: u64 = 40;
 /// 恢复 FAS 时置 true 即可（compute_tgid_util / compute_thread_level_util 仍保留）。
 const FAS_FG_UTIL_ENABLED: bool = false;
 
+/// 读取 PerCpuArray 计数 map 的全核总和（key 0 的所有 cpu 槽位累加）。
+/// map 缺失（None，eBPF 产物与 daemon 版本偏差时）返回 0，保持计数可选语义。
+fn percpu_total(map: Option<&PerCpuArray<&mut aya::maps::MapData, u64>>) -> u64 {
+    let Some(map) = map else {
+        return 0;
+    };
+    map.get(&0u32, 0)
+        .map(|v| v.iter().sum::<u64>())
+        .unwrap_or(0)
+}
+
 /// 读取前台进程的所有线程 TID（仅供 foreground 利用率降级路径使用）。
 /// FAS 暂禁用：foreground 计算被 FAS_FG_UTIL_ENABLED 跳过，恢复 FAS 时启用。
 #[allow(dead_code)]
@@ -77,6 +88,41 @@ pub async fn start_cpu_loop(
     program.load()?;
     program.attach("sched", "sched_switch")?;
     info!("{}", t("cpu-monitor-started"));
+
+    // ChiRi 专属：附加可选扩展探针（唤醒/线程迁移/频率切换计数，遥测观测用）。
+    // 内核缺少对应 tracepoint 时挂载失败，warn 一次后跳过，不影响主探针；
+    // 仅 ChiRi SoC 尝试挂载，Yumi 设备保持原有单探针行为不变。
+    let chiri_telemetry = crate::common::is_chiri_soc();
+    if chiri_telemetry {
+        for (name, cat, tp) in [
+            ("handle_sched_wakeup", "sched", "sched_wakeup"),
+            ("handle_sched_migrate_task", "sched", "sched_migrate_task"),
+            ("handle_cpufreq_transition", "cpufreq", "cpufreq_transition"),
+        ] {
+            let result = (|| -> anyhow::Result<()> {
+                let prog: &mut TracePoint = bpf
+                    .program_mut(name)
+                    .ok_or_else(|| anyhow::anyhow!("program {name} not found in ELF"))?
+                    .try_into()?;
+                prog.load()?;
+                prog.attach(cat, tp)?;
+                Ok(())
+            })();
+            match result {
+                Ok(()) => info!(
+                    "{}",
+                    t_with_args("telemetry-probe-attached", &fluent_args!("name" => name))
+                ),
+                Err(e) => warn!(
+                    "{}",
+                    t_with_args(
+                        "telemetry-probe-failed",
+                        &fluent_args!("name" => name, "error" => e.to_string())
+                    )
+                ),
+            }
+        }
+    }
 
     // 获取准确的物理在线核心列表
     let online_cpus_list = online_cpus().map_err(|e| {
@@ -124,6 +170,28 @@ pub async fn start_cpu_loop(
             .unwrap(),
     )?;
 
+    // 扩展探针计数 map：可选语义——ELF 中缺失（产物与 daemon 版本偏差）时计数
+    // 恒为 0 并 warn 一次，绝不 panic（与探针挂载失败的容忍路径语义一致）。
+    let fetch_counter_map =
+        |name: &'static str| -> Option<PerCpuArray<&mut aya::maps::MapData, u64>> {
+            match unsafe { &mut *bpf_ptr }
+                .map_mut(name)
+                .and_then(|m| PerCpuArray::try_from(m).ok())
+            {
+                Some(m) => Some(m),
+                None => {
+                    warn!(
+                        "{}",
+                        t_with_args("telemetry-map-missing", &fluent_args!("name" => name))
+                    );
+                    None
+                }
+            }
+        };
+    let wakeup_map = fetch_counter_map("WAKEUP_COUNT");
+    let migrate_map = fetch_counter_map("MIGRATE_COUNT");
+    let freq_trans_map = fetch_counter_map("FREQ_TRANS_COUNT");
+
     tokio::spawn(async move {
         let mut rx_pid = rx_pid;
         // 前台 PID 由 monitor/mod.rs 的 pid_watcher 统一广播，这里只消费最新值
@@ -152,6 +220,13 @@ pub async fn start_cpu_loop(
             std::collections::HashMap::new();
 
         let mut log_counter: u32 = 0;
+
+        // 扩展探针统计：2s 读取一次累计计数并发送周期增量事件（ChiRi 专属）
+        const STATS_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+        let mut last_stats_check = std::time::Instant::now();
+        let mut last_wakeup_total: u64 = 0;
+        let mut last_migrate_total: u64 = 0;
+        let mut last_freq_total: u64 = 0;
 
         let mut interval =
             tokio::time::interval(std::time::Duration::from_millis(sample_ms_normal));
@@ -341,6 +416,27 @@ pub async fn start_cpu_loop(
             {
                 warn!("{}", t("cpu-monitor-channel-closed"));
                 break;
+            }
+
+            // ChiRi 遥测：读取扩展探针累计计数，按周期发送增量（探针未挂载时增量恒 0，
+            // 事件照发保持下游 CSV 列对齐；watchdog 不消费该事件，不影响负载源判定）
+            if chiri_telemetry && last_stats_check.elapsed() >= STATS_INTERVAL {
+                last_stats_check = std::time::Instant::now();
+                let w = percpu_total(wakeup_map.as_ref());
+                let m = percpu_total(migrate_map.as_ref());
+                let f = percpu_total(freq_trans_map.as_ref());
+                let stats = DaemonEvent::BpfStats {
+                    wakeups: w.saturating_sub(last_wakeup_total) as u32,
+                    migrations: m.saturating_sub(last_migrate_total) as u32,
+                    freq_transitions: f.saturating_sub(last_freq_total) as u32,
+                };
+                last_wakeup_total = w;
+                last_migrate_total = m;
+                last_freq_total = f;
+                if tx.send(stats).is_err() {
+                    warn!("{}", t("cpu-monitor-channel-closed"));
+                    break;
+                }
             }
 
             // 按特调状态动态切换采样周期：akmode 激活时 40ms 快速跟随负载，

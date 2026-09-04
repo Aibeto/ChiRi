@@ -689,6 +689,67 @@ impl ThermalGuardConfig {
     }
 }
 
+// ════════════════════════════════════════════════════════════════
+//  CPU 亲和 / core_ctl 配置
+// ════════════════════════════════════════════════════════════════
+
+/// CPU 亲和与线程迁移配置（config.yaml `Affinity` 段）。
+/// boost 模式（performance/fast/特调）下由 AffinityManager 应用：
+/// top-app/foreground cpuset 收窄到大核+超大核、后台分组压小核、
+/// 可选 uclamp.min 抬前台利用率下限、可选前台线程 sched_setaffinity 迁移。
+/// normal/doze 下 top-app 恢复系统布局，后台保持压小核。配置热重载即时生效。
+#[derive(Debug, Deserialize, Clone)]
+pub struct AffinityConfig {
+    /// 总开关：false 时全量恢复系统布局，不做任何写入
+    #[serde(default = "crate::utils::default_true")]
+    pub enabled: bool,
+    /// boost 模式下 top-app 的 cpu.uclamp.min 百分比（0 = 不启用）。
+    /// uclamp.min 会让 schedutil 独立于 CLG 抬频，与动态上限语义叠加，默认关闭
+    #[serde(default = "d_aff_uclamp_min")]
+    pub top_app_uclamp_min_pct: u32,
+    /// boost 模式下把前台进程全部线程迁移（sched_setaffinity）到大核+超大核；
+    /// 退出 boost 恢复全核
+    #[serde(default = "crate::utils::default_true")]
+    pub pin_foreground_threads: bool,
+}
+
+fn d_aff_uclamp_min() -> u32 {
+    0
+}
+
+impl Default for AffinityConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            top_app_uclamp_min_pct: d_aff_uclamp_min(),
+            pin_foreground_threads: true,
+        }
+    }
+}
+
+impl AffinityConfig {
+    /// 校验：uclamp 百分比限制在 0..=100
+    pub fn normalize(&mut self) {
+        self.top_app_uclamp_min_pct = self.top_app_uclamp_min_pct.clamp(0, 100);
+    }
+}
+
+/// core_ctl（厂商核心在线控制器）接管配置（config.yaml `CoreCtl` 段）。
+/// boost 模式下把各 cluster 的 min_cpus 抬到全组常在线，防厂商热插拔与
+/// ChiRi 调频打架；退出 boost 恢复快照。仅动 min_cpus。
+#[derive(Debug, Deserialize, Clone)]
+pub struct CoreCtlConfig {
+    /// 总开关：false 时不写任何 core_ctl 节点
+    #[serde(default = "crate::utils::default_true")]
+    pub enabled: bool,
+}
+
+impl Default for CoreCtlConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
 /// 特调档位（1..4）→ 模式名，日志展示用
 pub fn tier_to_mode(tier: u32) -> &'static str {
     match tier {
@@ -738,10 +799,19 @@ pub struct Config {
     #[serde(default, rename = "Thermal")]
     pub thermal: ThermalGuardConfig,
 
-    /// 明日方舟特调（akmode）独立调频配置：来自处理器目录 akmode.yaml，与 CLG 完全解耦。
+    /// 明日方舟特调（akmode）独立调频配置：来自嵌入的 config/normal/akmode.yaml（编译期
+    /// 打包，非处理器绑定；原 {soc}/akmode.yaml 方案已随 4cb4d97 重构移除），与 CLG 完全解耦。
     /// 前台为白名单应用时由 AkmodeGovernor 接管，参数不再走 CLG。
     #[serde(default)]
     pub akmode: SpecialTunedConfig,
+
+    /// CPU 亲和与线程迁移控制（cpuset / cpuctl uclamp / sched_setaffinity）
+    #[serde(default, rename = "Affinity")]
+    pub affinity: AffinityConfig,
+
+    /// core_ctl 核心在线接管（boost 模式保持大核常在线）
+    #[serde(default, rename = "CoreCtl")]
+    pub core_ctl: CoreCtlConfig,
 }
 
 /// scenemode 延迟缺省值：5 分钟
@@ -751,23 +821,19 @@ fn default_scene_mode_delay_secs() -> u64 {
 
 impl Config {
     /// 加载生效配置：**基准内容编译期嵌入二进制**（common::embedded_config_str，
-    /// 按命中 SoC 选择，防篡改），磁盘文件只提供 meta 覆盖（loglevel/language，
-    /// WebUI 日志等级切换的落点）；调优字段即使被篡改也不会被读入。
-    ///
+    /// 按命中 SoC 选择，防篡改），磁盘文件只提供 meta.loglevel 覆盖
+    /// （WebUI 日志等级切换的唯一落点；语言等其余内容固定，外部修改无效）。
     /// `path` 为生效配置的磁盘快照路径（common::get_config_path()），
     /// 缺失或损坏时 meta 回退嵌入默认值。加载后合并嵌入的 akmode/scenemode 段。
     pub fn load(path: &str) -> anyhow::Result<Self> {
         let mut config: Config = serde_yaml::from_str(crate::common::embedded_config_str())?;
-        let (loglevel, language) = crate::common::read_external_meta(std::path::Path::new(path));
-        if let Some(v) = loglevel {
+        if let Some(v) = crate::common::read_external_meta(std::path::Path::new(path)) {
             config.meta.loglevel = v;
-        }
-        if let Some(v) = language {
-            config.meta.language = v;
         }
         config.merge_akmode();
         config.merge_scenemode();
         config.thermal.normalize();
+        config.affinity.normalize();
         Ok(config)
     }
 

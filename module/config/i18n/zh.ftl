@@ -195,3 +195,29 @@ fast-watchdog-release = [Fast] 负载源超时 ({ $secs }s)，释放极速锁频
 
 # --- Logger ---
 log-level-updated = 日志级别已更新为: { $level }
+
+# --- Affinity（CPU 亲和与线程迁移）---
+affinity-boost-applied = [Affinity] boost 布局已应用: top-app/foreground → { $big }，后台分组 → { $little }
+affinity-normal-restore = [Affinity] 已恢复正常亲和布局（后台保持压小核）
+affinity-pin-threads = [Affinity] 前台 pid={ $pid } 线程迁移: { $pinned }/{ $total }
+affinity-pin-failed = [Affinity] 前台 pid={ $pid } 无可迁移线程（进程可能已退出）
+affinity-threads-restored = [Affinity] 已恢复 pid={ $pid } 的 { $count } 个线程全核亲和
+affinity-write-failed = [Affinity] cpuset 写入失败: { $path }
+affinity-released = [Affinity] 已释放接管，恢复系统原始亲和配置
+
+# --- CoreCtl（core_ctl 核心在线接管）---
+corectl-boost-on = [CoreCtl] boost: { $count } 个 cluster 的 min_cpus 已抬到全组常在线
+corectl-boost-off = [CoreCtl] 已恢复 core_ctl min_cpus 快照
+corectl-unavailable = [CoreCtl] 未发现可用的 core_ctl 节点，接管跳过
+corectl-write-failed = [CoreCtl] core_ctl 写入失败: { $path }
+
+# --- Telemetry（遥测）---
+monitor-thread-start-telemetry = [Main] 启动遥测监控线程（PSI/GPU/电池）...
+telemetry-oplus-bcc = [Telemetry] 检测到 OPlus 私有节点 bcc_parms，功耗读取走 BCC 实时数据（规避标准 power_supply 节点 10s 缓存）
+telemetry-probe-attached = [CPU Monitor] eBPF 扩展探针已挂载: { $name }
+telemetry-probe-failed = [CPU Monitor] eBPF 扩展探针 { $name } 挂载失败（内核可能无该 tracepoint）: { $error }
+telemetry-map-missing = [CPU Monitor] eBPF 产物中缺少映射 { $name }（产物与守护进程版本偏差），对应计数保持为 0
+telemetry-summary = [Telemetry] PSI cpu={ $cpu }% io={ $io }% mem={ $mem }% | GPU={ $gpu }% | 唤醒={ $wakeups } 迁移={ $migrations } 调频={ $freq } | 电池 { $power }W
+
+# --- Config 热重载联动 ---
+scheduler-config-dirty-reload = [Scheduler] config.yaml 热重载已同步到调度器 (mode={ $mode })

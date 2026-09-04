@@ -31,7 +31,7 @@ export default {
   author: 'Author',
   log_language: 'Log language',
   log_level: 'Log level',
-  config_info_hint: 'Other settings can be edited directly in the config file (path above); the daemon hot-reloads automatically.',
+  config_info_hint: 'Other settings are not supported.',
   loglevel_updated: 'Log level updated',
   app_rules_saved: 'App rules saved',
   switch_success: 'Requested switch to: {mode}',

@@ -486,6 +486,11 @@ pub fn start_scheduler_thread(
                             }
                         }
                     }
+
+                    // --- 6. eBPF 扩展探针统计 ---
+                    // 仅 ChiRi SoC 的 cpu_monitor 会发送（Yumi 设备不加载扩展探针）；
+                    // 此 arm 仅为枚举完备性，保证 Yumi 调度行为零变化。
+                    DaemonEvent::BpfStats { .. } => {}
                 }
 
                 // ==== FAS 暂禁用：定期检查 FAS 挂起状态是否超时 ====

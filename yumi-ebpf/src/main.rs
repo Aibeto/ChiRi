@@ -105,6 +105,46 @@ static TGID_RUN_TIME: HashMap<u32, u64> = HashMap::with_max_entries(1024, 0);
 const ZERO_KEY: u32 = 0;
 const NS_10_SEC: u64 = 10_000_000_000;
 
+// ═══════════════════════════════════════════════════════════════
+//  Telemetry Probes — 唤醒 / 线程迁移 / 频率切换计数（ChiRi 专属遥测）
+//  userspace 每 2s 读取累计值取增量；探针挂载失败（内核缺 tracepoint）不影响主探针
+// ═══════════════════════════════════════════════════════════════
+
+/// sched_wakeup 唤醒次数（全核累计）
+#[map]
+static WAKEUP_COUNT: PerCpuArray<u64> = PerCpuArray::with_max_entries(1, 0);
+
+/// sched_migrate_task 线程跨核迁移次数（亲和策略的实际迁移观测）
+#[map]
+static MIGRATE_COUNT: PerCpuArray<u64> = PerCpuArray::with_max_entries(1, 0);
+
+/// cpufreq_transition 频率切换次数（调频活跃度，含热限频切换）
+#[map]
+static FREQ_TRANS_COUNT: PerCpuArray<u64> = PerCpuArray::with_max_entries(1, 0);
+
+/// 计数器自增（PerCpuArray key 0 槽位，per-cpu 天然免锁）
+fn bump_counter(map: &PerCpuArray<u64>) -> u32 {
+    if let Some(ptr) = map.get_ptr_mut(ZERO_KEY) {
+        unsafe { *ptr += 1 };
+    }
+    0
+}
+
+#[tracepoint]
+pub fn handle_sched_wakeup(_ctx: TracePointContext) -> u32 {
+    bump_counter(&WAKEUP_COUNT)
+}
+
+#[tracepoint]
+pub fn handle_sched_migrate_task(_ctx: TracePointContext) -> u32 {
+    bump_counter(&MIGRATE_COUNT)
+}
+
+#[tracepoint]
+pub fn handle_cpufreq_transition(_ctx: TracePointContext) -> u32 {
+    bump_counter(&FREQ_TRANS_COUNT)
+}
+
 #[tracepoint]
 pub fn handle_sched_switch(ctx: TracePointContext) -> u32 {
     match try_handle_sched_switch(&ctx) {

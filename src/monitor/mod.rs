@@ -27,6 +27,7 @@ pub mod config;
 pub mod cpu_monitor;
 pub mod fps_monitor;
 pub mod screen_detect;
+pub mod telemetry;
 
 use crate::common::DaemonEvent;
 use crate::fluent_args;
@@ -198,6 +199,16 @@ pub fn start_monitor(
                 error!("{}", t("monitor-cpu-tokio-failed"));
             }
         })?;
+
+    // 7.5 ChiRi 专属遥测线程：1s 轮询 PSI / GPU busy% / 电池电流电压，
+    //     写入进程级共享原子量（telemetry()）供 chiri 调度层消费与落盘。
+    //     仅 ChiRi SoC 启动，Yumi 设备零开销。
+    if crate::common::is_chiri_soc() {
+        log::debug!("{}", t("monitor-thread-start-telemetry"));
+        thread::Builder::new()
+            .name("telemetry_monitor".to_string())
+            .spawn(telemetry::telemetry_loop)?;
+    }
 
     // 8. 启动应用检测主循环 (阻塞)
     log::debug!("{}", t("monitor-thread-start-app-detect"));

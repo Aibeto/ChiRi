@@ -310,6 +310,47 @@ pub fn log_foreground(
     append_aux_log(FG_LOG_REL, header, &line);
 }
 
+/// 遥测日志路径（CSV 格式：PSI / GPU / 电池 / eBPF 扩展计数）
+const TELEMETRY_LOG_REL: &str = "logs/telemetry.log";
+
+/// 写遥测日志（CSV 一行，2s 周期）。
+/// 字段：timestamp,psi_cpu_some,psi_io_some,psi_mem_some,gpu_busy_pct,
+///       wakeups_2s,migrations_2s,freq_trans_2s,batt_current_ma,batt_voltage_v,batt_power_w,mode
+/// PSI 为 some avg10 百分比；缺失指标写 "-"。
+pub fn log_telemetry(
+    psi_cpu: &str,
+    psi_io: &str,
+    psi_mem: &str,
+    gpu_busy: &str,
+    wakeups: u32,
+    migrations: u32,
+    freq_transitions: u32,
+    batt_current: &str,
+    batt_voltage: &str,
+    batt_power: &str,
+    mode: &str,
+) {
+    let ts = format_now();
+    let header = "timestamp,psi_cpu_some,psi_io_some,psi_mem_some,gpu_busy_pct,\
+wakeups_2s,migrations_2s,freq_trans_2s,batt_current_ma,batt_voltage_v,batt_power_w,mode";
+    let line = format!(
+        "{},{},{},{},{},{},{},{},{},{},{},{}",
+        ts,
+        psi_cpu,
+        psi_io,
+        psi_mem,
+        gpu_busy,
+        wakeups,
+        migrations,
+        freq_transitions,
+        batt_current,
+        batt_voltage,
+        batt_power,
+        mode,
+    );
+    append_aux_log(TELEMETRY_LOG_REL, header, &line);
+}
+
 /// HH:MM:SS.mmm 格式本地时间（避免引入 chrono 依赖）
 fn format_now() -> String {
     let now = std::time::SystemTime::now()

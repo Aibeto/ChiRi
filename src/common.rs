@@ -67,6 +67,17 @@ pub enum DaemonEvent {
     ConfigReload(RulesConfig),
 
     ScreenStateChange(bool),
+
+    /// eBPF 扩展探针的周期统计（ChiRi 专属：仅 ChiRi SoC 上 cpu_monitor 加载
+    /// 可选探针并发送；Yumi 设备不会产生该事件）。字段为发送周期（2s）内的增量。
+    BpfStats {
+        /// sched_wakeup 唤醒次数：调度唤醒链活跃度
+        wakeups: u32,
+        /// sched_migrate_task 线程迁移次数：亲和策略的实际迁移观测
+        migrations: u32,
+        /// cpufreq_transition 频率切换次数：调频活跃度（含热限频切换）
+        freq_transitions: u32,
+    },
 }
 
 /// 获取模块根目录的绝对路径
@@ -359,7 +370,7 @@ pub fn is_special_mode_allowed(pkg: &str, mode: &str) -> bool {
 //
 // 调优配置一律以二进制内嵌内容为准；磁盘上的同名 yaml 只是「自愈快照 +
 // meta 覆盖入口」：daemon 启动/重载时会把嵌入内容还原到磁盘（快照自愈），
-// 只有 meta.loglevel / meta.language 允许被外部修改（WebUI 日志等级切换）。
+// 只有 meta.loglevel 允许被外部修改（WebUI 日志等级切换），其余内容固定。
 
 /// 嵌入的 config.yaml：按命中的处理器取对应内容，非 ChiRi SoC 用默认配置
 pub fn embedded_config_str() -> &'static str {
@@ -392,12 +403,12 @@ pub fn embedded_ftl_str(lang: &str) -> &'static str {
 
 /// 磁盘配置文件的 meta 覆盖结构：只反序列化 meta 段，其余字段全部忽略
 /// （调优字段即使被篡改也不会被读入，从根本上防篡改）。
+/// **唯一允许外部修改的字段是 meta.loglevel**（WebUI 日志等级切换的落点）；
+/// language 等其余 meta 字段不在此列——配置内容一律以二进制内嵌值为准。
 #[derive(Deserialize, Default)]
 struct ExternalMetaSection {
     #[serde(default, alias = "Loglevel")]
     loglevel: String,
-    #[serde(default, alias = "Language")]
-    language: String,
 }
 
 #[derive(Deserialize, Default)]
@@ -406,18 +417,14 @@ struct ExternalMetaFile {
     meta: ExternalMetaSection,
 }
 
-/// 读磁盘配置文件的 meta 覆盖值 (loglevel, language)。
-/// 文件缺失或解析失败返回 (None, None)：meta 是唯一允许外部修改的字段，
+/// 读磁盘配置文件的 meta 覆盖值（仅 loglevel）。
+/// 文件缺失或解析失败返回 None：meta.loglevel 是唯一允许外部修改的字段，
 /// 文件损坏时回退嵌入默认值，绝不让坏文件拖垮配置加载。
-pub fn read_external_meta(path: &Path) -> (Option<String>, Option<String>) {
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return (None, None);
-    };
-    let Ok(file) = serde_yaml::from_str::<ExternalMetaFile>(&text) else {
-        return (None, None);
-    };
-    let to_opt = |s: String| Some(s).filter(|v| !v.is_empty());
-    (to_opt(file.meta.loglevel), to_opt(file.meta.language))
+pub fn read_external_meta(path: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let file = serde_yaml::from_str::<ExternalMetaFile>(&text).ok()?;
+    let loglevel = file.meta.loglevel;
+    Some(loglevel).filter(|v| !v.is_empty())
 }
 
 /// 把 yaml 文本中指定标量键的值替换为 value（保留缩进与注释，与
@@ -454,13 +461,10 @@ fn replace_yaml_scalar(content: &str, key: &str, value: &str) -> String {
 /// main.rs 启动时与两套 config_watcher 热重载后调用。
 /// 返回是否实际写入。
 pub fn sync_config_snapshot(path: &Path) -> bool {
+    // 嵌入内容为唯一基准；外部仅 loglevel 一项覆盖（语言等其余内容固定）
     let mut content = embedded_config_str().to_string();
-    let (loglevel, language) = read_external_meta(path);
-    if let Some(v) = &loglevel {
-        content = replace_yaml_scalar(&content, "loglevel", v);
-    }
-    if let Some(v) = &language {
-        content = replace_yaml_scalar(&content, "language", v);
+    if let Some(v) = read_external_meta(path) {
+        content = replace_yaml_scalar(&content, "loglevel", &v);
     }
     // 内容一致就跳过：watcher 重载后再次写入会再次触发 inotify，必须防环
     if std::fs::read_to_string(path).ok().as_deref() == Some(content.as_str()) {
@@ -469,5 +473,23 @@ pub fn sync_config_snapshot(path: &Path) -> bool {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
+    // 原子写：先写同目录临时文件再 rename。直接 fs::write 截断覆盖存在窗口期——
+    // config_watcher 的 inotify（CLOSE_WRITE）与 WebUI 读盘可能读到半截内容，
+    // 导致 meta 解析失败回退默认（用户日志等级设置被静默丢弃）。
+    // rename 触发的 MOVED_TO 会再次走 reload，但内容一致时防环判断直接跳过。
+    // 临时文件名兜底：path 无文件名（根目录 / ".." 结尾等）时 file_name() 为 None，
+    // 空串会让临时文件退化为通用的 ".tmp"，可能覆盖目录中同名文件——回退固定名。
+    let file_name = path
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "config".to_string());
+    let tmp_path = path.with_file_name(format!("{}.tmp", file_name));
+    if std::fs::write(&tmp_path, content.as_bytes()).is_ok()
+        && std::fs::rename(&tmp_path, path).is_ok()
+    {
+        return true;
+    }
+    let _ = std::fs::remove_file(&tmp_path);
     crate::utils::try_write_file(path, content.as_bytes()).is_ok()
 }

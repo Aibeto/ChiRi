@@ -1,6 +1,7 @@
 # Build
 /target
 xtask/target
+yumi-ebpf/target
 
 # IDE
 .idea/
