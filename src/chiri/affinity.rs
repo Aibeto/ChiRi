@@ -68,7 +68,10 @@ const ONLINE_EVERY_ROUNDS: u64 = 4;
 const DEVL_ROW_EVERY_ROUNDS: u64 = 2;
 
 const MIN_MIGRATE_INTERVAL: Duration = Duration::from_secs(4);
-const HOME_OVERLOAD_UTIL: f32 = 0.85;
+/// 核心过载阈值：钉定线程所在核心 util 超过该值时重钉到低占用核。
+/// 动机：单核持续高占用会把 schedutil 顶进高频区、能效变差，把忙线程
+/// 分散到低占用核压制峰值频率（前台与 bg promoted 线程共用同一阈值）。
+const CORE_OVERLOAD_UTIL: f32 = 0.70;
 const PROMOTE_UTIL_PCT: f32 = 25.0;
 const LITTLE_HIGH_WATER: f32 = 0.70;
 const LITTLE_PROMOTE_UTIL_PCT: f32 = 10.0;
@@ -650,17 +653,26 @@ impl AffinityManager {
                                     }
                                 } else if now.duration_since(st.last_move) >= MIN_MIGRATE_INTERVAL
                                     && self.core_utils.get(home as usize).copied().unwrap_or(0.0)
-                                        > HOME_OVERLOAD_UTIL
+                                        > CORE_OVERLOAD_UTIL
                                 {
+                                    // home 核过载（util > 70%）：重钉到最低分核分散
+                                    // 负载压制峰值频率。仅当目标核本身不过载才迁
+                                    // ——所有候选核都过载时静止（整体高载交给 CLG
+                                    // 上限/温控处理），避免无收益搬动与乒乓
                                     if let Some(core) = self.pick_core(pool) {
-                                        self.pin_core(
-                                            tid,
-                                            core,
-                                            home,
-                                            fg_pid,
-                                            &pkg,
-                                            "home_overload",
-                                        );
+                                        if core != home as usize
+                                            && self.core_utils.get(core).copied().unwrap_or(0.0)
+                                                <= CORE_OVERLOAD_UTIL
+                                        {
+                                            self.pin_core(
+                                                tid,
+                                                core,
+                                                home,
+                                                fg_pid,
+                                                &pkg,
+                                                "home_overload",
+                                            );
+                                        }
                                     }
                                 }
                             } else if home >= 0 {
@@ -708,17 +720,45 @@ impl AffinityManager {
                 for tid in promoted {
                     if let Some(s) = sample_one_tid(tid) {
                         let util = self.window_util(tid, s.ticks, now, clk).unwrap_or(0.0);
-                        let low = {
-                            let st = self.threads.get_mut(&tid).unwrap();
-                            if util < DEMOTE_UTIL_PCT {
-                                st.low_streak += 1;
-                            } else {
-                                st.low_streak = 0;
+                        // tid 来自上方 threads.iter() 收集、循环内无删除，正常
+                        // 不可达；调度核心路径防御性跳过（不 panic、不中止整轮）
+                        let low = match self.threads.get_mut(&tid) {
+                            Some(st) => {
+                                if util < DEMOTE_UTIL_PCT {
+                                    st.low_streak += 1;
+                                } else {
+                                    st.low_streak = 0;
+                                }
+                                st.low_streak
                             }
-                            st.low_streak
+                            None => continue,
                         };
                         if low >= DEMOTE_STREAK {
                             self.demote(tid);
+                        } else if util >= DEMOTE_UTIL_PCT {
+                            // 线程仍忙且所在核心过载（util > 70%）：换到低占用
+                            // big 核分散负载、压制峰值频率。promoted 线程虽被移入
+                            // top-app 组但不属于前台——保持 big 池与迁移防抖，不
+                            // 走前台路径（前台=fg_pid 的线程，与顶层 cpuset 组区分）
+                            let (home, last_move) = match self.threads.get(&tid) {
+                                Some(st) => (st.home, st.last_move),
+                                None => continue,
+                            };
+                            if home >= 0
+                                && now.duration_since(last_move) >= MIN_MIGRATE_INTERVAL
+                                && self.core_utils.get(home as usize).copied().unwrap_or(0.0)
+                                    > CORE_OVERLOAD_UTIL
+                            {
+                                if let Some(core) = self.pick_core(&big_pool) {
+                                    // 与前台同口径：目标核不过载才迁，全核过载静止
+                                    if core != home as usize
+                                        && self.core_utils.get(core).copied().unwrap_or(0.0)
+                                            <= CORE_OVERLOAD_UTIL
+                                    {
+                                        self.pin_core(tid, core, home, 0, "-", "bg_overload");
+                                    }
+                                }
+                            }
                         }
                     }
                 }

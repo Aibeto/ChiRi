@@ -94,13 +94,13 @@ cd webui && npm run type-check
 
 - 调试与排障优先用 `debug!`，别全用 info 冲掉有价值的信息；高频路径（频率控制/帧处理）用 25-tick / 60-frame 周期摘要，状态变化（模式、PID、屏幕、attach、档位）即时打点。
 
-- 日志文件只有两个：`logs/daemon.log`（log4rs，范围不变）+ `logs/status.log`（CSV 宽表 + `type` 列：`snap` 行 1s 一条，整合原 power/telemetry 全部字段；`fg` 行事件驱动记录前台包切换，由 app\_detect 包切换确认处直写 `status_log_fg`，含同模式切换）。勿再依赖 ModeChange 事件记录前台切换——模式不变时无该事件，这是原 foreground.log 失效的根因。
+- 日志文件只有两个：`logs/daemon.log`（log4rs，范围不变）+ `logs/status.csv`（CSV 宽表 + `type` 列：仅 `snap` 一种行类型，1s 一条，整合原 power/telemetry 全部字段 + **前台包名**（`package` 列，实时取自 `app_detect::get_current_package()`，切换点由相邻行变化体现）+ **充放电状态**（`charge` 列，1s 读一次 `/sys/class/power_supply/battery/status`，归一为 charging/discharging/full/not\_charging，缺失 "-"——电流符号因厂商节点方向不一不可靠）。已无 `fg` 事件行：所有信息都在每秒汇总行内，稳定 1s 一行，不再在包切换时额外写行）。勿再依赖 ModeChange 事件记录前台切换——模式不变时无该事件，这是原 foreground.log 失效的根因。
 
 - status 写入用常驻 append 句柄（`STATUS_WRITER`，每行仅 1 次 write syscall）+ 每 256 行巡检（8MB 轮转 1 备份、被删自愈）。禁止恢复每行 open/stat 的 `append_aux_log` 模式，勿再拆分 power/telemetry/foreground 独立文件。
 
 - 启动日志归档：main 在 `create_dir_all(logs)`/`logger::init` 之前调 `logger::archive_logs_on_startup`——把上一轮整个 `logs/` 原子 rename 为同级 `ziped_<毫秒时间戳>` 临时目录，交一次性子线程 `log_archiver` 打包为 `logd/ziped_<ts>.zip`（手写 stored ZIP，零新依赖，勿引入 zip/flate2）后删除临时目录并自然退出；打包失败保留临时目录并写 ARCHIVE\_FAILED.txt（此时 logger 未 init 无法打点）。必须复制回 `logs/watchdog.pid`——看门狗先于 daemon 启动、WebUI stopScheduler 靠它终止看门狗，归档带走它会导致「关闭调度」失效。
 
-- 开发诊断日志（devimp/）：独立目录 `<模块根>/devimp/`（与 logs/ 平级，**不受日志归档影响**）。每次启动**只创建一个文件** `devimp_<unix 毫秒时间戳>.log`（首次写入惰性创建，进程生命周期不换文件、无 8MB 轮转；软上限 128MB 触顶静默停写）。总开关 `logger::set_devimp_active`（scheduler\_ipc 按 `Config.meta.dev_record` 同步，meta 允许外部修改的字段之一、WebUI「开发记录」开关 + 热重载）；模式名经 `logger::set_devimp_mode` 同步、各行 mode 列自动填充。CSV 宽表 40 列 + `type` 列：`tick`（每决策 tick × 每核心组的调频决策轨迹，CLG Worker 与 akmode on\_load\_update 写入）、`snap`（1s 环境上下文，前台包名**实时取自** **`app_detect::get_current_package()`**——ModeChange 仅模式变化时才有事件，用事件维护会写过期包名）、`place`（低频快照：前台线程的包名/线程名/落点核，全部来自 affinity 缓存——comm 在线程首见 stat 采样时缓存、fg\_cmdline 每轮刷新一次，**零新增文件读**）、`aff`（亲和迁移动作 pin/promote/demote/restore/blacklist\_skip，包名列用缓存 cmdline）、`core`（逐核 util + 钉核计数，每 2 轮一次）、`event`（模式/屏幕/热/配置状态变化）。**共用数据减小开销**：电池/CPU 温度在 1s snap 块读一次存入 `last_batt_temp/last_cpu_temp`，status.log、devimp snap、thermal（2s）三处共用（thermal 复用 ≤1s 旧值，带回滞的秒级判定无影响）；affinity 的逐核 util/在线位图/线程 comm 均为缓存复用。main 启动时 `logger::devimp_prepare()` 清旧留新（保留最近 10 份）。未开启开关时所有写入点零 IO。
+- 开发诊断日志（devimp/）：独立目录 `<模块根>/devimp/`（与 logs/ 平级，**不受日志归档影响**）。每次启动**只创建一个文件** `devimp_<unix 毫秒时间戳>.log`（首次写入惰性创建，进程生命周期不换文件、无 8MB 轮转；软上限 128MB 触顶静默停写）。总开关 `logger::set_devimp_active`（scheduler\_ipc 按 `Config.meta.dev_record` 同步，meta 允许外部修改的字段之一、WebUI「开发记录」开关 + 热重载）；模式名经 `logger::set_devimp_mode` 同步、各行 mode 列自动填充。CSV 宽表 40 列 + `type` 列：`tick`（每决策 tick × 每核心组的调频决策轨迹，CLG Worker 与 akmode on\_load\_update 写入）、`snap`（1s 环境上下文，前台包名**实时取自** **`app_detect::get_current_package()`**——ModeChange 仅模式变化时才有事件，用事件维护会写过期包名）、`place`（低频快照：前台线程的包名/线程名/落点核，全部来自 affinity 缓存——comm 在线程首见 stat 采样时缓存、fg\_cmdline 每轮刷新一次，**零新增文件读**）、`aff`（亲和迁移动作 pin/promote/demote/restore/blacklist\_skip，包名列用缓存 cmdline）、`core`（逐核 util + 钉核计数，每 2 轮一次）、`event`（模式/屏幕/热/配置状态变化）。**共用数据减小开销**：电池/CPU 温度在 1s snap 块读一次存入 `last_batt_temp/last_cpu_temp`，status.csv、devimp snap、thermal（2s）三处共用（thermal 复用 ≤1s 旧值，带回滞的秒级判定无影响）；affinity 的逐核 util/在线位图/线程 comm 均为缓存复用。main 启动时 `logger::devimp_prepare()` 清旧留新（保留最近 10 份）。未开启开关时所有写入点零 IO。
 
 - 新增日志 key 同时补 `module/config/i18n/zh.ftl` 与 `en.ftl`，命名格式 `模块-描述`。
 
@@ -270,13 +270,13 @@ WebUI 侧：
 
   - 前台（fg\_pid 由 app\_detect 提供）：每轮 1 次 `read_dir /proc/<pid>/task`，仅对**新增**线程读一次 stat 判定关键/建档；存量线程的 home 合法性仅用缓存的逐核 util 与在线位图判断。关键线程（tid==pid 或 comm 命中 RenderThread/GLThread/GameThread/UnityMain/UnityGfxDeviceW）→ prime（无 prime 的 SoC 取 big），普通 → big；boost + 亮屏才钉，否则恢复全核；已消失线程下一轮即清理释放钉核计数。
 
-  - 后台动态亲和（**不把后台全压小核**——小核过载能效灾难）：忙线程 promote 到 big、回落 demote。候选 TID 从三个后台 cpuset 的 `tasks` 文件读取（**不做 /proc 全量枚举**），每 2 轮刷新、按游标分片每轮只深扫 64 个；窗口 util = ticks 差分，**两窗防抖**（上次采样忙且本次仍忙、期间采到低负载即清标记）即 promote，不依赖采样间隔。promote 先把 TID 移入 top-app（cpuset v1 按 TID 记账）再按当前核心占用选核钉定，orig 组缓存供 demote/清理迁回。已 promote 线程每 2 轮复查，util 连续 3 次 < 5% → demote。**后台迁移仅亮屏**。
+  - 后台动态亲和（**不把后台全压小核**——小核过载能效灾难）：忙线程 promote 到 big、回落 demote。候选 TID 从三个后台 cpuset 的 `tasks` 文件读取（**不做 /proc 全量枚举**），每 2 轮刷新、按游标分片每轮只深扫 64 个；窗口 util = ticks 差分，**两窗防抖**（上次采样忙且本次仍忙、期间采到低负载即清标记）即 promote，不依赖采样间隔。promote 先把 TID 移入 top-app（cpuset v1 按 TID 记账）再按当前核心占用选核钉定，orig 组缓存供 demote/清理迁回。已 promote 线程每 2 轮复查：util 连续 3 次 < 5% → demote；线程仍忙（≥5%）且所在核心 util > 70%（`CORE_OVERLOAD_UTIL`）→ 换低占用 big 核（`bg_overload`，带 4s 迁移防抖）。过载重钉统一门控：**仅当目标核本身 util ≤ 70% 才迁**，选回同核/所有候选核都过载时静止（整体高载交给 CLG 上限与温控处理），杜绝边际收益微小的无谓搬动与两核间乒乓。**后台迁移仅亮屏**。
 
   - 在线核位图每 4 轮读一次并缓存（核热插拔不频繁）；devimp core 行每 2 轮一次。
 
   - **多应用快速切换**：每轮再平衡开头按 pid 归属立即清理旧前台线程（`pid>0 且 ≠ 当前 fg_pid` → 解钉恢复全核），不等 30s 失联——否则旧应用转后台后（Android 会短暂把它留在 top-app/foreground cpuset）其单核掩码与大核相交继续生效，8550 仅一颗 prime 会让新旧前台关键线程同核互踩，连续切换还会令 core\_pinned 计数漂移累积。过滤器幂等、零文件 IO；后台 promote 线程（pid==0）不受影响。模式变化的切换经 ModeChange → force 立即重平衡；同模式切换（无事件）依赖 2s 周期块发现，钉核延迟 ≤2s（可接受，切换清理在同一轮完成，新前台钉核时 core\_pinned 已准确）。
 
-  - 选核算法：score = 逐核 util（最近 SystemLoadUpdate 快照，即核心当前占用）+ 钉核计数 × 0.2，取核池 ∩ 在线核最低分核（离线核 util 恒 0.0、与空闲不可区分，钉到「唯一允许核为离线」会让线程有效可运行集为空而冻结，必须排除）；home 核过载（核 util > 85%）或 home 离线在 4s 防抖窗口外重钉。
+  - 选核算法：score = 逐核 util（最近 SystemLoadUpdate 快照，即核心当前占用）+ 钉核计数 × 0.2，取核池 ∩ 在线核最低分核（离线核 util 恒 0.0、与空闲不可区分，钉到「唯一允许核为离线」会让线程有效可运行集为空而冻结，必须排除）；home 核过载（核 util > 70%，`CORE_OVERLOAD_UTIL`，前后台共用）或 home 离线在 4s 防抖窗口外重钉，选回同核不写避免空迁移。
 
   - 掩码用 `mem::zeroed::<cpu_set_t>()` 分配保证对齐（`vec![0u8]` 强转是未对齐指针的脆弱实践），`libc::CPU_SET` 置位并带容量边界防护。
 
@@ -314,7 +314,7 @@ WebUI 侧：
 
 - eBPF 扩展探针（`yumi-ebpf/src/main.rs` 的 `handle_sched_wakeup`/`handle_sched_migrate_task`/`handle_cpufreq_transition`，PerCpuArray 计数）由 `cpu_monitor.rs` 仅在 ChiRi 上可选挂载（内核缺 tracepoint 时 warn 一次跳过，不影响主探针），每 2s 读累计值取增量发 `DaemonEvent::BpfStats`（Yumi 设备不发送；Yumi scheduler match 里的空 arm 仅为枚举完备性）。
 
-- chiri scheduler\_ipc 以 `TELEMETRY_LOG_INTERVAL=1s` 消费：写 `logs/status.log`（logger.rs `status_log_snapshot`，1s 一行，功耗精度 1s）+ 20s 一条 debug 摘要 `telemetry-summary`。BpfStats 不刷新 CLG 看门狗心跳（探针失效不影响负载源判定）。
+- chiri scheduler\_ipc 以 `TELEMETRY_LOG_INTERVAL=1s` 消费：写 `logs/status.csv`（logger.rs `status_log_snapshot`，1s 一行，功耗精度 1s）+ 20s 一条 debug 摘要 `telemetry-summary`。BpfStats 不刷新 CLG 看门狗心跳（探针失效不影响负载源判定）。
 
 ## 硬性约束
 

@@ -63,6 +63,8 @@ const SCENEMODE_COOLDOWN: Duration = Duration::from_secs(300);
 /// 电池温度节点（Android 标准电源供给接口，毫摄氏度）。
 /// 电池温度为主参考：反映整机持续发热，变化缓慢、不随游戏瞬时负载抖动
 const BATT_TEMP_PATH: &str = "/sys/class/power_supply/battery/temp";
+/// 电池状态节点（标准 power_supply 接口）：区分充电/放电
+const BATT_STATUS_PATH: &str = "/sys/class/power_supply/battery/status";
 
 /// 读电池温度（毫摄氏度）→ °C；节点缺失或读失败返回 None
 fn read_battery_temp() -> Option<f32> {
@@ -70,6 +72,22 @@ fn read_battery_temp() -> Option<f32> {
         .ok()
         .and_then(|s| s.trim().parse::<f64>().ok())
         .map(|v| (v / 1000.0) as f32)
+}
+
+/// 读电池充放电状态（1s snap 处消费）：归一为小写短词；节点缺失或
+/// 未知值返回 "-"（与 CSV 缺失占位一致）。电流符号因厂商节点方向不一，
+/// 不可靠，故直接读 status 字符串。
+fn read_battery_charge_state() -> String {
+    match std::fs::read_to_string(BATT_STATUS_PATH) {
+        Ok(s) => match s.trim() {
+            "Charging" => "charging".to_string(),
+            "Discharging" => "discharging".to_string(),
+            "Full" => "full".to_string(),
+            "Not charging" => "not_charging".to_string(),
+            _ => "-".to_string(),
+        },
+        Err(_) => "-".to_string(),
+    }
 }
 
 /// 单传感器三级判定（带回滞）：>= 硬限压 hard_cap；>= 软限压 soft_cap；
@@ -581,7 +599,7 @@ pub fn start_scheduler_thread(
                 }
 
                 // 状态日志 snapshot 行（1s 精度）：整合遥测 + 热保护 + 模式状态到
-                // logs/status.log（替代原 telemetry.log + power.log 两条流）。
+                // logs/status.csv（替代原 telemetry.log + power.log 两条流）。
                 // telemetry 线程 1s 刷新共享原子量；OPlus 机型功耗优先走 bcc_parms
                 // 私有节点（标准 power_supply 节点约 10s 才刷新，1s 采样必须绕开）。
                 if last_telemetry_log.elapsed() >= TELEMETRY_LOG_INTERVAL {
@@ -601,8 +619,12 @@ pub fn start_scheduler_thread(
                     // 前台包名实时取自 app_detect（含同模式切换；ModeChange 仅在
                     // 模式变化时才有事件，用事件维护会写过期包名）
                     let fg_package = crate::monitor::app_detect::get_current_package();
+                    // 充放电状态：1s 一次读 status 节点（电流符号厂商方向不一，不可靠）
+                    let charge_state = read_battery_charge_state();
                     crate::logger::status_log_snapshot(
                         &current_mode,
+                        &fg_package,
+                        &charge_state,
                         is_screen_on,
                         last_batt_temp,
                         last_cpu_temp,
@@ -740,7 +762,7 @@ pub fn start_scheduler_thread(
                             ),
                         );
                     }
-                    // 功耗监控已并入 status.log snapshot 行（1s），此处不再重复写
+                    // 功耗监控已并入 status.csv snapshot 行（1s），此处不再重复写
                 }
 
                 // 触摸事件（事件驱动）：每次醒来先处理触摸队列。on_touch 更新共享
@@ -963,7 +985,7 @@ pub fn start_scheduler_thread(
                             "new" => mode.as_str(),
                             "temp" => temperature
                         )));
-                        // 前台切换已改由 app_detect 直写 status.log fg 行（含同模式切换），
+                        // 前台切换已改由 app_detect 直写 status.csv fg 行（含同模式切换），
                         // ModeChange 事件仅在模式变化时产生，此处不再重复记录
 
                         if old_mode != mode {

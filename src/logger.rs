@@ -214,32 +214,31 @@ pub fn update_level(level_str: &str) {
 }
 
 // ════════════════════════════════════════════════════════════════
-//  状态日志（logs/status.log，CSV 宽表）：daemon.log 之外的唯一状态文件
+//  状态日志（logs/status.csv，CSV 宽表）：daemon.log 之外的唯一状态文件
 // ════════════════════════════════════════════════════════════════
 //
-// 整合原 foreground / power / telemetry 三个独立 CSV，用 `type` 列区分行类型：
-// - snap 行（1s 一条，chiri 调度线程）：遥测 + 热保护 + 模式状态
-// - fg 行（事件驱动，app_detect）：前台包切换——**含同模式切换**。
-//   修复原 log_foreground 依赖 ModeChange 事件（仅模式变化才发送）导致
-//   同模式 App 切换无记录的失效问题。
+// 整合原 foreground / power / telemetry 三个独立 CSV。仅一种行类型：
+// - snap 行（1s 一条，chiri 调度线程）：遥测 + 热保护 + 模式状态 + 前台包名
+//   + 充放电状态——所有信息都在每秒汇总行内，稳定 1s 一行（前台包切换不
+//   再单独写 fg 行，切换点由相邻行的 package 列变化体现）。
 //
 // 开销控制（对比旧 append_aux_log 每行 3 次 open + stat）：
 // - Mutex 常驻 append 句柄：每次写入仅一次 write syscall；
-// - 每 256 行巡检一次：轮转（8MB）+ 被删自愈（外部删除 status.log 后自动重建）；
+// - 每 256 行巡检一次：轮转（8MB）+ 被删自愈（外部删除 status.csv 后自动重建）；
 // - 写失败重开重试一次，全程不 unwrap、不阻塞调度线程。
 
 /// 状态日志路径（CSV 宽表）
-const STATUS_LOG_REL: &str = "logs/status.log";
+const STATUS_LOG_REL: &str = "logs/status.csv";
 /// 单文件上限 8MB，保留 1 份备份；1s 一条约 250B，轮转周期约 6 小时
 const STATUS_LOG_MAX_BYTES: u64 = 8 * 1024 * 1024;
 /// 每 N 行巡检一次（轮转 + 被删自愈）；1s 一条时约 4 分钟巡检一次
 const STATUS_CHECK_EVERY: u64 = 256;
 
-/// CSV 表头（列序由 status_log_snapshot / status_log_fg 保证对齐）：
-/// ts,type,mode,screen_on,batt_temp,cpu_temp,thermal_cap_pct,thermal_free_pct,clg_active,
-/// psi_cpu_some,psi_io_some,psi_mem_some,gpu_busy_pct,batt_voltage_v,batt_current_ma,
-/// batt_power_w,wakeups,migrations,freq_trans,fg_temp,package,old_mode,new_mode
-const STATUS_HEADER: &str = "timestamp,type,mode,screen_on,batt_temp,cpu_temp,thermal_cap_pct,thermal_free_pct,clg_active,psi_cpu_some,psi_io_some,psi_mem_some,gpu_busy_pct,batt_voltage_v,batt_current_ma,batt_power_w,wakeups,migrations,freq_trans,fg_temp,package,old_mode,new_mode";
+/// CSV 表头（列序由 status_log_snapshot 保证对齐）：
+/// ts,type,mode,package,charge,screen_on,batt_temp,cpu_temp,thermal_cap_pct,thermal_free_pct,
+/// clg_active,psi_cpu_some,psi_io_some,psi_mem_some,gpu_busy_pct,batt_voltage_v,batt_current_ma,
+/// batt_power_w,wakeups,migrations,freq_trans
+const STATUS_HEADER: &str = "timestamp,type,mode,package,charge,screen_on,batt_temp,cpu_temp,thermal_cap_pct,thermal_free_pct,clg_active,psi_cpu_some,psi_io_some,psi_mem_some,gpu_busy_pct,batt_voltage_v,batt_current_ma,batt_power_w,wakeups,migrations,freq_trans";
 
 /// 常驻写入器：append 句柄 + 巡检计数
 struct StatusWriter {
@@ -288,7 +287,7 @@ fn status_check(w: &mut StatusWriter) {
     w.file = status_open();
 }
 
-/// 写一行到 status.log（调用方保证 fields 与 STATUS_HEADER 列数对齐）
+/// 写一行到 status.csv（调用方保证 fields 与 STATUS_HEADER 列数对齐）
 fn status_write_line(fields: &[&str]) {
     let line = fields.join(",");
     let mut w = STATUS_WRITER.lock().unwrap_or_else(|p| p.into_inner());
@@ -327,11 +326,14 @@ fn fmt_num(v: Option<f32>, digits: usize) -> String {
 }
 
 /// 写 snapshot 行（1s 一条，chiri 调度线程）：
-/// 遥测（PSI/GPU/电池，含 OPlus bcc 实时数据）+ 热保护（温度/压制/豁免）+ 模式状态。
-/// 替代原 power.log（2s）+ telemetry.log（1s）两条流，精度与信息量不变、文件合一。
+/// 遥测（PSI/GPU/电池，含 OPlus bcc 实时数据）+ 热保护（温度/压制/豁免）
+/// + 模式状态 + 前台包名（每行实时快照，切换点由相邻行变化体现）
+/// + 充放电状态（charging/discharging/full/not_charging，未知为 "-"）。
 #[allow(clippy::too_many_arguments)]
 pub fn status_log_snapshot(
     mode: &str,
+    package: &str,
+    charge: &str,
     screen_on: bool,
     batt_temp: Option<f32>,
     cpu_temp: Option<f32>,
@@ -353,6 +355,8 @@ pub fn status_log_snapshot(
         &format_now(),
         "snap",
         mode,
+        package,
+        charge,
         if screen_on { "1" } else { "0" },
         &fmt_num(batt_temp, 1),
         &fmt_num(cpu_temp, 1),
@@ -369,40 +373,6 @@ pub fn status_log_snapshot(
         &wakeups.to_string(),
         &migrations.to_string(),
         &freq_trans.to_string(),
-        NA,
-        NA,
-        NA,
-        NA,
-    ]);
-}
-
-/// 写 fg 行（事件驱动，app_detect 包切换确认时调用，含同模式切换）：
-/// 记录前台包名与切换前后的模式（old_mode 为前一前台包的生效模式）。
-pub fn status_log_fg(pkg: &str, screen_on: bool, temp: &str, old_mode: &str, new_mode: &str) {
-    status_write_line(&[
-        &format_now(),
-        "fg",
-        NA,
-        if screen_on { "1" } else { "0" },
-        NA,
-        NA,
-        NA,
-        NA,
-        NA,
-        NA,
-        NA,
-        NA,
-        NA,
-        NA,
-        NA,
-        NA,
-        NA,
-        NA,
-        NA,
-        temp,
-        pkg,
-        old_mode,
-        new_mode,
     ]);
 }
 
@@ -422,7 +392,7 @@ fn format_now() -> String {
 //  开发诊断日志（devimp/devimp_<启动时间戳>.log）
 // ════════════════════════════════════════════════════════════════
 //
-// 供离线分析改善调度的按核诊断数据，与 status.log 分离：
+// 供离线分析改善调度的按核诊断数据，与 status.csv 分离：
 // - 独立目录 `devimp/`（模块根，与 logs/ 平级），**不受启动日志归档影响**
 //   （归档只 rename 整个 logs/ 目录，devimp/ 自行管理）；
 // - 每次启动**只创建一个文件** `devimp_<unix 毫秒时间戳>.log`：文件名在首次
