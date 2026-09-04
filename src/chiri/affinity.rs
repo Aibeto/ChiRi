@@ -128,6 +128,7 @@ fn kernel_version() -> Option<(u32, u32, u32)> {
 /// cpu.uclamp.max 支持状态：Unknown = 未判定，Ok = 可用，Unsupported = 已纠正关闭。
 /// uclamp 主线自 v5.3 引入，老内核（如 8998 的 4.4）无该节点；
 /// 厂商 backport 的实现质量不一，故版本判定之外再做写入回读验证。
+#[derive(PartialEq)]
 enum UclampSupport {
     Unknown,
     Ok,
