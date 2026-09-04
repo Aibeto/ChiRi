@@ -707,6 +707,12 @@ pub struct AffinityConfig {
     /// uclamp.min 会让 schedutil 独立于 CLG 抬频，与动态上限语义叠加，默认关闭
     #[serde(default = "d_aff_uclamp_min")]
     pub top_app_uclamp_min_pct: u32,
+    /// boost 模式下 top-app 的 cpu.uclamp.max 百分比（0 = 不启用）。
+    /// 任务级钳制：只限 top-app 的 util 需求，schedutil 频率随之回落、EAS 能量计算
+    /// 同步感知；空闲间隙微秒级降到地板，比 scaling_max_freq 硬顶更贴合 EAS。
+    /// 按机型在 yaml 配置；运行时内核 < 5.3 / 节点缺失 / 写入回读无效时自动纠正关闭
+    #[serde(default = "d_aff_uclamp_max")]
+    pub top_app_uclamp_max_pct: u32,
     /// boost 模式下把前台进程全部线程迁移（sched_setaffinity）到大核+超大核；
     /// 退出 boost 恢复全核
     #[serde(default = "crate::utils::default_true")]
@@ -716,12 +722,16 @@ pub struct AffinityConfig {
 fn d_aff_uclamp_min() -> u32 {
     0
 }
+fn d_aff_uclamp_max() -> u32 {
+    0
+}
 
 impl Default for AffinityConfig {
     fn default() -> Self {
         Self {
             enabled: true,
             top_app_uclamp_min_pct: d_aff_uclamp_min(),
+            top_app_uclamp_max_pct: d_aff_uclamp_max(),
             pin_foreground_threads: true,
         }
     }
@@ -731,6 +741,7 @@ impl AffinityConfig {
     /// 校验：uclamp 百分比限制在 0..=100
     pub fn normalize(&mut self) {
         self.top_app_uclamp_min_pct = self.top_app_uclamp_min_pct.clamp(0, 100);
+        self.top_app_uclamp_max_pct = self.top_app_uclamp_max_pct.clamp(0, 100);
     }
 }
 

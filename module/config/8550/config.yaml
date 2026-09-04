@@ -44,6 +44,9 @@ Affinity:
   # boost 模式下 top-app 的 cpu.uclamp.min 百分比（0 = 不启用；
   # uclamp.min 会让 schedutil 独立于 CLG 抬频，默认关闭避免与动态上限语义打架）
   top_app_uclamp_min_pct: 0
+  # boost 模式下 top-app 的 cpu.uclamp.max 百分比（任务级性能上限，EAS 原生感知；
+  # 内核 >= 5.3 生效，写入回读验证失败会自动纠正关闭）
+  top_app_uclamp_max_pct: 85
   # 把前台进程全部线程迁移（sched_setaffinity）到大核+超大核，退出 boost 恢复全核
   pin_foreground_threads: true
 

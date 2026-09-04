@@ -21,6 +21,8 @@
 /// - `/dev/cpuset/top-app`、`foreground` 的 cpus 收窄到大核+超大核（区间随命中 SoC 变化）；
 /// - `background`/`system-background`/`restricted` 的 cpus 压到小核，防后台任务抢大核；
 /// - 可选写 `/dev/cpuctl/top-app/cpu.uclamp.min` 抬前台调度利用率下限；
+/// - 可选写 `/dev/cpuctl/top-app/cpu.uclamp.max` 钳前台任务级性能上限（EAS 原生感知，
+///   按机型 yaml 配置；内核 < 5.3 / 节点缺失 / 写入回读无效时自动纠正关闭）；
 /// - 可选把前台进程全部线程 `sched_setaffinity` 迁移到大核+超大核（线程迁移）。
 ///
 /// normal/doze 布局：仅保留「后台压小核」的省电收益，top-app/foreground 恢复快照。
@@ -110,6 +112,31 @@ fn set_tid_affinity(tid: i32, cpu_ids: &[usize]) -> bool {
     ret == 0
 }
 
+/// 读内核版本 (major, minor, patch)，解析 /proc/sys/kernel/osrelease
+/// （如 "5.15.78-android13-8-g..."，失败返回 None）。
+fn kernel_version() -> Option<(u32, u32, u32)> {
+    let s = std::fs::read_to_string("/proc/sys/kernel/osrelease").ok()?;
+    let head = s.trim().split(['-', '+', ' ']).next()?;
+    let mut it = head.split('.');
+    Some((
+        it.next()?.parse().ok()?,
+        it.next()?.parse().ok()?,
+        it.next().and_then(|v| v.parse().ok()).unwrap_or(0),
+    ))
+}
+
+/// cpu.uclamp.max 支持状态：Unknown = 未判定，Ok = 可用，Unsupported = 已纠正关闭。
+/// uclamp 主线自 v5.3 引入，老内核（如 8998 的 4.4）无该节点；
+/// 厂商 backport 的实现质量不一，故版本判定之外再做写入回读验证。
+enum UclampSupport {
+    Unknown,
+    Ok,
+    Unsupported,
+}
+
+/// top-app 的 cpu.uclamp.max 节点路径
+const UCLAMP_MAX_PATH: &str = "/dev/cpuctl/top-app/cpu.uclamp.max";
+
 /// CPU 亲和控制器
 pub struct AffinityManager {
     /// sysfs 路径存在性缓存（复用 SysPathExist 已探测的 cpuset/cpuctl 能力位）
@@ -118,6 +145,10 @@ pub struct AffinityManager {
     snapshot: Option<Vec<(String, String)>>,
     /// cpu.uclamp.min 快照值；None = 未快照或节点不存在
     uclamp_snapshot: Option<String>,
+    /// cpu.uclamp.max 快照值；None = 未快照
+    uclamp_max_snapshot: Option<String>,
+    /// cpu.uclamp.max 支持状态（机型配置开启时惰性判定，识别后缓存避免重复探测）
+    uclamp_max_support: UclampSupport,
     /// 当前生效布局类型（去重用）
     applied_kind: u8,
     /// 上次迁移线程的前台 PID（去重用）
@@ -130,6 +161,8 @@ impl AffinityManager {
             sys,
             snapshot: None,
             uclamp_snapshot: None,
+            uclamp_max_snapshot: None,
+            uclamp_max_support: UclampSupport::Unknown,
             applied_kind: KIND_NONE,
             last_pinned_pid: 0,
         }
@@ -155,6 +188,13 @@ impl AffinityManager {
         let uclamp_path = "/dev/cpuctl/top-app/cpu.uclamp.min";
         self.uclamp_snapshot = Some(
             std::fs::read_to_string(uclamp_path)
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_default(),
+        );
+        self.uclamp_max_snapshot = Some(
+            std::fs::read_to_string(UCLAMP_MAX_PATH)
                 .ok()
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
@@ -217,6 +257,7 @@ impl AffinityManager {
             if old_kind == KIND_BOOST {
                 self.restore_foreground_groups();
                 self.restore_uclamp();
+                self.restore_uclamp_max();
                 if cfg.pin_foreground_threads {
                     self.pin_threads(fg_pid, &all_cpus); // 恢复全核亲和
                 }
@@ -274,6 +315,74 @@ impl AffinityManager {
         }
     }
 
+    /// boost 模式下写 top-app 的 cpu.uclamp.max（任务级性能上限钳制，EAS 原生感知）。
+    /// 配置为 0 时不启用。三重兜底纠正（任一不满足即置 Unsupported 永久跳过，只打点一次）：
+    /// 1. 内核版本识别：uclamp 主线 v5.3 引入，< 5.3 判定不支持（防老内核配了也白配）；
+    /// 2. 节点存在性：/dev/cpuctl/top-app/cpu.uclamp.max 必须存在（防半成品 backport）；
+    /// 3. 写入回读验证：写入 "NN.00" 后回读比对（防厂商内核静默忽略写入）。
+    fn apply_uclamp_max(&mut self, cfg: &AffinityConfig) {
+        let pct = cfg.top_app_uclamp_max_pct;
+        if pct == 0 || self.uclamp_max_support == UclampSupport::Unsupported {
+            return;
+        }
+        if self.uclamp_max_support == UclampSupport::Unknown {
+            let ver = kernel_version();
+            let ver_ok = ver.map_or(false, |(a, b, _)| a > 5 || (a == 5 && b >= 3));
+            let node_ok = std::path::Path::new(UCLAMP_MAX_PATH).exists();
+            if !ver_ok || !node_ok {
+                self.uclamp_max_support = UclampSupport::Unsupported;
+                log::warn!(
+                    "{}",
+                    t_with_args(
+                        "affinity-uclamp-unavailable",
+                        &fluent_args!(
+                            "version" => ver
+                                .map(|(a, b, _)| format!("{a}.{b}"))
+                                .unwrap_or_else(|| "unknown".to_string()),
+                            "reason" => if ver_ok { "node missing" } else { "kernel < 5.3" }
+                        )
+                    )
+                );
+                return;
+            }
+        }
+        // 回读验证：uclamp.max 内核格式 "NN.NN"，解析为数值与配置比对
+        let val = format!("{pct}.00");
+        if crate::utils::try_write_file(UCLAMP_MAX_PATH, &val).is_ok() {
+            let applied = std::fs::read_to_string(UCLAMP_MAX_PATH)
+                .ok()
+                .and_then(|s| s.trim().parse::<f32>().ok())
+                .map(|v| (v - pct as f32).abs() < 0.01)
+                .unwrap_or(false);
+            if applied {
+                self.uclamp_max_support = UclampSupport::Ok;
+            } else {
+                self.uclamp_max_support = UclampSupport::Unsupported;
+                log::warn!(
+                    "{}",
+                    t_with_args(
+                        "affinity-uclamp-unavailable",
+                        &fluent_args!(
+                            "version" => kernel_version()
+                                .map(|(a, b, _)| format!("{a}.{b}"))
+                                .unwrap_or_else(|| "unknown".to_string()),
+                            "reason" => "write not applied"
+                        )
+                    )
+                );
+            }
+        }
+    }
+
+    /// 恢复 uclamp.max 快照（空串 = 节点原本不存在或不可读，跳过）
+    fn restore_uclamp_max(&self) {
+        if let Some(v) = &self.uclamp_max_snapshot {
+            if !v.is_empty() {
+                let _ = crate::utils::try_write_file(UCLAMP_MAX_PATH, v);
+            }
+        }
+    }
+
     /// 把前台进程全部线程迁移到指定 CPU 集合（sched_setaffinity），
     /// 迁移结果打 debug 摘要并记录 PID 去重。
     fn pin_threads(&mut self, pid: i32, cpu_ids: &[usize]) {
@@ -321,6 +430,7 @@ impl AffinityManager {
             }
         }
         self.restore_uclamp();
+        self.restore_uclamp_max();
         let ranges = crate::common::chiri_core_ranges();
         let all_cpus: Vec<usize> = (0..ranges.prime.end.max(ranges.big.end)).collect();
         let pid = self.last_pinned_pid;

@@ -203,6 +203,7 @@ affinity-pin-threads = [Affinity] 前台 pid={ $pid } 线程迁移: { $pinned }/
 affinity-pin-failed = [Affinity] 前台 pid={ $pid } 无可迁移线程（进程可能已退出）
 affinity-threads-restored = [Affinity] 已恢复 pid={ $pid } 的 { $count } 个线程全核亲和
 affinity-write-failed = [Affinity] cpuset 写入失败: { $path }
+affinity-uclamp-unavailable = [Affinity] top_app_uclamp_max_pct 不可用已自动纠正（内核 { $version }，原因: { $reason }；uclamp 需内核 >= 5.3 且节点可写）
 affinity-released = [Affinity] 已释放接管，恢复系统原始亲和配置
 
 # --- CoreCtl（core_ctl 核心在线接管）---

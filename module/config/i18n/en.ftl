@@ -204,6 +204,7 @@ affinity-pin-threads = [Affinity] foreground pid={ $pid } threads migrated: { $p
 affinity-pin-failed = [Affinity] no migratable threads for foreground pid={ $pid } (process may have exited)
 affinity-threads-restored = [Affinity] restored full-core affinity for { $count } threads of pid={ $pid }
 affinity-write-failed = [Affinity] cpuset write failed: { $path }
+affinity-uclamp-unavailable = [Affinity] top_app_uclamp_max_pct unavailable, auto-corrected (kernel { $version }, reason: { $reason }; uclamp requires kernel >= 5.3 with a writable node)
 affinity-released = [Affinity] takeover released, system affinity config restored
 
 # --- CoreCtl (core_ctl online control) ---
