@@ -1,66 +1,38 @@
-﻿# ============================================================
-# MSM8998（骁龙 835）处理器独立配置
-# 核心分布：4×A73 大核 + 4×A53 小核，CPU ID 0-3 小核 / 4-7 大核（无超大核）。
-# 核心组区间按命中 SoC 在代码中区分（common::chiri_core_ranges），akmode 的 prime 组不生效。
-# ------------------------------------------------------------
-# 本文件经 include_str! 编译进守护进程二进制（防篡改）：
-#   - 调优参数以二进制内嵌内容为准，修改磁盘副本无效（daemon 启动/重载时自动还原）；
-#   - 仅 meta.loglevel / meta.language 允许外部修改（WebUI 日志等级/语言切换，热重载生效）；
-#   - 磁盘副本被删也会由 daemon 启动时按嵌入内容重建。
-# 特调参数在 module/config/normal/akmode.yaml（同样嵌入二进制），scenemode 同理。
-# ============================================================
-
-# 元数据信息
 meta:
   name: "config_8998"
   author: "ChiRi"
   language: "zh"
   loglevel: "INFO"
+  dev_record: true
 
-# 主要功能开关
 function:
   CpuIdleScalingGovernor: true
   IOOptimization: true
 
-# IO 设置
 IO_Settings:
   Scheduler: ""
   read_ahead_kb: "512"
   nomerges: "1"
   iostats: "0"
 
-# CPU 空闲设置：menu 调度器按预期空闲时长选最深 C 状态，降低空闲功耗与发热；
-# 内核无 menu（写入失败静默跳过）或想关闭时把开关改回 false
 CpuIdle:
   current_governor: "menu"
 
-# 息屏进入 scenemode 的延迟（秒）：屏幕熄灭超过该时长后切换到 scenemode 省电配置，
-# 亮屏即恢复原模式。默认 300（5 分钟）。
 scene_mode_delay_secs: 300
 
-# CPU 亲和与线程迁移（ChiRi 专属）：boost 模式（performance/fast/特调）下
-# top-app/foreground cpuset 收窄到大核+超大核、后台分组压小核；normal/doze 恢复
-# 系统布局仅保留后台压小核。所有写入先快照，release/开关关闭时还原。
 Affinity:
   enabled: true
-  # boost 模式下 top-app 的 cpu.uclamp.min 百分比（0 = 不启用；
-  # uclamp.min 会让 schedutil 独立于 CLG 抬频，默认关闭避免与动态上限语义打架）
   top_app_uclamp_min_pct: 0
-  # 内核 4.4 无 uclamp（主线 v5.3 引入），保持 0；配了也会被运行时内核版本识别纠正关闭
   top_app_uclamp_max_pct: 0
-  # 把前台进程全部线程迁移（sched_setaffinity）到大核+超大核，退出 boost 恢复全核
   pin_foreground_threads: true
 
-# core_ctl 核心在线接管（ChiRi 专属）：boost 模式下把各 cluster 的 min_cpus
-# 抬到全组常在线，防厂商热插拔与 ChiRi 调频打架；退出 boost 恢复快照。
 CoreCtl:
   enabled: true
+  # scenemode 离线核：息屏超时进入 scenemode 后小核全开（不足 3 个从大核补足），
+  # 大核簇/prime 下线省电。8998 内核 4.4 的热插拔路径质量未知，默认关闭
+  # （如需省电可改 true 自行验证）。
+  scenemode_offline: false
 
-# 热保护：电池温度为主参考（高权重，反映整机持续发热、变化缓慢不随游戏瞬时负载抖动）；
-# CPU 温度仅作极端参考（大型游戏中 CPU 由内核 95°C 级温控兜底，这里只在极端热时参与）。
-# 压制带豁免档 free_above：性能上限 >= 该值时不钳制，任何温度下持续高负载都能到达
-# 硬件最高频，过热兜底交给系统/内核温控。仅作用于 CLG 接管的模式（fast/akmode 不受影响）。
-# 带 3°C 回滞防振荡，省略字段用代码默认值。
 Thermal:
   enabled: true
   batt_soft_temp_c: 41
@@ -72,13 +44,6 @@ Thermal:
   free_above: 0.80
   hysteresis_c: 3
 
-# --- 性能模式 ---
-# 各模式均采用统一的 CLG 机制（动态上限）：CLG 只写 scaling_max_freq（min 一次性压到
-# 硬件最低），schedutil 在 [最低, 上限] 内按瞬时负载自主调频，空闲间隙内核微秒级降到
-# 地板频率，消除锁频空转发热。升频 = 平滑抬高上限（带速率限制），降频 = 一步到位降上限。
-# 触摸升频：触摸时抬高上限窗口，窗口结束回落。
-
-# 省电模式（相对 balance 更保守：更高的升频门槛、更低的性能上限）
 powersave:
   cpu_load_governor:
     up_threshold: 0.90
@@ -100,7 +65,6 @@ powersave:
     touch_boost_ms: 350
     touch_boost_tiers: 1
 
-# 均衡模式（性能上限全开：允许触达硬件最高频；降频激进：1 tick 即降、低负载直接降，日常默认档）
 balance:
   cpu_load_governor:
     up_threshold: 0.72
@@ -122,7 +86,6 @@ balance:
     touch_boost_ms: 400
     touch_boost_tiers: 1
 
-# 性能模式（相对新 balance 更偏性能：更低的升频门槛、更高的地板、更保守的降频）
 performance:
   cpu_load_governor:
     up_threshold: 0.55
@@ -143,5 +106,3 @@ performance:
     touch_boost_enabled: true
     touch_boost_ms: 500
     touch_boost_tiers: 1
-
-# 极速模式（fast）无需配置：由守护进程硬编码把 min=max 锁到硬件最高频，见 src/chiri/fast.rs

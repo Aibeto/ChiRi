@@ -1,21 +1,10 @@
-﻿# ============================================================
-# SM8550（骁龙 8 Gen 2）处理器独立配置
-# ------------------------------------------------------------
-# 本文件经 include_str! 编译进守护进程二进制（防篡改）：
-#   - 调优参数以二进制内嵌内容为准，修改磁盘副本无效（daemon 启动/重载时自动还原）；
-#   - 仅 meta.loglevel / meta.language 允许外部修改（WebUI 日志等级/语言切换，热重载生效）；
-#   - 磁盘副本被删也会由 daemon 启动时按嵌入内容重建。
-# 特调参数在 module/config/normal/akmode.yaml（同样嵌入二进制），scenemode 同理。
-# ============================================================
-
-# 元数据信息
 meta:
   name: "config_8550"
   author: "ChiRi"
   language: "zh"
   loglevel: "INFO"
+  dev_record: true
 
-# 主要功能开关
 function:
   CpuIdleScalingGovernor: true
   IOOptimization: true
@@ -27,39 +16,24 @@ IO_Settings:
   nomerges: "1"
   iostats: "0"
 
-# CPU 空闲设置：menu 调度器按预期空闲时长选最深 C 状态，降低空闲功耗与发热；
-# 内核无 menu（写入失败静默跳过）或想关闭时把开关改回 false
 CpuIdle:
   current_governor: "menu"
 
-# 息屏进入 scenemode 的延迟（秒）：屏幕熄灭超过该时长后切换到 scenemode 省电配置，
-# 亮屏即恢复原模式。默认 300（5 分钟）。
 scene_mode_delay_secs: 300
 
-# CPU 亲和与线程迁移（ChiRi 专属）：boost 模式（performance/fast/特调）下
-# top-app/foreground cpuset 收窄到大核+超大核、后台分组压小核；normal/doze 恢复
-# 系统布局仅保留后台压小核。所有写入先快照，release/开关关闭时还原。
 Affinity:
   enabled: true
-  # boost 模式下 top-app 的 cpu.uclamp.min 百分比（0 = 不启用；
-  # uclamp.min 会让 schedutil 独立于 CLG 抬频，默认关闭避免与动态上限语义打架）
   top_app_uclamp_min_pct: 0
-  # boost 模式下 top-app 的 cpu.uclamp.max 百分比（任务级性能上限，EAS 原生感知；
-  # 内核 >= 5.3 生效，写入回读验证失败会自动纠正关闭）
   top_app_uclamp_max_pct: 85
-  # 把前台进程全部线程迁移（sched_setaffinity）到大核+超大核，退出 boost 恢复全核
   pin_foreground_threads: true
 
-# core_ctl 核心在线接管（ChiRi 专属）：boost 模式下把各 cluster 的 min_cpus
-# 抬到全组常在线，防厂商热插拔与 ChiRi 调频打架；退出 boost 恢复快照。
 CoreCtl:
   enabled: true
+  # scenemode 离线核：息屏超时进入 scenemode 后小核全开（保证 ≥3 个待命核响应
+  # 电源键等事件，另留 1 个专用小核给调度服务），大核簇/prime 整簇断电消除
+  # 空转漏电流；little 持续顶满上限则退回 powersave 并冷却 300s。亮屏按快照恢复。
+  scenemode_offline: true
 
-# 热保护：电池温度为主参考（高权重，反映整机持续发热、变化缓慢不随游戏瞬时负载抖动）；
-# CPU 温度仅作极端参考（大型游戏中 CPU 由内核 95°C 级温控兜底，这里只在极端热时参与）。
-# 压制带豁免档 free_above：性能上限 >= 该值时不钳制，任何温度下持续高负载都能到达
-# 硬件最高频，过热兜底交给系统/内核温控。仅作用于 CLG 接管的模式（fast/akmode 不受影响）。
-# 带 3°C 回滞防振荡，省略字段用代码默认值。
 Thermal:
   enabled: true
   batt_soft_temp_c: 41
@@ -71,9 +45,6 @@ Thermal:
   free_above: 0.80
   hysteresis_c: 3
 
-# --- 性能模式 ---
-
-# 省电模式
 powersave:
   cpu_load_governor:
     up_threshold: 0.90
@@ -95,7 +66,6 @@ powersave:
     touch_boost_ms: 350
     touch_boost_tiers: 1
 
-# 均衡模式
 balance:
   cpu_load_governor:
     up_threshold: 0.72
@@ -117,7 +87,6 @@ balance:
     touch_boost_ms: 400
     touch_boost_tiers: 1
 
-# 性能模式
 performance:
   cpu_load_governor:
     up_threshold: 0.55
@@ -138,5 +107,3 @@ performance:
     touch_boost_enabled: true
     touch_boost_ms: 500
     touch_boost_tiers: 1
-
-# 极速模式（fast）无需配置：由守护进程硬编码把 min=max 锁到硬件最高频，见 src/chiri/fast.rs

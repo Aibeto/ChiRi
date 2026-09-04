@@ -454,7 +454,8 @@ impl AkmodeGovernor {
         }
 
         self.log_counter += 1;
-        if self.log_counter % 25 == 0 {
+        // format! 在宏外求值，用 log_enabled! 门控省掉 INFO 级别下的分配
+        if self.log_counter % 25 == 0 && log::log_enabled!(log::Level::Debug) {
             let mode = crate::chiri::config::tier_to_mode(self.current_tier);
             let (l_over, l_under) = (stats[0].over, stats[0].under);
             let (b_over, b_under) = (stats[1].over, stats[1].under);
@@ -476,6 +477,53 @@ impl AkmodeGovernor {
                     )
                 )
             );
+        }
+
+        // devimp tick 行：每核心组一行（开发记录开启时才有 IO）。
+        // decision = 本 tick 判定方向；deb 列 = 条件已持续等待的毫秒数。
+        if crate::logger::devimp_active() {
+            let names = ["little", "big", "prime"];
+            let decision = match desired_dir {
+                Some(1) => "up",
+                Some(0) => "down",
+                _ => "hold",
+            };
+            let pending_ms = self
+                .pending_since
+                .map_or(0, |s| now.duration_since(s).as_millis() as u32);
+            let (deb_up, deb_down) = if desired_dir == Some(1) {
+                (pending_ms, 0)
+            } else {
+                (0, pending_ms)
+            };
+            for (i, s) in stats.iter().enumerate() {
+                let group_util = s
+                    .range
+                    .clone()
+                    .filter_map(|c| core_utils.get(c).copied())
+                    .fold(0.0_f32, f32::max);
+                let (cur_max, hw_max) = self
+                    .clusters
+                    .iter()
+                    .find(|c| c.core_name == names[i])
+                    .map(|c| (c.current_max, *c.available_freqs.last().unwrap_or(&0)))
+                    .unwrap_or((0, 0));
+                crate::logger::devimp_tick(
+                    names[i],
+                    &format!("{:.2}", group_util),
+                    s.over as u32,
+                    s.under as u32,
+                    "-",
+                    "-",
+                    &cur_max.to_string(), // cur_freq_khz 列：原始 kHz
+                    &hw_max.to_string(),  // max_freq_khz 列：原始 kHz
+                    decision,
+                    deb_up,
+                    deb_down,
+                    "-",
+                    false,
+                );
+            }
         }
     }
 

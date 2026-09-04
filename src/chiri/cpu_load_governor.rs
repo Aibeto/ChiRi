@@ -314,13 +314,28 @@ struct CoreGroupWorker {
     /// 压制豁免档（f32 bit pattern，0..1）：current_perf >= 该值时不钳制，
     /// 保证任何温度下持续高负载都能到达硬件最高频
     thermal_free_above: Arc<AtomicU32>,
+    /// 上次决策摘要（devimp tick 行用，on_load_update 填写）
+    dev_decision: &'static str,
+    dev_over: u32,
+    dev_under: u32,
+    dev_tgt_perf: f32,
+    dev_raw_util: f32,
+    dev_prev_perf: f32,
 }
 
 impl CoreGroupWorker {
     /// 在新线程中运行 Worker 事件循环：接收负载数据、做决策、写频。
     /// 线程退出（stop 或 channel 断开）前恢复系统原始状态。
+    ///
+    /// 灵敏性说明：性能响应全部走**推送事件**，与下方超时无关——
+    /// - 负载决策：cpu_monitor 每 160ms（特调 40ms）send 负载包，recv_timeout
+    ///   立即返回 → on_load_update + flush，零延迟；
+    /// - 触摸升频：scheduler_ipc 广播空负载包，同样立即打断阻塞 → flush。
+    /// 超时分支只承担两件非性能任务：清理过期触摸窗口、重写当前频率防篡改
+    /// （厂商守护进程的篡改也是秒级动作，1s 粒度足够）。空闲（无负载事件）
+    /// 时 Worker 从每秒 ~6 次空转降到 1 次。
     fn run(mut self) {
-        let tick_interval = Duration::from_millis(160);
+        let tick_interval = Duration::from_secs(1);
         let mut log_counter: u32 = 0;
 
         loop {
@@ -352,8 +367,28 @@ impl CoreGroupWorker {
     }
 
     /// 决策入口：每次 SystemLoadUpdate 触发，只计算目标性能比，不写 sysfs。
+    /// 同时记录 devimp tick 行所需摘要（over/under 计数、目标性能、决策标签）。
     fn on_load_update(&mut self, core_utils: &[f32]) {
         let raw_util = self.cluster.max_util(core_utils);
+        self.dev_raw_util = raw_util;
+        self.dev_prev_perf = self.cluster.current_perf;
+
+        // devimp：组内超升频阈值 / 低于降频阈值的核心数（0.0 核不计入 over）
+        let mut over = 0u32;
+        let mut under = 0u32;
+        for &cpu in &self.cluster.affected_cpus {
+            if let Some(&u) = core_utils.get(cpu) {
+                if u > self.cfg.up_threshold {
+                    over += 1;
+                }
+                if u < self.cfg.down_threshold {
+                    under += 1;
+                }
+            }
+        }
+        self.dev_over = over;
+        self.dev_under = under;
+
         // 尖峰抑制：单 tick 跳升超过阈值时衰减其增量
         let util = if raw_util > self.cluster.last_util + self.cfg.spike_jump_threshold {
             self.cluster.last_util + (raw_util - self.cluster.last_util) * self.cfg.spike_decay
@@ -374,6 +409,7 @@ impl CoreGroupWorker {
         };
 
         let target_perf = (util * headroom).clamp(self.cfg.perf_floor, self.cfg.perf_ceil);
+        self.dev_tgt_perf = target_perf;
         let old_perf = self.cluster.current_perf;
 
         if target_perf > old_perf {
@@ -382,8 +418,10 @@ impl CoreGroupWorker {
 
             // 升频速率限制：必须连续 up_rate_limit_ticks 才执行
             if self.cluster.up_wait < self.cfg.up_rate_limit_ticks {
+                self.dev_decision = "up_wait";
                 return;
             }
+            self.dev_decision = "up";
 
             // 动态上限语义：抬高 ceiling 不强制频率跳变（schedutil 按实际需求在
             // [硬件最低, ceiling] 内取频），无需读取实际频率做余量检查，直接平滑抬升
@@ -407,11 +445,14 @@ impl CoreGroupWorker {
             if self.cluster.down_wait >= self.cfg.down_rate_limit_ticks
                 || util < self.cfg.down_fast_threshold
             {
+                self.dev_decision = "down";
                 // 直接降上限（能效优先）：不做平滑渐变，一步到位写目标档。
                 // 降 ceiling 只收窄 schedutil 可用区间，不会把实际频率抬上去，
                 // 无需读取 scaling_cur_freq 做钳制
                 let target_freq = self.cluster.find_nearest_freq(target_perf);
                 self.cluster.current_perf = self.cluster.ratio_of_freq(target_freq);
+            } else {
+                self.dev_decision = "down_wait";
             }
         }
     }
@@ -422,10 +463,12 @@ impl CoreGroupWorker {
     /// 持续高负载会平滑涨到豁免档以上，这时温度再高也不挡路（内核兜底）。
     fn flush(&mut self, core_utils: &[f32], log_counter: &mut u32) {
         // 触摸升频：Worker 自主检查共享的 AtomicTouchState
+        let mut touch_active = false;
         if self.cfg.touch_boost_enabled {
             let floor = self.touch.get_floor();
             if floor > 0.0 && Self::is_big_cluster(&self.cluster.affected_cpus, &self.core_ranges) {
                 self.cluster.current_perf = self.cluster.current_perf.max(floor);
+                touch_active = true;
             }
         }
         self.cluster.current_perf = self
@@ -442,9 +485,47 @@ impl CoreGroupWorker {
         let target_freq = self.cluster.find_nearest_freq(self.cluster.current_perf);
         self.cluster.write_freq(target_freq);
 
-        // 日志摘要：每 25 tick 输出一次本 cluster 的 util/perf/freq
+        // devimp tick 行：仅决策 tick（core_utils 非空）且开发记录开启时写
+        if !core_utils.is_empty() && crate::logger::devimp_active() {
+            let ranges = &self.core_ranges;
+            let name = if self
+                .cluster
+                .affected_cpus
+                .iter()
+                .any(|c| ranges.prime.contains(c))
+            {
+                "prime"
+            } else if self
+                .cluster
+                .affected_cpus
+                .iter()
+                .any(|c| ranges.big.contains(c))
+            {
+                "big"
+            } else {
+                "little"
+            };
+            crate::logger::devimp_tick(
+                name,
+                &format!("{:.2}", self.dev_raw_util),
+                self.dev_over,
+                self.dev_under,
+                &format!("{:.2}", self.dev_prev_perf),
+                &format!("{:.2}", self.dev_tgt_perf),
+                &self.cluster.current_freq.to_string(), // cur_freq_khz 列：原始 kHz
+                &self.restore.hw_max.to_string(),       // max_freq_khz 列：原始 kHz
+                self.dev_decision,
+                self.cluster.up_wait,
+                self.cluster.down_wait,
+                &format!("{:.0}", cap * 100.0),
+                touch_active,
+            );
+        }
+
+        // 日志摘要：每 25 tick 输出一次本 cluster 的 util/perf/freq。
+        // format! 在宏外求值，用 log_enabled! 门控省掉 INFO 级别下的分配。
         *log_counter += 1;
-        if *log_counter % 25 == 0 {
+        if *log_counter % 25 == 0 && log::log_enabled!(log::Level::Debug) {
             debug!(
                 "{}",
                 t_with_args(
@@ -640,6 +721,12 @@ impl CoreGroupWorker {
             touch,
             thermal_cap,
             thermal_free_above,
+            dev_decision: "hold",
+            dev_over: 0,
+            dev_under: 0,
+            dev_tgt_perf: 0.0,
+            dev_raw_util: 0.0,
+            dev_prev_perf: 0.0,
         };
 
         let handle = thread::Builder::new()

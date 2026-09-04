@@ -49,6 +49,8 @@ fn main() -> Result<()> {
     // 必须在 create_dir_all(log_dir)/logger::init 之前执行，保证新旧文件分离。
     let archived_zip = logger::archive_logs_on_startup(&root);
     std::fs::create_dir_all(&log_dir)?;
+    // devimp 诊断目录：清旧留新（保留最近 10 份），与日志归档互不影响
+    logger::devimp_prepare();
 
     // 2. 判断是否启用 Chiri 专用调度器（检测到列表中的特定处理器时启用）
     let chiri_active = common::is_chiri_soc();

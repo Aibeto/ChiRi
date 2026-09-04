@@ -43,13 +43,23 @@ use anyhow::Result;
 // 事件就认为负载源失效（eBPF 加载失败/探针崩溃/通道断开），直接 release() 回系统调频，
 // 防止 CPU 锁死在上次写入的频率（如 8550 balance perf_init=1.0 会锁满全核高频）。
 const CLG_STALE_MAX: Duration = Duration::from_secs(5);
-/// 事件轮询间隔：主事件通道无事件时的轮询周期。
-/// 兼顾触摸事件即时处理（≤100ms）与看门狗巡检（仍按 CLG_STALE_MAX 阈值）。
-const EVENT_POLL_MS: Duration = Duration::from_millis(100);
+/// 事件轮询间隔：主事件通道无事件时的最大阻塞时长（动态超时上限）。
+/// 实际阻塞到「最近一个周期任务的 deadline」为止——空闲时不再固定 100ms 空转
+/// （每秒 10 次跑循环体），而只在最近任务到期/事件到达时醒来。所有性能敏感
+/// 路径（负载事件/模式切换/触摸）都是推送事件，到达即打断阻塞，零延迟损失；
+/// 该值仅作为 deadline 计算的兜底上限。
+const EVENT_POLL_MS: Duration = Duration::from_millis(1000);
 /// 热保护温度采样间隔：2s 一次，温度变化缓慢，更密的采样只浪费 IO。
 const THERMAL_CHECK_INTERVAL: Duration = Duration::from_secs(2);
 /// 遥测 CSV 落盘间隔：1s 一次（功耗统计精度 1s；telemetry 线程 1s 刷新共享原子量）。
 const TELEMETRY_LOG_INTERVAL: Duration = Duration::from_secs(1);
+/// scenemode 饱和退出：little 簇 max_util 持续高于该值视为顶满性能上限
+/// （util 是忙时占比，与频率无关——后台负载压不住小核时即饱和）
+const SCENEMODE_SAT_UTIL: f32 = 0.70;
+/// 饱和持续判定时长：连续满足才退出，防止瞬时突发误触发
+const SCENEMODE_SAT_SECS: Duration = Duration::from_secs(10);
+/// scenemode 冷却：饱和退出后 300s 内不得重新进入（防止与后台负载反复拉锯）
+const SCENEMODE_COOLDOWN: Duration = Duration::from_secs(300);
 /// 电池温度节点（Android 标准电源供给接口，毫摄氏度）。
 /// 电池温度为主参考：反映整机持续发热，变化缓慢、不随游戏瞬时负载抖动
 const BATT_TEMP_PATH: &str = "/sys/class/power_supply/battery/temp";
@@ -191,6 +201,9 @@ fn is_boost_mode(mode: &str) -> bool {
 
 /// 应用 CPU 亲和布局与 core_ctl 在线策略（ChiRi 专属，跟随模式/屏幕/前台 PID）。
 /// 内部带去重：布局与 PID 未变化时无 sysfs 写入，可安全周期性调用。
+/// `core_utils` 为最近一次 SystemLoadUpdate 的逐核 util（按核选核打分输入）。
+/// `scenemode_offline` 为 scenemode 激活标志：抑制 boost（防厂商 core_ctl 把
+/// 下线的核拉回来）并触发 core_ctl 离线（只留 CPU0，深度省电）。
 fn apply_affinity_and_corectl(
     affinity: &mut affinity::AffinityManager,
     corectl: &mut core_ctl::CoreCtlManager,
@@ -198,10 +211,14 @@ fn apply_affinity_and_corectl(
     mode: &str,
     screen_on: bool,
     fg_pid: i32,
+    core_utils: &[f32],
+    scenemode_offline: bool,
 ) {
-    let boost = is_boost_mode(mode);
-    affinity.apply(screen_on, fg_pid, &config.affinity, boost);
-    corectl.set_boost(config.core_ctl.enabled && boost);
+    // scenemode 下抑制 boost：min_cpus 抬着会让厂商 core_ctl 重新拉起被下线的核
+    let boost = is_boost_mode(mode) && !scenemode_offline;
+    affinity.apply(screen_on, fg_pid, &config.affinity, boost, core_utils);
+    let offline_on = scenemode_offline && config.core_ctl.scenemode_offline;
+    corectl.set_power_state(config.core_ctl.enabled && boost, offline_on);
 }
 
 /// 启动 Chiri 调度线程组（由 main.rs 调用）：
@@ -390,6 +407,12 @@ pub fn start_scheduler_thread(
             const AKMODE_COOLDOWN: Duration = Duration::from_secs(300);
             let mut akmode_cooldown_until: Option<Instant> = None;
 
+            // scenemode 饱和退出冷却：little 簇 util 持续顶满上限退回 powersave 后，
+            // 300s 内不得重新进入 scenemode（防止与后台负载反复拉锯）
+            let mut scenemode_cooldown_until: Option<Instant> = None;
+            // scenemode 饱和计时起点（little 簇 max_util 连续超阈值的窗口起点）
+            let mut scenemode_sat_since: Option<Instant> = None;
+
             // 热保护：启动时探测一次温度传感器（CPU + 电池），缺失的参考静默降级；
             // 事件循环内每 2s 采样，按 config.thermal 阈值计算压制上限下发给 CLG
             let temp_sensor_path = crate::utils::find_cpu_temp_path().ok();
@@ -452,6 +475,9 @@ pub fn start_scheduler_thread(
                 // 启动即按初始模式应用亲和布局与 core_ctl 在线策略
                 {
                     let cfg = config_clone.read().unwrap();
+                    // 开发记录开关初始同步（此后每 2s 周期块随配置刷新）
+                    crate::logger::set_devimp_active(cfg.meta.dev_record);
+                    crate::logger::set_devimp_mode(&current_mode);
                     apply_affinity_and_corectl(
                         &mut affinity_mgr,
                         &mut corectl_mgr,
@@ -459,14 +485,20 @@ pub fn start_scheduler_thread(
                         &current_mode,
                         is_screen_on,
                         crate::monitor::app_detect::get_current_pid(),
+                        &[],
+                        scene_mode_active,
                     );
                 }
             }
-            
+
             // 事件循环包在 catch_unwind 中：panic 被捕获并记录，
             // 不会让调度线程静默挂掉（否则频率会停在最后状态）。
             // 最近一次 SystemLoadUpdate 到达时间：供 CLG 看门狗判定负载源是否失效
             let mut last_load_event = Instant::now();
+            // 最近一次 SystemLoadUpdate 的逐核 util 快照（按核亲和选核输入）
+            let mut last_core_utils: Vec<f32> = Vec::new();
+            // 最近一次前台包名（devimp snap 行记录用，ModeChange 事件更新）
+            let mut last_fg_package = String::new();
             let loop_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             loop {
                 // 当前模式文件自愈：每 5 秒重写一次（即便内容未变也重写），
@@ -512,6 +544,8 @@ pub fn start_scheduler_thread(
                     drop(config_lock);
                     // 亲和布局/core_ctl 可能随新配置开关变化，刷新一次
                     let cfg = config_clone.read().unwrap();
+                    crate::logger::set_devimp_active(cfg.meta.dev_record);
+                    crate::logger::set_devimp_mode(&current_mode);
                     apply_affinity_and_corectl(
                         &mut affinity_mgr,
                         &mut corectl_mgr,
@@ -519,14 +553,18 @@ pub fn start_scheduler_thread(
                         &current_mode,
                         is_screen_on,
                         crate::monitor::app_detect::get_current_pid(),
+                        &last_core_utils,
+                        scene_mode_active,
                     );
                 }
 
                 // 亲和周期刷新：boost 模式下前台 App 同模式切换不产生 ModeChange 事件，
-                // 这里每 2s 用最新前台 PID 兜底重迁移（内部去重，PID 未变时无写入）
+                // 这里每 2s 用最新前台 PID 兜底重迁移（内部去重，PID 未变时无写入）；
+                // 同时同步开发记录开关（meta.dev_record 热重载生效）
                 if last_thermal_check.elapsed() >= THERMAL_CHECK_INTERVAL {
                     let cfg = config_clone.read().unwrap();
                     let current_mode = mode_clone.lock().unwrap().clone();
+                    crate::logger::set_devimp_active(cfg.meta.dev_record);
                     apply_affinity_and_corectl(
                         &mut affinity_mgr,
                         &mut corectl_mgr,
@@ -534,6 +572,8 @@ pub fn start_scheduler_thread(
                         &current_mode,
                         is_screen_on,
                         crate::monitor::app_detect::get_current_pid(),
+                        &last_core_utils,
+                        scene_mode_active,
                     );
                 }
 
@@ -572,6 +612,33 @@ pub fn start_scheduler_thread(
                         last_bpf_stats.2,
                     );
                     telemetry_log_counter += 1;
+                    // 开发记录 snap 行（1s）：环境上下文（开启 dev_record 才有 IO）
+                    if crate::logger::devimp_active() {
+                        crate::logger::devimp_snap(
+                            is_screen_on,
+                            &last_fg_package,
+                            &fmt_opt(read_battery_temp(), 1),
+                            &fmt_opt(
+                                temp_sensor_path
+                                    .as_ref()
+                                    .and_then(|p| crate::utils::read_f64_from_file(p).ok())
+                                    .map(|v| (v / 1000.0) as f32),
+                                1,
+                            ),
+                            &format!("{:.0}", thermal_cap_current * 100.0),
+                            cpu_governor.is_active(),
+                            &fmt_opt(Some(tm.psi_cpu_some()), 2),
+                            &fmt_opt(Some(tm.psi_io_some()), 2),
+                            &fmt_opt(Some(tm.psi_mem_some()), 2),
+                            &fmt_opt(tm.gpu_busy(), 0),
+                            &fmt_opt(tm.batt_voltage_v(), 3),
+                            &fmt_opt(tm.batt_current_ma(), 0),
+                            &fmt_opt(tm.batt_power_w(), 2),
+                            last_bpf_stats.0,
+                            last_bpf_stats.1,
+                            last_bpf_stats.2,
+                        );
+                    }
                     if telemetry_log_counter % 20 == 0 && log::log_enabled!(log::Level::Debug) {
                         log::debug!(
                             "{}",
@@ -659,6 +726,17 @@ pub fn start_scheduler_thread(
                                 )
                             )
                         );
+                        crate::logger::devimp_event(
+                            "thermal_change",
+                            "-",
+                            &format!(
+                                "batt={} cpu={} cap={:.0} free={:.0}",
+                                fmt(batt_t),
+                                fmt(cpu_t),
+                                new_cap * 100.0,
+                                free_above * 100.0
+                            ),
+                        );
                     }
                     // 功耗监控已并入 status.log snapshot 行（1s），此处不再重复写
                 }
@@ -674,10 +752,29 @@ pub fn start_scheduler_thread(
                     }
                 }
 
-                // 极速模式：每 5 秒重写一次硬件最高频，防止系统/厂商守护进程篡改
-                fast_lock.tick();
+                // 极速模式：每 5 秒重写一次硬件最高频，防止系统/厂商守护进程篡改；
+                // 返回距下次重写的剩余时间，纳入动态超时计算
+                let fast_next = fast_lock.tick();
 
-                let msg = match rx.recv_timeout(EVENT_POLL_MS) {
+                // 动态超时：阻塞到「最近一个周期任务的 deadline」或事件到达（先到者打断）。
+                // 周期任务（telemetry 1s / thermal+亲和 2s / mode file 5s / fast 重写 5s）
+                // 各自 deadline 取最小值；负载/模式/触摸等推送事件随时到达，recv_timeout
+                // 立即返回，性能响应零延迟。空闲稳态下从每秒 10 次空转降为 ~1 次。
+                let now_loop = Instant::now();
+                let until = |last: Instant, period: Duration| -> Duration {
+                    period.checked_sub(now_loop.duration_since(last)).unwrap_or(Duration::ZERO)
+                };
+                let mut wait = until(last_telemetry_log, TELEMETRY_LOG_INTERVAL)
+                    .min(until(last_thermal_check, THERMAL_CHECK_INTERVAL))
+                    .min(until(
+                        last_mode_file_write,
+                        MODE_FILE_REWRITE_INTERVAL,
+                    ))
+                    .min(EVENT_POLL_MS);
+                if let Some(d) = fast_next {
+                    wait = wait.min(d);
+                }
+                let msg = match rx.recv_timeout(wait) {
                     Ok(msg) => msg,
                     Err(mpsc::RecvTimeoutError::Timeout) => {
                         // eBPF 负载源超时自愈：超过 CLG_STALE_MAX 无负载事件 → 释放
@@ -778,8 +875,11 @@ pub fn start_scheduler_thread(
                                     &current_mode,
                                     false,
                                     crate::monitor::app_detect::get_current_pid(),
+                                    &last_core_utils,
+                                    scene_mode_active,
                                 );
                             }
+                            crate::logger::devimp_event("screen", "-", "off");
                         } else {
                             log::info!("{}", t("scheduler-doze-restore"));
                             // 亮屏：清空息屏计时与 scenemode 状态（恢复逻辑在下方重放原模式）
@@ -843,8 +943,11 @@ pub fn start_scheduler_thread(
                                     &current_mode,
                                     true,
                                     crate::monitor::app_detect::get_current_pid(),
+                                    &last_core_utils,
+                                    scene_mode_active,
                                 );
                             }
+                            crate::logger::devimp_event("screen", "-", "on");
                         }
                     },
 
@@ -865,9 +968,17 @@ pub fn start_scheduler_thread(
                             log::info!("{}", t_with_args("scheduler-mode-change-request", &fluent_args!(
                                 "old" => old_mode.clone(), "new" => mode.as_str(), "pkg" => package_name.as_str(), "temp" => temperature
                             )));
-                            
+
                             *current_mode_lock = mode.clone();
                             drop(current_mode_lock);
+
+                            last_fg_package = package_name.clone();
+                            crate::logger::set_devimp_mode(&mode);
+                            crate::logger::devimp_event(
+                                "mode_change",
+                                &package_name,
+                                &format!("{old_mode}->{mode}"),
+                            );
 
                             let _ = utils::try_write_file(&mode_file_path, mode.as_bytes());
 
@@ -881,6 +992,8 @@ pub fn start_scheduler_thread(
                                     &mode,
                                     is_screen_on,
                                     pid,
+                                    &last_core_utils,
+                                    scene_mode_active,
                                 );
                             }
 
@@ -987,10 +1100,16 @@ pub fn start_scheduler_thread(
                     DaemonEvent::SystemLoadUpdate { core_utils, foreground_max_util: _ } => {
                         // 刷新看门狗心跳：只要有负载事件到达即视为负载源存活
                         last_load_event = Instant::now();
-                        // 该事件常规 120ms / 特调 40ms 一次，仅在 DEBUG 时输出摘要便于排查
-                        log::debug!("{}", t_with_args("scheduler-event-load", &fluent_args!(
-                            "cores" => core_utils.iter().map(|u| format!("{:.0}", u * 100.0)).collect::<Vec<_>>().join(",")
-                        )));
+                        // 快照逐核 util：按核亲和选核打分与 devimp tick 行的输入
+                        last_core_utils = core_utils.clone();
+                        // 该事件常规 160ms / 特调 40ms 一次，仅在 DEBUG 时输出摘要便于排查。
+                        // 字符串构造在宏外会被无条件求值（每 tick 分配一次），
+                        // 用 log_enabled! 门控——INFO 级别下零分配。
+                        if log::log_enabled!(log::Level::Debug) {
+                            log::debug!("{}", t_with_args("scheduler-event-load", &fluent_args!(
+                                "cores" => core_utils.iter().map(|u| format!("{:.0}", u * 100.0)).collect::<Vec<_>>().join(",")
+                            )));
+                        }
                         // let current_mode = mode_clone.lock().unwrap().clone(); // FAS 暂禁用
                         // ==== FAS 暂禁用：不再向 FAS 投喂 CPU 负载 ====
                         // if is_screen_on && current_mode == "fas" && fas_suspended_at.is_none() {
@@ -1011,7 +1130,10 @@ pub fn start_scheduler_thread(
                         // scenemode：息屏超过 scene_mode_delay_secs 后把 CLG 切到低功耗配置
                         // （一次性）。特调模式由 akmode 独立接管不参与；亮屏后恢复原模式。
                         // scenemode 未启用时释放 CLG 回系统默认。
-                        if !is_screen_on && !scene_mode_active {
+                        // 饱和退出冷却期内不得重进（防止与后台负载反复拉锯）。
+                        let scenemode_cooldown_ok = scenemode_cooldown_until
+                            .map_or(true, |u| Instant::now() >= u);
+                        if !is_screen_on && !scene_mode_active && scenemode_cooldown_ok {
                             // 先用免锁的计时预判（最低 60s），避免息屏期间每个负载 tick 都抢锁
                             let delay_hit = screen_off_at
                                 .map_or(false, |off| off.elapsed().as_secs() >= 60);
@@ -1037,8 +1159,87 @@ pub fn start_scheduler_thread(
                                         }
                                         log::info!("{}", t("scheduler-scene-mode-enter"));
                                         scene_mode_active = true;
+                                        // 立即应用 scenemode 离线核（不等 2s 周期块）：
+                                        // 小核全开 + 大核/prime 下线 + 专用小核自钉
+                                        {
+                                            let cfg = config_clone.read().unwrap();
+                                            apply_affinity_and_corectl(
+                                                &mut affinity_mgr,
+                                                &mut corectl_mgr,
+                                                &cfg,
+                                                &current_mode,
+                                                is_screen_on,
+                                                crate::monitor::app_detect::get_current_pid(),
+                                                &last_core_utils,
+                                                scene_mode_active,
+                                            );
+                                        }
                                     }
                                 }
+                            }
+                        }
+
+                        // scenemode 饱和退出：little 簇 max_util 持续顶满性能上限
+                        // → 退回 powersave（恢复全部在线核）+ 300s 冷却不得重进，
+                        // 防止后台负载压不死小核时反复拉锯。util 是忙时占比（与
+                        // 频率无关），饱和即真饱和，与 perf_ceil 数值无耦合。
+                        if scene_mode_active && !is_screen_on {
+                            let ranges = crate::common::chiri_core_ranges();
+                            let little_max = ranges
+                                .little
+                                .clone()
+                                .filter_map(|c| last_core_utils.get(c).copied())
+                                .fold(0.0_f32, f32::max);
+                            if little_max >= SCENEMODE_SAT_UTIL {
+                                let sustained = match scenemode_sat_since {
+                                    Some(since) => since.elapsed() >= SCENEMODE_SAT_SECS,
+                                    None => {
+                                        scenemode_sat_since = Some(Instant::now());
+                                        false
+                                    }
+                                };
+                                if sustained {
+                                    scenemode_sat_since = None;
+                                    scene_mode_active = false;
+                                    scenemode_cooldown_until =
+                                        Some(Instant::now() + SCENEMODE_COOLDOWN);
+                                    let current_mode = mode_clone.lock().unwrap().clone();
+                                    // 退回 powersave：给后台负载更大余量
+                                    let ps_cfg = get_clg_cfg(&config_clone.read().unwrap(), "powersave");
+                                    if cpu_governor.is_active() {
+                                        cpu_governor.reload_config(&ps_cfg);
+                                    } else {
+                                        cpu_governor.init_policies(&ps_cfg);
+                                    }
+                                    // 立即恢复全部在线核 + 解除专用核钉定
+                                    {
+                                        let cfg = config_clone.read().unwrap();
+                                        apply_affinity_and_corectl(
+                                            &mut affinity_mgr,
+                                            &mut corectl_mgr,
+                                            &cfg,
+                                            &current_mode,
+                                            is_screen_on,
+                                            crate::monitor::app_detect::get_current_pid(),
+                                            &last_core_utils,
+                                            scene_mode_active,
+                                        );
+                                    }
+                                    log::info!(
+                                        "{}",
+                                        t_with_args(
+                                            "scheduler-scene-mode-saturation",
+                                            &fluent_args!("util" => format!("{:.0}", little_max * 100.0))
+                                        )
+                                    );
+                                    crate::logger::devimp_event(
+                                        "scene_exit",
+                                        "-",
+                                        "saturation->powersave+300s",
+                                    );
+                                }
+                            } else {
+                                scenemode_sat_since = None;
                             }
                         }
                     },
@@ -1127,6 +1328,8 @@ pub fn start_scheduler_thread(
                         // 亲和/core_ctl 与配置联动（开关变化时切换布局；内部去重）
                         {
                             let cfg = config_clone.read().unwrap();
+                            crate::logger::set_devimp_active(cfg.meta.dev_record);
+                            crate::logger::set_devimp_mode(&current_mode);
                             apply_affinity_and_corectl(
                                 &mut affinity_mgr,
                                 &mut corectl_mgr,
@@ -1134,8 +1337,11 @@ pub fn start_scheduler_thread(
                                 &current_mode,
                                 is_screen_on,
                                 crate::monitor::app_detect::get_current_pid(),
+                                &last_core_utils,
+                                scene_mode_active,
                             );
                         }
+                        crate::logger::devimp_event("config_reload", "-", "rules.yaml");
                     }
 
                     // --- 6. eBPF 扩展探针统计（ChiRi 专属遥测，2s 一次增量）---

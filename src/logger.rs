@@ -30,6 +30,7 @@ use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// 适配 `log4rs::encode::Write` 的内存写入器：`PatternEncoder` 编码时写入
 /// 该缓冲，`append` 再把字节落盘（`set_style` 走默认空实现，无需着色）。
@@ -415,6 +416,382 @@ fn format_now() -> String {
     let m = (total_sec % 3600) / 60;
     let s = total_sec % 60;
     format!("{:02}:{:02}:{:02}.{:03}", h, m, s, now.subsec_millis())
+}
+
+// ════════════════════════════════════════════════════════════════
+//  开发诊断日志（devimp/devimp_<启动时间戳>.log）
+// ════════════════════════════════════════════════════════════════
+//
+// 供离线分析改善调度的按核诊断数据，与 status.log 分离：
+// - 独立目录 `devimp/`（模块根，与 logs/ 平级），**不受启动日志归档影响**
+//   （归档只 rename 整个 logs/ 目录，devimp/ 自行管理）；
+// - 每次启动**只创建一个文件** `devimp_<unix 毫秒时间戳>.log`：文件名在首次
+//   写入时确定（惰性创建，整轮未开启 DEV 则不产生文件），进程生命周期内
+//   始终写这一个文件，不做 8MB 轮转；
+// - 软上限 128MB：超过后静默停写（防异常场景无限增长），下轮启动重新开始；
+// - 启动时 devimp_prepare() 清理旧文件，仅保留最近 DEVIMP_KEEP_FILES 份；
+// - 总开关 DEVIMP_ACTIVE 由 scheduler_ipc 按 Config.meta.dev_record 同步
+//   （meta 段允许外部修改的字段之一，WebUI 开关 + config_watcher 热重载），
+//   写入点（CLG/akmode Worker、亲和再平衡、事件分支）各自检查该标志。
+//
+// CSV 宽表 + `type` 列，行类型与关键列：
+// - tick（每决策 tick × 每核心组）：cluster/max_util/over/under/cur_perf/tgt_perf/
+//   cur_freq/max_freq/decision/deb_up/deb_down —— 调频决策轨迹
+// - snap（1s）：环境上下文（PSI/GPU/电池/温度/热压制），关联决策与功耗
+// - place（每再平衡轮）：pid/package/tid/comm/core/util_pct —— 线程放置与占用率
+// - aff（事件驱动）：from_core/to_core/decision(动作)/reason —— 亲和迁移动作
+// - core（每再平衡轮 × 每核）：core/max_util/pinned —— 逐核负载与钉核计数
+// - event：decision(事件名)/reason —— 模式/屏幕/热/配置/触摸等状态变化
+
+/// 开发记录总开关（scheduler_ipc 按 Config.meta.dev_record 同步）
+static DEVIMP_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// 当前生效模式名（scheduler_ipc 在启动/模式切换/周期刷新时同步），
+/// devimp 各行 mode 列自动填充，写入点无需感知模式
+static DEVIMP_MODE: Mutex<String> = Mutex::new(String::new());
+
+/// 设置开发记录总开关
+pub fn set_devimp_active(on: bool) {
+    DEVIMP_ACTIVE.store(on, Ordering::Relaxed);
+}
+
+/// 同步当前模式名（devimp 行 mode 列填充用）
+pub fn set_devimp_mode(mode: &str) {
+    if let Ok(mut m) = DEVIMP_MODE.lock() {
+        *m = mode.to_string();
+    }
+}
+
+/// 开发记录是否开启（各写入点检查；关闭时不产生任何 IO）
+pub fn devimp_active() -> bool {
+    DEVIMP_ACTIVE.load(Ordering::Relaxed)
+}
+
+/// devimp 目录相对模块根的路径
+const DEVIMP_DIR_REL: &str = "devimp";
+/// 启动时保留的历史文件数（超出按文件名（时间戳）从旧到新删除）
+const DEVIMP_KEEP_FILES: usize = 10;
+/// 单文件软上限：超过后静默停写直到进程退出
+const DEVIMP_MAX_BYTES: u64 = 128 * 1024 * 1024;
+/// 每 N 行巡检一次（软上限检查 + 被删自愈）
+const DEVIMP_CHECK_EVERY: u64 = 256;
+
+/// CSV 表头（列序由 devimp_tick / devimp_snap / devimp_place / devimp_aff /
+/// devimp_core / devimp_event 的写入保证对齐，共 40 列）
+const DEVIMP_HEADER: &str = "ts,type,mode,screen_on,pid,package,tid,comm,cluster,core,from_core,to_core,util_pct,max_util,over_cores,under_cores,cur_perf,tgt_perf,cur_freq_khz,max_freq_khz,decision,deb_up,deb_down,reason,pinned,thermal_cap_pct,touch,psi_cpu,psi_io,psi_mem,gpu_busy,batt_v,batt_i,batt_p,wakeups,migrations,freq_trans,batt_temp,cpu_temp,clg_active";
+
+// 列索引常量（DevRow.set 用，调用方按列语义取用）
+const D_TS: usize = 0;
+const D_TYPE: usize = 1;
+const D_MODE: usize = 2;
+const D_SCREEN: usize = 3;
+const D_PID: usize = 4;
+const D_PKG: usize = 5;
+const D_TID: usize = 6;
+const D_COMM: usize = 7;
+const D_CLUSTER: usize = 8;
+const D_CORE: usize = 9;
+const D_FROM: usize = 10;
+const D_TO: usize = 11;
+const D_UTIL: usize = 12;
+const D_MAXUTIL: usize = 13;
+const D_OVER: usize = 14;
+const D_UNDER: usize = 15;
+const D_CURPERF: usize = 16;
+const D_TGTPERF: usize = 17;
+const D_CURFREQ: usize = 18;
+const D_MAXFREQ: usize = 19;
+const D_DECISION: usize = 20;
+const D_DEBUP: usize = 21;
+const D_DEBDOWN: usize = 22;
+const D_REASON: usize = 23;
+const D_PINNED: usize = 24;
+const D_THERMAL: usize = 25;
+const D_TOUCH: usize = 26;
+const D_PSICPU: usize = 27;
+const D_PSIIIO: usize = 28;
+const D_PSIMEM: usize = 29;
+const D_GPU: usize = 30;
+const D_BATTV: usize = 31;
+const D_BATTI: usize = 32;
+const D_BATTP: usize = 33;
+const D_WAKEUPS: usize = 34;
+const D_MIGR: usize = 35;
+const D_FREQT: usize = 36;
+const D_BATTTEMP: usize = 37;
+const D_CPUTEMP: usize = 38;
+const D_CLGACT: usize = 39;
+
+/// 一行诊断记录（固定 40 列，未用列填 "-"），由各 devimp_* 函数填充
+struct DevRow([String; 40]);
+
+impl DevRow {
+    /// 新建一行：ts/type/mode 已填（mode 读全局 DEVIMP_MODE），其余置 "-"
+    fn new(kind: &str) -> Self {
+        let mut row = DevRow(std::array::from_fn(|_| NA.to_string()));
+        row.0[D_TS] = format_now();
+        row.0[D_TYPE] = kind.to_string();
+        if let Ok(m) = DEVIMP_MODE.lock() {
+            row.0[D_MODE] = m.clone();
+        }
+        row
+    }
+
+    fn set(&mut self, idx: usize, v: impl Into<String>) -> &mut Self {
+        self.0[idx] = v.into();
+        self
+    }
+}
+
+/// 常驻写入器：append 句柄 + 巡检计数 + 软上限标志（无轮转，一启动一文件）
+struct DevimpWriter {
+    file: Option<fs::File>,
+    since_check: u64,
+    /// 软上限已触顶：之后所有写入静默丢弃
+    overflow: bool,
+}
+
+static DEVIMP_WRITER: Mutex<DevimpWriter> = Mutex::new(DevimpWriter {
+    file: None,
+    since_check: 0,
+    overflow: false,
+});
+
+/// 本次启动的文件名（首次写入时确定，进程生命周期内不变）
+fn devimp_file_name() -> String {
+    static NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    NAME.get_or_init(|| {
+        let ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        format!("devimp_{ms}.log")
+    })
+    .clone()
+}
+
+/// 打开（或重建）诊断日志：create+append；空文件补表头。
+/// 返回 None 表示打开失败（调用方下次写入时再试）。
+fn devimp_open() -> Option<fs::File> {
+    let dir = common::get_module_root().join(DEVIMP_DIR_REL);
+    let _ = fs::create_dir_all(&dir);
+    let path = dir.join(devimp_file_name());
+    let mut f = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .ok()?;
+    if f.metadata().map(|m| m.len()).unwrap_or(1) == 0 {
+        let _ = f.write_all(DEVIMP_HEADER.as_bytes());
+        let _ = f.write_all(b"\n");
+    }
+    Some(f)
+}
+
+/// 巡检：软上限检查（触顶停写）与被删自愈（外部删除后重开重建同名文件）
+fn devimp_check(w: &mut DevimpWriter) {
+    let path = common::get_module_root()
+        .join(DEVIMP_DIR_REL)
+        .join(devimp_file_name());
+    match fs::metadata(&path) {
+        Ok(m) if m.len() < DEVIMP_MAX_BYTES => return,
+        Ok(_) => w.overflow = true, // 触顶：停写（保留文件，不轮转）
+        Err(_) => {}                // 文件被删：重开重建（文件名不变）
+    }
+    w.file = devimp_open();
+}
+
+/// 写一行到 devimp 日志（未开启开关时不产生任何 IO）
+fn devimp_write_line(row: DevRow) {
+    if !devimp_active() {
+        return;
+    }
+    let line = row.0.join(",");
+    let mut w = DEVIMP_WRITER.lock().unwrap_or_else(|p| p.into_inner());
+    if w.overflow {
+        return;
+    }
+    if w.file.is_none() {
+        w.file = devimp_open();
+    }
+    let write_ok = match w.file.as_mut() {
+        Some(f) => f
+            .write_all(line.as_bytes())
+            .and_then(|_| f.write_all(b"\n"))
+            .is_ok(),
+        None => false,
+    };
+    if !write_ok {
+        // 写失败（磁盘/句柄异常）：重开重试一次，仍失败则丢弃本行
+        w.file = devimp_open();
+        if let Some(f) = w.file.as_mut() {
+            let _ = f.write_all(line.as_bytes());
+            let _ = f.write_all(b"\n");
+        }
+    }
+    w.since_check += 1;
+    if w.since_check >= DEVIMP_CHECK_EVERY {
+        w.since_check = 0;
+        devimp_check(&mut w);
+    }
+}
+
+/// 启动清理：仅保留最近 DEVIMP_KEEP_FILES 份历史诊断文件（按文件名即时间戳
+/// 排序，超出从旧到新删除）。main.rs 启动时调用一次，与日志归档互不影响。
+pub fn devimp_prepare() {
+    let dir = common::get_module_root().join(DEVIMP_DIR_REL);
+    let _ = fs::create_dir_all(&dir);
+    let mut files: Vec<String> = fs::read_dir(&dir)
+        .map(|rd| {
+            rd.flatten()
+                .filter_map(|e| {
+                    let name = e.file_name().to_string_lossy().into_owned();
+                    (name.starts_with("devimp_") && name.ends_with(".log")).then_some(name)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    files.sort(); // devimp_<毫秒> 同长度数字串，字典序即时间序
+    while files.len() > DEVIMP_KEEP_FILES {
+        let old = files.remove(0);
+        let _ = fs::remove_file(dir.join(old));
+    }
+}
+
+/// tick 行：CLG/akmode 调频决策轨迹（每决策 tick × 每核心组一行）
+#[allow(clippy::too_many_arguments)]
+pub fn devimp_tick(
+    cluster: &str,
+    max_util: &str,
+    over: u32,
+    under: u32,
+    cur_perf: &str,
+    tgt_perf: &str,
+    cur_freq_khz: &str,
+    max_freq_khz: &str,
+    decision: &str,
+    deb_up: u32,
+    deb_down: u32,
+    thermal_cap_pct: &str,
+    touch_active: bool,
+) {
+    let mut r = DevRow::new("tick");
+    r.set(D_CLUSTER, cluster)
+        .set(D_MAXUTIL, max_util)
+        .set(D_OVER, over.to_string())
+        .set(D_UNDER, under.to_string())
+        .set(D_CURPERF, cur_perf)
+        .set(D_TGTPERF, tgt_perf)
+        .set(D_CURFREQ, cur_freq_khz)
+        .set(D_MAXFREQ, max_freq_khz)
+        .set(D_DECISION, decision)
+        .set(D_DEBUP, deb_up.to_string())
+        .set(D_DEBDOWN, deb_down.to_string())
+        .set(D_THERMAL, thermal_cap_pct)
+        .set(D_TOUCH, if touch_active { "1" } else { "0" });
+    devimp_write_line(r);
+}
+
+/// snap 行：1s 环境上下文（遥测 + 热保护 + 前台包名）
+#[allow(clippy::too_many_arguments)]
+pub fn devimp_snap(
+    screen_on: bool,
+    fg_pkg: &str,
+    batt_temp: &str,
+    cpu_temp: &str,
+    thermal_cap_pct: &str,
+    clg_active: bool,
+    psi_cpu: &str,
+    psi_io: &str,
+    psi_mem: &str,
+    gpu_busy: &str,
+    batt_v: &str,
+    batt_i: &str,
+    batt_p: &str,
+    wakeups: u32,
+    migrations: u32,
+    freq_trans: u32,
+) {
+    let mut r = DevRow::new("snap");
+    r.set(D_SCREEN, if screen_on { "1" } else { "0" })
+        .set(D_PKG, fg_pkg)
+        .set(D_BATTTEMP, batt_temp)
+        .set(D_CPUTEMP, cpu_temp)
+        .set(D_THERMAL, thermal_cap_pct)
+        .set(D_CLGACT, if clg_active { "1" } else { "0" })
+        .set(D_PSICPU, psi_cpu)
+        .set(D_PSIIIO, psi_io)
+        .set(D_PSIMEM, psi_mem)
+        .set(D_GPU, gpu_busy)
+        .set(D_BATTV, batt_v)
+        .set(D_BATTI, batt_i)
+        .set(D_BATTP, batt_p)
+        .set(D_WAKEUPS, wakeups.to_string())
+        .set(D_MIGR, migrations.to_string())
+        .set(D_FREQT, freq_trans.to_string());
+    devimp_write_line(r);
+}
+
+/// place 行：线程放置与占用率快照（每再平衡轮，前台 + Top-K 后台逐线程一行）。
+/// 低开销亲和版（affinity.rs）已不再逐线程输出 place（改以 aff 行追踪迁移、
+/// core 行追踪核水位），此 API 保留待需要逐线程放置明细时恢复。
+#[allow(dead_code, clippy::too_many_arguments)]
+pub fn devimp_place(pid: i32, pkg: &str, tid: i32, comm: &str, core: i32, util_pct: &str) {
+    let mut r = DevRow::new("place");
+    r.set(D_PID, pid.to_string())
+        .set(D_PKG, pkg)
+        .set(D_TID, tid.to_string())
+        .set(D_COMM, comm)
+        .set(D_CORE, core.to_string())
+        .set(D_UTIL, util_pct);
+    devimp_write_line(r);
+}
+
+/// aff 行：亲和迁移动作（decision 列记动作：pin/promote/demote/restore/
+/// blacklist_skip/rebalance；reason 记触发原因）
+#[allow(clippy::too_many_arguments)]
+pub fn devimp_aff(
+    action: &str,
+    pid: i32,
+    pkg: &str,
+    tid: i32,
+    comm: &str,
+    from_core: &str,
+    to_core: &str,
+    util_pct: &str,
+    reason: &str,
+) {
+    let mut r = DevRow::new("aff");
+    r.set(D_DECISION, action)
+        .set(D_PID, pid.to_string())
+        .set(D_PKG, pkg)
+        .set(D_TID, tid.to_string())
+        .set(D_COMM, comm)
+        .set(D_FROM, from_core)
+        .set(D_TO, to_core)
+        .set(D_UTIL, util_pct)
+        .set(D_REASON, reason);
+    devimp_write_line(r);
+}
+
+/// core 行：逐核负载与钉核计数（每再平衡轮 × 每核一行）
+pub fn devimp_core(cluster: &str, core: usize, util: &str, pinned: u32) {
+    let mut r = DevRow::new("core");
+    r.set(D_CLUSTER, cluster)
+        .set(D_CORE, core.to_string())
+        .set(D_MAXUTIL, util)
+        .set(D_PINNED, pinned.to_string());
+    devimp_write_line(r);
+}
+
+/// event 行：状态变化（decision 列记事件名：mode_change/screen/thermal_change/
+/// config_reload/touch/ak_cooldown；reason 记详情）
+pub fn devimp_event(kind: &str, pkg: &str, reason: &str) {
+    let mut r = DevRow::new("event");
+    r.set(D_DECISION, kind)
+        .set(D_PKG, pkg)
+        .set(D_REASON, reason);
+    devimp_write_line(r);
 }
 
 // ════════════════════════════════════════════════════════════════

@@ -30,6 +30,19 @@ const loglevelLabel = computed(() => {
   return hit ? hit.name : lv;
 });
 
+// 开发记录开关（meta.dev_record）：开启后守护进程向 devimp/ 写按核调度诊断日志
+const devRecord = ref(Boolean(meta.value.dev_record));
+
+// v-model 在 @change 触发前已把 devRecord 翻转为新值，失败回滚用 !on（不能取 prev）
+const onDevRecordChange = async (on: boolean) => {
+  try {
+    await Bridge.setDevRecord(on);
+  } catch (e) {
+    devRecord.value = !on;
+    toast(t('save_failed'));
+  }
+};
+
 // 日志语言标签（en/zh → 本地化文案）
 const languageLabel = computed(() => {
   const lang = String(meta.value.language || '').toLowerCase();
@@ -47,6 +60,7 @@ const loadData = async () => {
     ]);
     meta.value = m || {};
     activeConfig.value = name;
+    devRecord.value = Boolean(meta.value.dev_record);
   } catch (e) {
     toast(t('load_failed'));
   } finally {

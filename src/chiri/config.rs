@@ -47,6 +47,12 @@ pub struct Meta {
     /// 守护进程日志语言：en / zh，改动后自动加载对应 .ftl
     #[serde(default = "default_language", alias = "Language")]
     pub language: String,
+
+    /// 开发记录开关：true 时向 devimp/devimp_<启动时间戳>.log 写入按核调度
+    /// 诊断日志（tick/snap/place/aff/core/event），供离线分析改善调度。
+    /// meta 段中允许外部修改的字段之一（WebUI 开关，热重载生效）。
+    #[serde(default, alias = "DevRecord")]
+    pub dev_record: bool,
 }
 
 // Meta 缺省值：config.yaml 省略该字段时回退到此处
@@ -753,11 +759,22 @@ pub struct CoreCtlConfig {
     /// 总开关：false 时不写任何 core_ctl 节点
     #[serde(default = "crate::utils::default_true")]
     pub enabled: bool,
+    /// scenemode 离线核（息屏深度省电）：进入 scenemode 后直接写 sysfs 下线
+    /// CPU1..max（只留 CPU0 引导核），大核簇/prime 整簇断电消除空转漏电流；
+    /// 亮屏/退出 scenemode 按快照恢复。逐核回读验证，内核拒绝的核自动跳过。
+    /// 按机型配置：8550/8475 开，8998（4.4 老内核热插拔质量未知）默认关。
+    /// 注意：与 boost 互斥——scenemode 下 boost 被抑制，防止厂商 core_ctl
+    /// 按 min_cpus 把下线的核又拉回来。
+    #[serde(default = "crate::utils::default_true")]
+    pub scenemode_offline: bool,
 }
 
 impl Default for CoreCtlConfig {
     fn default() -> Self {
-        Self { enabled: true }
+        Self {
+            enabled: true,
+            scenemode_offline: true,
+        }
     }
 }
 
@@ -832,14 +849,19 @@ fn default_scene_mode_delay_secs() -> u64 {
 
 impl Config {
     /// 加载生效配置：**基准内容编译期嵌入二进制**（common::embedded_config_str，
-    /// 按命中 SoC 选择，防篡改），磁盘文件只提供 meta.loglevel 覆盖
-    /// （WebUI 日志等级切换的唯一落点；语言等其余内容固定，外部修改无效）。
-    /// `path` 为生效配置的磁盘快照路径（common::get_config_path()），
+    /// 按命中 SoC 选择，防篡改），磁盘文件只提供 meta.loglevel / meta.dev_record 覆盖
+    /// （日志等级与开发记录开关是仅有的两个外部修改落点；语言等其余内容固定，
+    /// 外部修改无效）。`path` 为生效配置的磁盘快照路径（common::get_config_path()），
     /// 缺失或损坏时 meta 回退嵌入默认值。加载后合并嵌入的 akmode/scenemode 段。
     pub fn load(path: &str) -> anyhow::Result<Self> {
         let mut config: Config = serde_yaml::from_str(crate::common::embedded_config_str())?;
-        if let Some(v) = crate::common::read_external_meta(std::path::Path::new(path)) {
-            config.meta.loglevel = v;
+        if let Some(m) = crate::common::read_external_meta(std::path::Path::new(path)) {
+            if let Some(v) = m.loglevel {
+                config.meta.loglevel = v;
+            }
+            if let Some(v) = m.dev_record {
+                config.meta.dev_record = v;
+            }
         }
         config.merge_akmode();
         config.merge_scenemode();

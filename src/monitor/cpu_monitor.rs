@@ -385,7 +385,8 @@ pub async fn start_cpu_loop(
             };
 
             log_counter += 1;
-            if log_counter % 25 == 0 {
+            // format! 在宏外求值，用 log_enabled! 门控省掉 INFO 级别下的分配
+            if log_counter % 25 == 0 && log::log_enabled!(log::Level::Debug) {
                 let cores_str = core_utils
                     .iter()
                     .map(|u| format!("{:.0}", u * 100.0))

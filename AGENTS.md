@@ -24,7 +24,8 @@ src/                  # Rust 守护进程主代码
   monitor/            # 监控层：app_detect / fps_monitor / cpu_monitor / screen_detect / telemetry（两套调度共享）
   scheduler/          # 调度层 Yumi（即将废弃，作为 ChiRi 基础保留、勿动逻辑）：FAS 引擎、CLG 负载调速器
     fas/              # FAS 核心：PID 控制器、帧率档位、frame_pipeline
-  chiri/              # ChiRi 调度（发展主线；特定 SoC 触发；含 CLG、akmode 明日方舟特调、touch_detect 触摸升频、affinity 亲和/线程迁移、core_ctl 核心在线接管）
+  chiri/              # ChiRi 调度（发展主线；特定 SoC 触发；含 CLG、akmode 明日方舟特调、touch_detect 触摸升频、affinity 按核亲和/线程迁移、core_ctl 核心在线接管）
+  chiri/affinity_blacklist.txt  # 线程亲和黑名单（编译期嵌入：系统关键进程默认名单 + re: 正则；含 com.example 示例；用户/WebUI 不可改）
   common.rs / fas_types.rs / i18n.rs / logger.rs
 yumi-ebpf/            # eBPF 探针（bpfel-unknown-none，build-std 编译；独立 workspace，不在根 members；sched_switch + queueBuffer + 遥测计数探针）
 xtask/                # 构建脚本（cargo xtask build 完成编译打包 zip）
@@ -87,6 +88,8 @@ cd webui && npm run type-check
 
 - 负载采样间隔：`cpu_monitor` 的 `SystemLoadUpdate` 按 SoC 参数化，main.rs 按 `is_chiri_soc()` 传入 `start_monitor`→`start_cpu_loop`（ChiRi 160ms / Yumi 200ms，Yumi 200ms 为原值勿改）；akmode 激活时经共享 `Arc<AtomicBool>`（main.rs 创建、`AkmodeGovernor` 接管/释放时置位）切换到 40ms。akmode 消费该负载流做动态限频（档位固定，max 随负载在内核频率表中逐档升降，范围均为硬件上下限）；CLG 消费同一事件流，tick 语义按当前采样间隔（各 rate\_limit\_ticks/smoothing 按各自 tick 调优）。
 
+- **事件循环低开销原则（性能响应零延迟约束下）**：所有性能敏感路径（负载事件/模式切换/触摸升频）都是**推送事件**——`recv_timeout` 被事件到达立即打断，轮询周期只影响非性能的定时任务。据此：① chiri `scheduler_ipc` 用**动态超时**阻塞到「最近一个周期任务 deadline」（telemetry 1s / thermal+亲和 2s / mode file 5s / fast\_lock 重写 5s 各自取 min，上限 `EVENT_POLL_MS=1s`），空闲从每秒 10 次空转降到 \~1 次，勿改回固定 100ms 轮询；② CLG Worker 的 `run()` 超时分支只做触摸窗口清理 + 防篡改重写（1s 粒度），负载/触摸决策全走推送事件即时触发，勿把超时改回 160ms；③ 新增周期任务时**必须把它的 deadline 纳入** `recv_timeout` 的 wait 计算（取 min），否则任务会被拖到最长 1s 粒度；④ 高频 `debug!` 中的 `format!/collect/join` 构造发生在宏求值前，INFO 级别下每 tick 白白分配——用 `log::log_enabled!(log::Level::Debug)` 门控（scheduler-event-load / clg-tick-log / akmode-tick-log / cpu-monitor-tick-log 已做）。
+
 ### 日志
 
 - 调试与排障优先用 `debug!`，别全用 info 冲掉有价值的信息；高频路径（频率控制/帧处理）用 25-tick / 60-frame 周期摘要，状态变化（模式、PID、屏幕、attach、档位）即时打点。
@@ -95,19 +98,23 @@ cd webui && npm run type-check
 
 - status 写入用常驻 append 句柄（`STATUS_WRITER`，每行仅 1 次 write syscall）+ 每 256 行巡检（8MB 轮转 1 备份、被删自愈）。禁止恢复每行 open/stat 的 `append_aux_log` 模式，勿再拆分 power/telemetry/foreground 独立文件。
 
+- 启动日志归档：main 在 `create_dir_all(logs)`/`logger::init` 之前调 `logger::archive_logs_on_startup`——把上一轮整个 `logs/` 原子 rename 为同级 `ziped_<毫秒时间戳>` 临时目录，交一次性子线程 `log_archiver` 打包为 `logd/ziped_<ts>.zip`（手写 stored ZIP，零新依赖，勿引入 zip/flate2）后删除临时目录并自然退出；打包失败保留临时目录并写 ARCHIVE\_FAILED.txt（此时 logger 未 init 无法打点）。必须复制回 `logs/watchdog.pid`——看门狗先于 daemon 启动、WebUI stopScheduler 靠它终止看门狗，归档带走它会导致「关闭调度」失效。
+
+- 开发诊断日志（devimp/）：独立目录 `<模块根>/devimp/`（与 logs/ 平级，**不受日志归档影响**）。每次启动**只创建一个文件** `devimp_<unix 毫秒时间戳>.log`（首次写入惰性创建，进程生命周期不换文件、无 8MB 轮转；软上限 128MB 触顶静默停写）。总开关 `logger::set_devimp_active`（scheduler\_ipc 按 `Config.meta.dev_record` 同步，meta 允许外部修改的字段之一、WebUI「开发记录」开关 + 热重载）；模式名经 `logger::set_devimp_mode` 同步、各行 mode 列自动填充。CSV 宽表 40 列 + `type` 列：`tick`（每决策 tick × 每核心组的调频决策轨迹，CLG Worker 与 akmode on\_load\_update 写入）、`snap`（1s 环境上下文）、`place`（线程放置与占用率；低开销亲和版不再逐线程输出，API 保留待恢复）、`aff`（亲和迁移动作 pin/promote/demote/restore/blacklist\_skip）、`core`（逐核 util + 钉核计数，每 2 轮一次）、`event`（模式/屏幕/热/配置状态变化）。main 启动时 `logger::devimp_prepare()` 清旧留新（保留最近 10 份）。未开启开关时所有写入点零 IO。
+
 - 新增日志 key 同时补 `module/config/i18n/zh.ftl` 与 `en.ftl`，命名格式 `模块-描述`。
 
 ### 配置（嵌入、快照与热重载）
 
 - 调优配置编译期嵌入二进制（防篡改）：`common.rs` 用 `include_str!` 打包 `module/config/{soc}/config.yaml ×3`、默认 `config.yaml`、`normal/akmode.yaml`、`normal/scenemode.yaml` 与 i18n 两个 ftl。运行时一律以 `common::embedded_config_str()`（按 `matched_soc_hint()` 选择）为准，磁盘同名文件只是「自愈快照 + meta 覆盖入口」。
 
-- `Config::load(path)`（chiri 与 scheduler 各一份，替代旧 `from_file`）用嵌入内容做基准，仅从磁盘文件反序列化 meta 段（`common::read_external_meta`，只取 loglevel，调优字段与其他 meta 字段即使被篡改也不读入）。
+- `Config::load(path)`（chiri 与 scheduler 各一份，替代旧 `from_file`）用嵌入内容做基准，仅从磁盘文件反序列化 meta 段（`common::read_external_meta` 返回 `ExternalMetaOverrides`，只取 loglevel + dev\_record，调优字段与其他 meta 字段即使被篡改也不读入）。
 
-- 快照自愈：`common::sync_config_snapshot()` 在 main 启动时与两套 config\_watcher 热重载后，把「嵌入内容 + 磁盘 meta 覆盖」写回 `get_config_path()`（内容一致时跳过写入防 inotify 成环），磁盘文件被篡改/删除都会被还原/重建。唯一允许外部修改的字段是 meta.loglevel（WebUI 日志等级切换的落点，热重载生效；language 等其余内容固定，外部修改无效且会被快照自愈还原）。
+- 快照自愈：`common::sync_config_snapshot()` 在 main 启动时与两套 config\_watcher 热重载后，把「嵌入内容 + 磁盘 meta 覆盖」写回 `get_config_path()`（内容一致时跳过写入防 inotify 成环），磁盘文件被篡改/删除都会被还原/重建。允许外部修改的字段只有两个：meta.loglevel（WebUI 日志等级切换）与 meta.dev\_record（WebUI「开发记录」开关，控制 devimp/ 诊断日志写入，热重载生效；布尔替换必须写裸值——serde\_yaml 把带引号的 "true" 解析为字符串而非 bool；language 等其余内容固定，外部修改无效且会被快照自愈还原）。
 
 - `rules.yaml` 保持磁盘读写（WebUI 全局模式切换、应用性能模式需要）。运行时状态文件（active\_config.txt / current\_mode.txt / special\_tuned.txt 导出 / 日志）不变。
 
-- `matched_soc_hint()` 已不检查磁盘目录存在性。新增配置项需同步更新反序列化结构体与默认值；改 `module/config/` 下的 yaml 源文件后重新编译才生效。
+- `matched_soc_hint()` 已不检查磁盘目录存在性。新增配置项需同步更新反序列化结构体与默认值；改 `module/config/` 下的 yaml 源文件后重新编译才生效。**`module/config/config-example.yaml`** **是完整字段说明书（不参与加载），任何新增/删除/改语义的配置段与 meta 字段都必须同步更新它**（含注释说明取值范围与机型差异），否则模板与实际配置脱节。
 
 - 所有加载/热重载入口（main.rs、两套 config\_watcher）统一走 `get_config_path()`，不要硬编码路径。启动时把生效配置的相对路径（如 `8550/config.yaml`，非处理器时 `config.yaml`）写入 `active_config.txt`，WebUI 据此读取同一份文件。
 
@@ -143,7 +150,7 @@ cd webui && npm run type-check
 
 - 依赖约束：`typescript` 固定 5.x（`~5.9.0`）。TS 7.x 是 Go 原生编译器，不再导出 `lib/tsc`，`vue-tsc` 3.x 无法兼容（type-check 报 `ERR_PACKAGE_PATH_NOT_EXPORTED`），勿升级。
 
-- 不开放 YAML 编辑：`/config` 页只查看生效配置文件（`active_config.txt` 解析路径 + meta 抬头：配置名/作者/日志语言/日志等级）并切换日志等级（`bridge.ts::setLogLevel` 只替换 `meta.loglevel` 行、保留注释与其余内容，config\_watcher 热重载即时生效）；rules.yaml 仅在 WebUI 内部读写（全局模式切换、应用性能模式），不提供整文件编辑。
+- 不开放 YAML 编辑：`/config` 页只查看生效配置文件（`active_config.txt` 解析路径 + meta 抬头：配置名/作者/日志语言/日志等级）并切换日志等级（`bridge.ts::setLogLevel` 只替换 `meta.loglevel` 行、保留注释与其余内容，config\_watcher 热重载即时生效），另提供「开发记录」开关（`bridge.ts::setDevRecord` 同口径替换 `meta.dev_record` 行，布尔裸值；MockBridge 需同步提供同名方法——`Bridge = isDev ? MockBridge : RealBridge` 是联合类型，缺方法 type-check 报错）；rules.yaml 仅在 WebUI 内部读写（全局模式切换、应用性能模式），不提供整文件编辑。
 
 - rules.yaml 写入防 null：js-yaml 会把值为 null 的字段序列化成 `app_modes: null`，而 serde\_yaml 无法把 null 反序列化为 HashMap（`#[serde(default)]` 只对缺失字段生效），导致守护进程每次加载 rules.yaml 告警。`bridge.ts::saveRulesConfig` 写盘前移除 null/undefined 的 `app_modes` 键；守护进程侧 `monitor/config.rs` 的 `RulesConfig::app_modes` 用 `deserialize_with`（untagged 枚举）显式兼容 null 为空表，已存在 null 的旧文件也不告警。
 
@@ -231,7 +238,7 @@ WebUI 侧：
 
 ### 息屏省电与屏幕状态
 
-- scenemode（息屏超时省电）：chiri `Config` 的 `scenemode`（Mode 段，默认 `enabled:true`、`perf_ceil` 极低封顶、`up_threshold=1.0` 不主动升频）与顶层 `scene_mode_delay_secs`（默认 300s=5 分钟）。`mod.rs` 息屏时记录 `screen_off_at`，`SystemLoadUpdate` 分支在息屏超时且非特调模式下一次性把 CLG 热切到 scenemode（scenemode 未启用则 release 回系统默认），亮屏自动恢复原模式。
+- scenemode（息屏超时省电）：chiri `Config` 的 `scenemode`（Mode 段，默认 `enabled:true`、`perf_ceil` 极低封顶、`up_threshold=1.0` 不主动升频）与顶层 `scene_mode_delay_secs`（默认 300s=5 分钟）。`mod.rs` 息屏时记录 `screen_off_at`，`SystemLoadUpdate` 分支在息屏超时且非特调模式下一次性把 CLG 热切到 scenemode（scenemode 未启用则 release 回系统默认），亮屏自动恢复原模式。**进入 scenemode 时同步应用离线核**（`CoreCtl.scenemode_offline` 门控，见 core\_ctl 章节：小核全开 + 大核/prime 下线 + 调度服务专用小核自钉 + 抑制 boost），CPU 侧待机功耗大幅下降；**little 持续顶满上限则饱和退回 powersave 并 300s 冷却**。
 
 - 息屏 doze 天花板 0.30：`ScreenStateChange(false)` 生成的 doze 配置 `perf_ceil` 钳到 0.30（原 0.40），配合动态上限后后台突发（sync/JobScheduler）借力受限、空闲间隙照常降到地板频，压制"口袋发热"；5 分钟后 scenemode 进一步压到 0.15。
 
@@ -259,21 +266,43 @@ WebUI 侧：
 
 - 可选写 `/dev/cpuctl/top-app/cpu.uclamp.max`（配置 `Affinity.top_app_uclamp_max_pct`，任务级性能上限钳制、EAS 原生感知，比 scaling\_max\_freq 硬顶更细）。按机型配置：8550/8475 配 85，8998 内核 4.4 配 0 关闭。运行时内核版本识别兜底纠正：`kernel_version()` 解析 `/proc/sys/kernel/osrelease`，< 5.3（uclamp 主线引入版本）或节点缺失或写入回读无效（防厂商半成品 backport 静默忽略）任一不满足即置 Unsupported 永久跳过并 warn 打点 `affinity-uclamp-unavailable`，判定结果缓存避免重复探测。
 
-- 线程迁移：`pin_foreground_threads=true` 时把前台进程全部 TID（`/proc/<pid>/task` 枚举）经 `libc::sched_setaffinity` 迁到大核+超大核。掩码用 `mem::zeroed::<cpu_set_t>()` 分配保证对齐（`vec![0u8]` 强转 `*const cpu_set_t` 是未对齐指针的脆弱实践），`libc::CPU_SET` 置位并带容量边界防护（libc 的 CPU\_SET 内部数组索引无越界检查）。
+- 线程层（按核心粒度放置，`pin_foreground_threads=true` 启用，每 2s 再平衡一轮、前台 PID/boost 变化立即触发）——**开销控制优先，不做逐线程每轮读 stat**：
 
-- normal/doze 布局：top-app/foreground/uclamp 恢复快照，后台保持压小核。
+  - 前台（fg\_pid 由 app\_detect 提供）：每轮 1 次 `read_dir /proc/<pid>/task`，仅对**新增**线程读一次 stat 判定关键/建档；存量线程的 home 合法性仅用缓存的逐核 util 与在线位图判断。关键线程（tid==pid 或 comm 命中 RenderThread/GLThread/GameThread/UnityMain/UnityGfxDeviceW）→ prime（无 prime 的 SoC 取 big），普通 → big；boost + 亮屏才钉，否则恢复全核；已消失线程下一轮即清理释放钉核计数。
 
-- 所有写入先快照（`ensure_snapshot` 只做一次），release/开关关闭全量还原；写入去重（布局类型 + 前台 PID），同模式 App 切换不发 ModeChange 事件，靠 scheduler\_ipc 2s 周期刷新兜底重迁移。
+  - 后台动态亲和（**不把后台全压小核**——小核过载能效灾难）：忙线程 promote 到 big、回落 demote。候选 TID 从三个后台 cpuset 的 `tasks` 文件读取（**不做 /proc 全量枚举**），每 2 轮刷新、按游标分片每轮只深扫 64 个；窗口 util = ticks 差分，**两窗防抖**（上次采样忙且本次仍忙、期间采到低负载即清标记）即 promote，不依赖采样间隔。promote 先把 TID 移入 top-app（cpuset v1 按 TID 记账）再按当前核心占用选核钉定，orig 组缓存供 demote/清理迁回。已 promote 线程每 2 轮复查，util 连续 3 次 < 5% → demote。**后台迁移仅亮屏**。
+
+  - 在线核位图每 4 轮读一次并缓存（核热插拔不频繁）；devimp core 行每 2 轮一次。
+
+  - **多应用快速切换**：每轮再平衡开头按 pid 归属立即清理旧前台线程（`pid>0 且 ≠ 当前 fg_pid` → 解钉恢复全核），不等 30s 失联——否则旧应用转后台后（Android 会短暂把它留在 top-app/foreground cpuset）其单核掩码与大核相交继续生效，8550 仅一颗 prime 会让新旧前台关键线程同核互踩，连续切换还会令 core\_pinned 计数漂移累积。过滤器幂等、零文件 IO；后台 promote 线程（pid==0）不受影响。模式变化的切换经 ModeChange → force 立即重平衡；同模式切换（无事件）依赖 2s 周期块发现，钉核延迟 ≤2s（可接受，切换清理在同一轮完成，新前台钉核时 core\_pinned 已准确）。
+
+  - 选核算法：score = 逐核 util（最近 SystemLoadUpdate 快照，即核心当前占用）+ 钉核计数 × 0.2，取核池 ∩ 在线核最低分核（离线核 util 恒 0.0、与空闲不可区分，钉到「唯一允许核为离线」会让线程有效可运行集为空而冻结，必须排除）；home 核过载（核 util > 85%）或 home 离线在 4s 防抖窗口外重钉。
+
+  - 掩码用 `mem::zeroed::<cpu_set_t>()` 分配保证对齐（`vec![0u8]` 强转是未对齐指针的脆弱实践），`libc::CPU_SET` 置位并带容量边界防护。
+
+  - 稳态（前台线程集不变、后台空闲）单轮 ≈ 1 read\_dir + 0\~64 stat + 低频辅助文件读——相对「逐线程每轮全读 stat」约省 >50% 文件 I/O。
+
+- 黑名单（全部编译嵌入、不外透）：`src/chiri/affinity_blacklist.txt` 经 include\_str! 打包（common.rs 的 `parse_affinity_blacklist` 解析、OnceLock 缓存），格式：每行一条精确进程名/包名或 `re:` 前缀正则（同特调白名单语法，含 com.example 注释示例），文件内含**系统进程默认名单**（system\_server/surfaceflinger/logd/lmkd/zygote 等，勿删）；内置兜底：空 cmdline（内核线程）与 `/` 开头（native 二进制路径）一律黑名单。命中进程全部线程保持全核、不做任何迁移，`is_affinity_blacklisted` 另在逐线程层面兜底（防应用进程内的系统服务线程被误迁）。
+
+- normal/doze 布局：top-app/foreground/uclamp 恢复快照，后台保持压小核；boost 退出/开关关闭/调度线程收尾 `release()` 全量还原（已钉线程恢复全核，经 `demote_tid_group` 写回进程当前 cpuset 组）。同模式 App 切换不发 ModeChange 事件，靠 scheduler\_ipc 2s 周期刷新兜底重迁移（manager 内部按 KIND/PID/boost 去重）。
 
 - 配置段 `Affinity`（enabled/top\_app\_uclamp\_min\_pct/top\_app\_uclamp\_max\_pct/pin\_foreground\_threads），三份 SoC yaml 已带。
 
 ### core\_ctl 核心在线接管（ChiRi 专属）
 
-- `src/chiri/core_ctl.rs` 的 `CoreCtlManager`。boost 模式把各 cluster 的 core\_ctl `min_cpus` 抬到全组常在线（防厂商热插拔与 ChiRi 调频打架），退出 boost 恢复快照；只动 min\_cpus 不动 max\_cpus/busy 阈值。
+- `src/chiri/core_ctl.rs` 的 `CoreCtlManager`，**三态状态机**（None/Boost/Scenemode，`set_power_state(boost, scenemode)` 统一入口，内部去重可被 2s 周期安全调用；切换时先退出旧状态恢复快照再进入新状态）。调度线程收尾 `release()` 按当前状态恢复。
 
-- cluster 发现：遍历 `get_cpu_policies()` → related\_cpus 首个 CPU 的 `/sys/devices/system/cpu/cpuN/core_ctl`（每 policy 一份，天然去重），惰性枚举一次；无节点打点 `corectl-unavailable` 后保持空表。
+- **Boost**：把各 cluster 的 core\_ctl `min_cpus` 抬到全组常在线（防厂商热插拔与 ChiRi 调频打架），退出恢复快照；只动 min\_cpus 不动 max\_cpus/busy 阈值。
 
-- 配置段 `CoreCtl.enabled`。`set_boost` 带去重，可安全被 2s 周期调用；调度线程收尾 release。
+- **Scenemode 离线核（息屏深度省电）**：`CoreCtl.scenemode_offline` 门控（8550/8475 true，8998 内核 4.4 默认 false）。进入 scenemode 时先解除 boost（min\_cpus 抬着会让厂商 core\_ctl 重新拉起被下线的核——两者互斥由 `apply_affinity_and_corectl` 保证），下线目标由 `scenemode_targets()` 计算：**小核全开**（保证 ≥3 个常驻待命核响应电源键等 PMIC 事件；不足 3 个从大核按编号从小到大补足），**大核簇 + prime 整簇下线**消除空转漏电流；逐核写 online=0 回读验证，失败跳过（warn）。**守护进程自身全部线程钉到 1 个专用小核**（编号最大的 little——CPU0 承担最多中断家务），后台任务堵塞不了调度服务；退出 scenemode 解除自钉。维持期每 2s 纠偏（重新下线被外部拉起的核）；退出按快照恢复 online（带回读+重试）。scenemode 下无其它 ChiRi 钉核线程，与离线无冲突。
+
+- **scenemode 饱和退出**：little 簇 max\_util 持续 10s ≥ 70%（`SCENEMODE_SAT_UTIL/SECS`，util 是忙时占比与频率无关，饱和即真饱和）→ 视为后台负载压不死小核：一次性退回 powersave 的 CLG 配置 + 立即恢复全部在线核 + 解除自钉，并进入 **300s 冷却**（`SCENEMODE_COOLDOWN`，期间 scenemode 入口被门控不得重进，防反复拉锯）；冷却结束后息屏条件仍满足则自然重进。
+
+- 为什么选核排除离线核而不"按需唤醒"：唤醒大核要拉电压轨/重建 L2，为后台线程点亮大核净亏能；直接写 online 会与厂商热插拔守护进程打架（对方再下线，ping-pong）。需要更多在线核时的正确姿势是抬 core\_ctl min\_cpus（Boost 态）。scenemode 是唯一反向使用 online 写入的场景（目标恰恰是让大核睡死，同时小核全开保住待命响应）。
+
+- cluster 发现：遍历 `get_cpu_policies()` → related\_cpus 首个 CPU 的 `/sys/devices/system/cpu/cpuN/core_ctl`（每 policy 一份，天然去重），惰性枚举一次；无节点打点 `corectl-unavailable` 后保持空表（scenemode 直接 sysfs 离线**不依赖** core\_ctl 节点，仅受独立配置门控）。
+
+- 配置段 `CoreCtl`（enabled/scenemode\_offline）。
 
 ### 遥测数据源（Telemetry，ChiRi 专属）
 

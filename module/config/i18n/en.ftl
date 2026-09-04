@@ -99,6 +99,7 @@ scheduler-event-config-reload = [Scheduler] config reload event: mode={ $mode },
 scheduler-special-mode-active = [Scheduler] Special profile active: { $pkg } -> { $mode }
 scheduler-akmode-cooldown = [Scheduler] Special tuning takeover failed, entering { $secs }s cooldown; CLG takes over during cooldown
 scheduler-scene-mode-enter = [Scheduler] Screen off past threshold, switching to scenemode extreme power-saving.
+scheduler-scene-mode-saturation = [Scheduler] scenemode perf ceiling saturated (little util { $util }%), falling back to powersave with 300s cooldown
 
 # --- Scheduler: Config Watcher ---
 config-reloading = [Config] Config file change detected, reloading...
@@ -204,13 +205,20 @@ affinity-normal-restore = [Affinity] normal affinity layout restored (background
 affinity-pin-threads = [Affinity] foreground pid={ $pid } threads migrated: { $pinned }/{ $total }
 affinity-pin-failed = [Affinity] no migratable threads for foreground pid={ $pid } (process may have exited)
 affinity-threads-restored = [Affinity] restored full-core affinity for { $count } threads of pid={ $pid }
+affinity-pin-core = [Affinity] thread { $tid } pinned to core { $core } ({ $reason })
+affinity-blacklisted = [Affinity] blacklisted process skipped: pid={ $pid } { $name }
+affinity-promoted = [Affinity] background thread { $tid } promoted to big core (util { $util }%)
+affinity-demoted = [Affinity] background thread { $tid } demoted back to little group (util { $util }%)
 affinity-write-failed = [Affinity] cpuset write failed: { $path }
 affinity-uclamp-unavailable = [Affinity] top_app_uclamp_max_pct unavailable, auto-corrected (kernel { $version }, reason: { $reason }; uclamp requires kernel >= 5.3 with a writable node)
 affinity-released = [Affinity] takeover released, system affinity config restored
 
 # --- CoreCtl (core_ctl online control) ---
-corectl-boost-on = [CoreCtl] boost: min_cpus raised to full-cluster online on { $count } clusters
-corectl-boost-off = [CoreCtl] core_ctl min_cpus snapshots restored
+corectl-boost-on = [CoreCtl] boost: min_cpus raised to keep all { $count } clusters fully online
+corectl-boost-off = [CoreCtl] core_ctl min_cpus snapshot restored
+corectl-scenemode-on = [CoreCtl] scenemode core offline: { $count } cores taken offline (littles kept, big/prime powered down)
+corectl-scenemode-off = [CoreCtl] { $count } offlined cores restored online
+corectl-self-pinned = [CoreCtl] scheduler service pinned to dedicated little core cpu{ $core }
 corectl-unavailable = [CoreCtl] no usable core_ctl node found, takeover skipped
 corectl-write-failed = [CoreCtl] core_ctl write failed: { $path }
 

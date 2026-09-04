@@ -6,18 +6,24 @@
 #
 # 注意：调优配置编译期嵌入二进制（include_str!），磁盘文件只是
 # "嵌入内容 + meta 覆盖"的快照。daemon 启动/重载时会把嵌入内容
-# 写回磁盘，篡改会被还原。唯一允许外部改的是 meta.loglevel 和
-# meta.language（WebUI 日志等级/语言切换落点）。改调优参数要改
-# 这份模板源文件再重新编译。
+# 写回磁盘，篡改会被还原。允许外部修改的字段只有两个：
+# meta.loglevel 与 meta.dev_record（WebUI 日志等级/开发记录开关落点）。
+# 改调优参数要改这份模板源文件再重新编译。
 # ============================================================
 
 # ── 元数据 ──────────────────────────────────────────────────
-# 唯一允许外部修改的字段（WebUI 日志等级/语言切换）
+# 允许外部修改的字段：loglevel + dev_record（WebUI 热重载生效）
+# language 等其余 meta 字段固定，外部修改无效且被快照自愈还原
 meta:
-  name: "example_config"       # 仅供文档参考，代码不解析
-  author: "ChiRi"              # 仅供文档参考
-  language: "zh"               # en / zh，切换后加载对应 ftl
-  loglevel: "INFO"             # DEBUG / INFO / WARN / ERROR
+  name: "example_config" # 仅供文档参考，代码不解析
+  author: "ChiRi" # 仅供文档参考
+  language: "zh" # en / zh；以嵌入值为准，外部修改无效（会被快照自愈还原）
+  loglevel: "INFO" # DEBUG / INFO / WARN / ERROR
+  # 开发记录开关：true 时守护进程向 devimp/devimp_<毫秒时间戳>.log
+  # 写入按核调度诊断日志（tick/snap/place/aff/core/event），
+  # 用于离线分析改善调度。布尔值必须裸写（serde_yaml 把带引号的
+  # "true" 解析为字符串而非 bool）。允许外部修改（WebUI 开关 + 热重载）
+  dev_record: false
 
 # ── 功能开关 ────────────────────────────────────────────────
 function:
@@ -49,6 +55,41 @@ CpuIdle:
 # 屏幕熄灭超过该秒数后切到 scenemode 低功耗配置，亮屏恢复原模式。
 # 默认 300（5 分钟）。
 scene_mode_delay_secs: 300
+
+# ── CPU 亲和与线程迁移（ChiRi 专属）──────────────────────────
+# boost 模式（performance/fast/特调）下收窄 top-app/foreground cpuset
+# 到大核+超大核、后台分组压小核；线程层按核心粒度做 sched_setaffinity
+# 单核放置（前台关键线程→prime、普通→big；后台繁忙线程动态 promote，
+# 空闲 demote；选核排除离线核）。normal/doze 下 top-app 恢复快照。
+# 黑名单在 src/chiri/affinity_blacklist.txt（编译嵌入，不外透）。
+Affinity:
+  # 总开关：false 时全量恢复系统布局，不做任何写入
+  enabled: true
+  # boost 下 top-app 的 cpu.uclamp.min 百分比（0=不启用；uclamp.min 会让
+  # schedutil 独立于 CLG 抬频，与动态上限语义打架，默认关闭）
+  top_app_uclamp_min_pct: 0
+  # boost 下 top-app 的 cpu.uclamp.max 百分比（任务级性能上限，EAS 原生感知；
+  # 内核 >= 5.3 生效，节点缺失/写入回读无效会自动纠正关闭）。
+  # 按机型：8550/8475 配 85，8998（内核 4.4）配 0 关闭
+  top_app_uclamp_max_pct: 85
+  # 线程层总开关：前台线程按核钉定 + 后台动态 promote/demote（仅亮屏）
+  pin_foreground_threads: true
+
+# ── core_ctl 核心在线接管（ChiRi 专属）───────────────────────
+# boost 模式把各 cluster 的 min_cpus 抬到全组常在线，防厂商热插拔
+# 与 ChiRi 调频打架；退出 boost 恢复快照。只动 min_cpus。
+CoreCtl:
+  # 总开关：false 时不写任何 core_ctl 节点
+  enabled: true
+  # scenemode 离线核（息屏深度省电）：进入 scenemode（息屏超过
+  # scene_mode_delay_secs）后小核全开（保证 ≥3 个常驻核待命响应电源键等事件，
+  # 并把守护进程自身线程钉到 1 个专用小核避免后台任务堵塞调度服务），大核簇/
+  # prime 整簇下线消除空转漏电流；小核不足 3 个时从大核按编号从小到大补足。
+  # little 簇 util 持续 10s 顶满 70% 视为饱和 → 自动退回 powersave 并进入
+  # 300s 冷却（期间不得重进 scenemode）。亮屏/退出按快照恢复，维持期每 2s
+  # 纠偏。逐核回读验证，内核拒绝的核自动跳过。与 boost 互斥。
+  # 8550/8475 建议 true；8998（内核 4.4 热插拔质量未知）建议 false。
+  scenemode_offline: true
 
 # ── 热保护 ──────────────────────────────────────────────────
 # 电池温度是主参考（壳体发热由电池主导，温升慢但持续）；

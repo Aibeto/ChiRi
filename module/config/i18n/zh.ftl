@@ -98,6 +98,7 @@ scheduler-event-config-reload = [Scheduler] 收到配置重载事件: 当前模�
 scheduler-special-mode-active = [Scheduler] 特调模式激活: { $pkg } -> { $mode }
 scheduler-akmode-cooldown = [Scheduler] 特调接管失败，进入 { $secs } 秒冷却，期间由 CLG 接管调度
 scheduler-scene-mode-enter = [Scheduler] 息屏已超过阈值，切换到 scenemode 省电模式
+scheduler-scene-mode-saturation = [Scheduler] scenemode 持续顶满性能上限（little util { $util }%），退回 powersave 并进入 300s 冷却
 
 # --- Scheduler: Config Watcher ---
 config-reloading = [Config] 检测到配置文件变更，正在重载...
@@ -203,6 +204,10 @@ affinity-normal-restore = [Affinity] 已恢复正常亲和布局（后台保持�
 affinity-pin-threads = [Affinity] 前台 pid={ $pid } 线程迁移: { $pinned }/{ $total }
 affinity-pin-failed = [Affinity] 前台 pid={ $pid } 无可迁移线程（进程可能已退出）
 affinity-threads-restored = [Affinity] 已恢复 pid={ $pid } 的 { $count } 个线程全核亲和
+affinity-pin-core = [Affinity] 线程 { $tid } 已钉到核 { $core }（{ $reason }）
+affinity-blacklisted = [Affinity] 进程命中黑名单跳过迁移: pid={ $pid } { $name }
+affinity-promoted = [Affinity] 后台线程 { $tid } 已提升到大核（util { $util }%）
+affinity-demoted = [Affinity] 后台线程 { $tid } 已降回小核组（util { $util }%）
 affinity-write-failed = [Affinity] cpuset 写入失败: { $path }
 affinity-uclamp-unavailable = [Affinity] top_app_uclamp_max_pct 不可用已自动纠正（内核 { $version }，原因: { $reason }；uclamp 需内核 >= 5.3 且节点可写）
 affinity-released = [Affinity] 已释放接管，恢复系统原始亲和配置
@@ -210,6 +215,9 @@ affinity-released = [Affinity] 已释放接管，恢复系统原始亲和配置
 # --- CoreCtl（core_ctl 核心在线接管）---
 corectl-boost-on = [CoreCtl] boost: { $count } 个 cluster 的 min_cpus 已抬到全组常在线
 corectl-boost-off = [CoreCtl] 已恢复 core_ctl min_cpus 快照
+corectl-scenemode-on = [CoreCtl] scenemode 离线核：已下线 { $count } 个核心（小核全开，大核/prime 断电）
+corectl-scenemode-off = [CoreCtl] 已恢复 { $count } 个被下线的核心
+corectl-self-pinned = [CoreCtl] 调度服务已钉到专用小核 cpu{ $core }
 corectl-unavailable = [CoreCtl] 未发现可用的 core_ctl 节点，接管跳过
 corectl-write-failed = [CoreCtl] core_ctl 写入失败: { $path }
 

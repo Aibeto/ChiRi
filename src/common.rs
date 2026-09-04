@@ -365,6 +365,76 @@ pub fn is_special_mode_allowed(pkg: &str, mode: &str) -> bool {
 }
 
 // ════════════════════════════════════════════════════════════════
+//  线程亲和黑名单（src/chiri/affinity_blacklist.txt，编译期嵌入）
+// ════════════════════════════════════════════════════════════════
+//
+// 命中黑名单的进程：全部线程保持全核运行，AffinityManager 不做任何迁移与亲和。
+// 数据编译进二进制（用户/WebUI 不可修改），但独立成文件便于维护与调整。
+
+/// 黑名单条目：精确进程名/包名，或 "re:" 前缀的正则（同特调白名单格式）
+pub struct AffinityBlacklistEntry {
+    pub pattern: String,
+    pub regex: Option<regex::Regex>,
+}
+
+impl AffinityBlacklistEntry {
+    fn matches(&self, cmdline: &str) -> bool {
+        match &self.regex {
+            Some(re) => re.is_match(cmdline),
+            None => self.pattern == cmdline,
+        }
+    }
+}
+
+const AFFINITY_BLACKLIST_TEXT: &str = include_str!("chiri/affinity_blacklist.txt");
+
+static AFFINITY_BLACKLIST: OnceLock<Vec<AffinityBlacklistEntry>> = OnceLock::new();
+
+/// 解析黑名单文本：跳过空行与 # 注释行；"re:" 前缀预编译正则，
+/// 编译失败跳过该条（不影响其余条目）。
+fn parse_affinity_blacklist(text: &str) -> Vec<AffinityBlacklistEntry> {
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        match line.strip_prefix("re:") {
+            Some(pat) => match regex::Regex::new(pat) {
+                Ok(re) => out.push(AffinityBlacklistEntry {
+                    pattern: line.to_string(),
+                    regex: Some(re),
+                }),
+                Err(e) => log::warn!("affinity-blacklist: invalid regex '{}' skipped: {}", pat, e),
+            },
+            None => out.push(AffinityBlacklistEntry {
+                pattern: line.to_string(),
+                regex: None,
+            }),
+        }
+    }
+    out
+}
+
+/// 全部黑名单条目（精确 + 正则，按文件顺序），OnceLock 缓存
+pub fn affinity_blacklist_entries() -> &'static [AffinityBlacklistEntry] {
+    AFFINITY_BLACKLIST.get_or_init(|| parse_affinity_blacklist(AFFINITY_BLACKLIST_TEXT))
+}
+
+/// 进程 cmdline（或线程 comm）是否命中亲和黑名单。
+/// 另含两条内置兜底规则（不经文件、不可关闭）：
+/// - 空 cmdline = 内核线程（kworker 等）→ 黑名单；
+/// - 以 '/' 开头 = native 二进制路径（init 拉起的系统/厂商服务）→ 黑名单。
+pub fn is_affinity_blacklisted(cmdline: &str) -> bool {
+    if cmdline.is_empty() || cmdline.starts_with('/') {
+        return true;
+    }
+    affinity_blacklist_entries()
+        .iter()
+        .any(|e| e.matches(cmdline))
+}
+
+// ════════════════════════════════════════════════════════════════
 //  编译期嵌入的配置（include_str!，防篡改）
 // ════════════════════════════════════════════════════════════════
 //
@@ -403,12 +473,16 @@ pub fn embedded_ftl_str(lang: &str) -> &'static str {
 
 /// 磁盘配置文件的 meta 覆盖结构：只反序列化 meta 段，其余字段全部忽略
 /// （调优字段即使被篡改也不会被读入，从根本上防篡改）。
-/// **唯一允许外部修改的字段是 meta.loglevel**（WebUI 日志等级切换的落点）；
+/// **允许外部修改的字段只有两个**：meta.loglevel（WebUI 日志等级切换）、
+/// meta.dev_record（WebUI 开发记录开关，控制 devimp/ 诊断日志写入）；
 /// language 等其余 meta 字段不在此列——配置内容一律以二进制内嵌值为准。
 #[derive(Deserialize, Default)]
 struct ExternalMetaSection {
     #[serde(default, alias = "Loglevel")]
     loglevel: String,
+    /// 缺省 None = 磁盘未提供该字段（不覆盖嵌入值）
+    #[serde(default, alias = "DevRecord")]
+    dev_record: Option<bool>,
 }
 
 #[derive(Deserialize, Default)]
@@ -417,20 +491,29 @@ struct ExternalMetaFile {
     meta: ExternalMetaSection,
 }
 
-/// 读磁盘配置文件的 meta 覆盖值（仅 loglevel）。
-/// 文件缺失或解析失败返回 None：meta.loglevel 是唯一允许外部修改的字段，
-/// 文件损坏时回退嵌入默认值，绝不让坏文件拖垮配置加载。
-pub fn read_external_meta(path: &Path) -> Option<String> {
+/// 磁盘 meta 覆盖值（read_external_meta 的返回结构，逐字段 Option 区分「未提供」）
+#[derive(Default)]
+pub struct ExternalMetaOverrides {
+    pub loglevel: Option<String>,
+    pub dev_record: Option<bool>,
+}
+
+/// 读磁盘配置文件的 meta 覆盖值（仅 loglevel + dev_record 两个允许外部修改的字段）。
+/// 文件缺失或解析失败返回 None：文件损坏时回退嵌入默认值，绝不让坏文件拖垮配置加载。
+pub fn read_external_meta(path: &Path) -> Option<ExternalMetaOverrides> {
     let text = std::fs::read_to_string(path).ok()?;
     let file = serde_yaml::from_str::<ExternalMetaFile>(&text).ok()?;
-    let loglevel = file.meta.loglevel;
-    Some(loglevel).filter(|v| !v.is_empty())
+    Some(ExternalMetaOverrides {
+        loglevel: Some(file.meta.loglevel).filter(|v| !v.is_empty()),
+        dev_record: file.meta.dev_record,
+    })
 }
 
 /// 把 yaml 文本中指定标量键的值替换为 value（保留缩进与注释，与
 /// WebUI bridge.ts::setLogLevel 的行替换同口径）。全文件按行扫描，
-/// 仅替换第一个形如 `<缩进>key: ...` 的行。
-fn replace_yaml_scalar(content: &str, key: &str, value: &str) -> String {
+/// 仅替换第一个形如 `<缩进>key: ...` 的行。`quoted` 控制值是否带双引号
+/// （字符串字段带引号；布尔字段必须裸值——serde_yaml 把 "true" 解析为字符串而非 bool）。
+fn replace_yaml_scalar_impl(content: &str, key: &str, value: &str, quoted: bool) -> String {
     let mut out = Vec::with_capacity(content.lines().count());
     let mut replaced = false;
     for line in content.lines() {
@@ -440,7 +523,12 @@ fn replace_yaml_scalar(content: &str, key: &str, value: &str) -> String {
             && trimmed[key.len()..].trim_start().starts_with(':')
         {
             let indent = &line[..line.len() - trimmed.len()];
-            out.push(format!("{indent}{key}: \"{value}\""));
+            let val = if quoted {
+                format!("\"{value}\"")
+            } else {
+                value.to_string()
+            };
+            out.push(format!("{indent}{key}: {val}"));
             replaced = true;
         } else {
             out.push(line.to_string());
@@ -453,6 +541,16 @@ fn replace_yaml_scalar(content: &str, key: &str, value: &str) -> String {
     s
 }
 
+/// 替换字符串字段（带引号，如 loglevel）
+fn replace_yaml_scalar(content: &str, key: &str, value: &str) -> String {
+    replace_yaml_scalar_impl(content, key, value, true)
+}
+
+/// 替换布尔字段（裸值，如 dev_record）
+fn replace_yaml_scalar_raw(content: &str, key: &str, value: &str) -> String {
+    replace_yaml_scalar_impl(content, key, value, false)
+}
+
 /// 配置快照自愈：把「嵌入内容 + 磁盘 meta 覆盖」写回生效配置路径。
 /// - 磁盘文件被篡改 → 调优参数被还原为嵌入值（meta 保留用户选择）
 /// - 文件缺失 → 重建（首次安装 / 被误删）
@@ -461,10 +559,17 @@ fn replace_yaml_scalar(content: &str, key: &str, value: &str) -> String {
 /// main.rs 启动时与两套 config_watcher 热重载后调用。
 /// 返回是否实际写入。
 pub fn sync_config_snapshot(path: &Path) -> bool {
-    // 嵌入内容为唯一基准；外部仅 loglevel 一项覆盖（语言等其余内容固定）
+    // 嵌入内容为唯一基准；外部仅 loglevel / dev_record 两项覆盖（语言等其余内容固定）
     let mut content = embedded_config_str().to_string();
-    if let Some(v) = read_external_meta(path) {
-        content = replace_yaml_scalar(&content, "loglevel", &v);
+    let meta = read_external_meta(path);
+    if let Some(m) = &meta {
+        if let Some(v) = &m.loglevel {
+            content = replace_yaml_scalar(&content, "loglevel", v);
+        }
+        if let Some(v) = m.dev_record {
+            content =
+                replace_yaml_scalar_raw(&content, "dev_record", if v { "true" } else { "false" });
+        }
     }
     // 内容一致就跳过：watcher 重载后再次写入会再次触发 inotify，必须防环
     if std::fs::read_to_string(path).ok().as_deref() == Some(content.as_str()) {

@@ -67,6 +67,7 @@ export const MockBridge = {
   async getActiveConfigName(): Promise<string> { await delay(100); return '8550/config.yaml'; },
   async getConfigMeta(): Promise<Record<string, any>> { await delay(200); return { ...mockMeta }; },
   async setLogLevel(level: string): Promise<void> { await delay(200); mockMeta.loglevel = level; },
+  async setDevRecord(on: boolean): Promise<void> { await delay(200); mockMeta.dev_record = on; },
   async stopScheduler(): Promise<void> { await delay(300); },
   async getDaemonLog(): Promise<string> {
     await delay(300);

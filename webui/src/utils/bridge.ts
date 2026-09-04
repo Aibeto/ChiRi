@@ -145,6 +145,23 @@ const RealBridge = {
     toast(i18n.global.t('loglevel_updated') as string);
   },
 
+  // 开发记录开关：只替换 meta.dev_record 行（布尔裸值，保留注释与其余内容），
+  // 热重载即时生效；开启后守护进程向 devimp/ 目录写按核调度诊断日志。
+  async setDevRecord(on: boolean): Promise<void> {
+    const path = await resolveConfigPath();
+    const content = await this.readFile(path);
+    const value = on ? 'true' : 'false';
+    // 字段缺失时兜底整文件重写（replaceYamlFieldLine 保留原裸值风格，不加引号）
+    const updated = replaceYamlFieldLine(content, 'dev_record', value) ?? (() => {
+      const cfg = yaml.load(content) || {};
+      if (!(cfg as any).meta) (cfg as any).meta = {};
+      (cfg as any).meta.dev_record = on;
+      return yaml.dump(cfg);
+    })();
+    await this.writeFile(path, updated);
+    toast(i18n.global.t('dev_record_updated') as string);
+  },
+
   // 关闭调度：先终止看门狗（防止其崩溃自愈把主进程再拉起），再强杀主进程 yumi。
   // 看门狗 PID 在 service.sh/action.sh 启动时写入 logs/watchdog.pid。
   // 关闭后需点击模块 Action（action.sh 手动启动）或重启设备才恢复调度。

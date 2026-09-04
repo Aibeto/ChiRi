@@ -19,7 +19,6 @@
 /// 接管时把所有 cluster 的 scaling_min_freq / scaling_max_freq 都锁到硬件最高频
 /// （min=max=hw_max，schedutil 无调频空间），release 时恢复系统原始状态。
 /// 每 5 秒重写一次频率，防止系统/厂商守护进程篡改。
-
 use crate::utils::FastWriter;
 use log::{debug, info, warn};
 use std::fs;
@@ -208,12 +207,15 @@ impl FastLock {
 
     /// 每 5 秒重写一次 hw_max，防止系统/厂商守护进程篡改频率。
     /// 由 scheduler_ipc 在事件循环中调用。
-    pub fn tick(&mut self) {
+    /// 返回距下次重写的剩余时间（非激活状态返回 None），供事件循环
+    /// 计算动态阻塞超时（sleep 到最近 deadline，空闲不空转）。
+    pub fn tick(&mut self) -> Option<std::time::Duration> {
         if !self.active {
-            return;
+            return None;
         }
-        if self.last_write.elapsed() < REWRITE_INTERVAL {
-            return;
+        let elapsed = self.last_write.elapsed();
+        if elapsed < REWRITE_INTERVAL {
+            return Some(REWRITE_INTERVAL - elapsed);
         }
         self.last_write = std::time::Instant::now();
 
@@ -235,6 +237,7 @@ impl FastLock {
                 )
             );
         }
+        Some(REWRITE_INTERVAL)
     }
 
     /// 将单个 policy 恢复为接管前的原始状态。

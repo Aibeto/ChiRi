@@ -1,0 +1,59 @@
+# ============================================================
+# ChiRi 线程亲和黑名单
+# ------------------------------------------------------------
+# 本文件经 include_str! 编译进守护进程二进制（不外透、WebUI 不可见、
+# 修改磁盘副本无效），独立成文件便于维护——调整后需重新编译。
+#
+# 命中黑名单的进程：全部线程保持全核运行（0..max 核），
+# AffinityManager 不对其做任何迁移与亲和放置。
+#
+# 语法（与特调白名单 special_tuned.txt 同风格）：
+#   - 每行一条匹配器，# 开头为注释，空行忽略；
+#   - 精确匹配：进程名/包名整串相等（应用子进程如 com.example.game:push
+#     需单独写一条，或用正则覆盖）；
+#   - 正则匹配：re: 前缀，忽略大小写在表达式内使用 (?i)。
+#
+# 匹配对象：/proc/<pid>/cmdline 全串。应用进程的 cmdline 通常就是包名；
+# init 拉起的 native 服务的 cmdline 是二进制路径（以 / 开头，内置规则已兜底跳过）。
+# ============================================================
+
+# —— 系统进程默认黑名单（勿删：对系统关键进程做线程迁移会导致系统级卡死/重启）——
+system_server
+surfaceflinger
+logd
+lmkd
+installd
+vold
+servicemanager
+hwservicemanager
+vndservicemanager
+cameraserver
+audioserver
+mediaserver
+media.extractor
+media.codec
+media.swcodec
+gpsd
+netd
+netmgrd
+zygote
+zygote64
+usap
+webview_zygote
+platform_compat
+statsd
+traced_probes
+traced_producer
+traced
+perfetto
+tombstoned
+incidentd
+demesg
+apexd
+bootanim
+hwcomposer
+
+# —— 应用黑名单（示例，默认注释；取消注释或按同格式追加）——
+# com.example.game
+# com.example.heavyapp:push
+# re:(?i)com\.example\..*bench
