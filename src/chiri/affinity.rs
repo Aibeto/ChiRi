@@ -67,11 +67,20 @@ const PROMOTED_REVIEW_EVERY_ROUNDS: u64 = 2;
 const ONLINE_EVERY_ROUNDS: u64 = 4;
 const DEVL_ROW_EVERY_ROUNDS: u64 = 2;
 
+/// 线程迁移最小间隔（promote/demote 流程）：过于频繁的迁移带来 cache
+/// 冷却与调度抖动，负载窗口本身已做两窗/3 连防抖，这里只挡边界抖动
 const MIN_MIGRATE_INTERVAL: Duration = Duration::from_secs(4);
+/// 过载重钉防抖：重钉打断线程本地性（cache/TLB 冷却）比 promote 更明显，
+/// 拉长间隔减少迁移次数；首次分配分散到位后应极少触发
+const REPIN_DEBOUNCE: Duration = Duration::from_secs(8);
 /// 核心过载阈值：钉定线程所在核心 util 超过该值时重钉到低占用核。
 /// 动机：单核持续高占用会把 schedutil 顶进高频区、能效变差，把忙线程
 /// 分散到低占用核压制峰值频率（前台与 bg promoted 线程共用同一阈值）。
 const CORE_OVERLOAD_UTIL: f32 = 0.70;
+/// 已钉线程对核心 score 的保守负载基准：util 快照滞后（线程刚钉上、核心
+/// util 尚未反映其负载）时仍能把后续线程推向其他核，避免多线程挤同核
+/// 时间片轮转造成卡顿；权重过弱会让第二个重线程挤入"看似空闲"的核
+const PINNED_WEIGHT: f32 = 0.4;
 const PROMOTE_UTIL_PCT: f32 = 25.0;
 const LITTLE_HIGH_WATER: f32 = 0.70;
 const LITTLE_PROMOTE_UTIL_PCT: f32 = 10.0;
@@ -445,12 +454,27 @@ impl AffinityManager {
             .filter(|&c| self.online.get(c).copied().unwrap_or(false))
             .min_by(|&a, &b| {
                 let score = |c: usize| {
-                    self.core_utils.get(c).copied().unwrap_or(0.0) + self.pinned_of(c) as f32 * 0.2
+                    self.core_utils.get(c).copied().unwrap_or(0.0)
+                        + self.pinned_of(c) as f32 * PINNED_WEIGHT
                 };
                 score(a)
                     .partial_cmp(&score(b))
                     .unwrap_or(std::cmp::Ordering::Equal)
             })
+    }
+
+    /// 主池优先选核：main 内存在未钉核心时只在 main 内选（保证关键线程
+    /// 优先落超大核 / 普通线程优先落大核）；main 全部已钉才把 overflow 中
+    /// 未钉核并入候选按 score 竞争——主核挤满后负载自然溢出到次级核
+    /// （普通线程在大核挤满时启用超大核，关键线程在超大核挤满时回落大核）。
+    fn pick_core_pref(&self, main: &[usize], overflow: &[usize]) -> Option<usize> {
+        let main_free = main.iter().any(|&c| self.pinned_of(c) == 0);
+        if main_free {
+            return self.pick_core(main);
+        }
+        let mut cands: Vec<usize> = main.to_vec();
+        cands.extend(overflow.iter().copied().filter(|&c| self.pinned_of(c) == 0));
+        self.pick_core(&cands)
     }
 
     fn pinned_of(&self, core: usize) -> u32 {
@@ -558,6 +582,9 @@ impl AffinityManager {
             ranges.prime.clone().collect()
         };
         let big_pool: Vec<usize> = ranges.big.clone().collect();
+        // 前台线程合法落点 = 全部性能核（prime ∪ big；无 prime SoC 退化为 big）
+        let mut perf_pool: Vec<usize> = ranges.big.clone().collect();
+        perf_pool.extend(ranges.prime.clone());
 
         // 在线核位图低频刷新
         if t % ONLINE_EVERY_ROUNDS == 0 || self.online.len() != max_cpu {
@@ -641,25 +668,39 @@ impl AffinityManager {
                                 }
                             }
                             let (home, is_key) = (st.home, st.is_key);
-                            let pool: &[usize] = if is_key { &prime_pool } else { &big_pool };
+                            // 合法范围 = 全部性能核（含溢出落点：普通线程可溢出
+                            // prime、关键线程可溢出 big），避免溢出核被误判非法
                             let core_ok = home >= 0
                                 && (home as usize) < max_cpu
                                 && self.online.get(home as usize).copied().unwrap_or(false)
-                                && pool.contains(&(home as usize));
+                                && perf_pool.contains(&(home as usize));
                             if pin_fg {
                                 if !core_ok {
-                                    if let Some(core) = self.pick_core(pool) {
+                                    // 关键线程（主线程/RenderThread/UnityMain 等）优先
+                                    // 绑超大核；普通线程优先大核，大核钉满后溢出超大核
+                                    let pick = if is_key {
+                                        self.pick_core_pref(&prime_pool, &big_pool)
+                                    } else {
+                                        self.pick_core_pref(&big_pool, &prime_pool)
+                                    };
+                                    if let Some(core) = pick {
                                         self.pin_core(tid, core, home, fg_pid, &pkg, "fg_pin");
                                     }
-                                } else if now.duration_since(st.last_move) >= MIN_MIGRATE_INTERVAL
+                                } else if now.duration_since(st.last_move) >= REPIN_DEBOUNCE
                                     && self.core_utils.get(home as usize).copied().unwrap_or(0.0)
                                         > CORE_OVERLOAD_UTIL
                                 {
-                                    // home 核过载（util > 70%）：重钉到最低分核分散
-                                    // 负载压制峰值频率。仅当目标核本身不过载才迁
-                                    // ——所有候选核都过载时静止（整体高载交给 CLG
-                                    // 上限/温控处理），避免无收益搬动与乒乓
-                                    if let Some(core) = self.pick_core(pool) {
+                                    // home 核过载（util > 70%）：重钉到低占用核分散
+                                    // 负载压制峰值频率，同样走主池/溢出选择。仅当
+                                    // 目标核本身不过载才迁——所有候选核都过载时静止
+                                    // （整体高载交给 CLG 上限/温控处理），避免无收益
+                                    // 搬动与乒乓
+                                    let pick = if is_key {
+                                        self.pick_core_pref(&prime_pool, &big_pool)
+                                    } else {
+                                        self.pick_core_pref(&big_pool, &prime_pool)
+                                    };
+                                    if let Some(core) = pick {
                                         if core != home as usize
                                             && self.core_utils.get(core).copied().unwrap_or(0.0)
                                                 <= CORE_OVERLOAD_UTIL
@@ -745,7 +786,7 @@ impl AffinityManager {
                                 None => continue,
                             };
                             if home >= 0
-                                && now.duration_since(last_move) >= MIN_MIGRATE_INTERVAL
+                                && now.duration_since(last_move) >= REPIN_DEBOUNCE
                                 && self.core_utils.get(home as usize).copied().unwrap_or(0.0)
                                     > CORE_OVERLOAD_UTIL
                             {
