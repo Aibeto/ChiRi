@@ -25,3 +25,4 @@ yumi-*.zip
 *.bak
 output/
 *.log
+logd/

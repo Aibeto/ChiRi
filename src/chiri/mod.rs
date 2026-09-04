@@ -537,29 +537,39 @@ pub fn start_scheduler_thread(
                     );
                 }
 
-                // 遥测落盘（1s 精度）：PSI / GPU busy% / 电池功耗 + eBPF 扩展计数。
+                // 状态日志 snapshot 行（1s 精度）：整合遥测 + 热保护 + 模式状态到
+                // logs/status.log（替代原 telemetry.log + power.log 两条流）。
                 // telemetry 线程 1s 刷新共享原子量；OPlus 机型功耗优先走 bcc_parms
                 // 私有节点（标准 power_supply 节点约 10s 才刷新，1s 采样必须绕开）。
                 if last_telemetry_log.elapsed() >= TELEMETRY_LOG_INTERVAL {
                     last_telemetry_log = Instant::now();
                     let tm = crate::monitor::telemetry::telemetry();
-                    let fmt_opt = |v: Option<f32>, digits: &str| {
-                        v.map(|x| format!("{:.*}", digits.parse::<usize>().unwrap_or(1), x))
+                    let fmt_opt = |v: Option<f32>, digits: usize| {
+                        v.map(|x| format!("{:.*}", digits, x))
                             .unwrap_or_else(|| "-".to_string())
                     };
                     let current_mode = mode_clone.lock().unwrap().clone();
-                    crate::logger::log_telemetry(
-                        &fmt_opt(Some(tm.psi_cpu_some()), "2"),
-                        &fmt_opt(Some(tm.psi_io_some()), "2"),
-                        &fmt_opt(Some(tm.psi_mem_some()), "2"),
-                        &fmt_opt(tm.gpu_busy(), "0"),
+                    crate::logger::status_log_snapshot(
+                        &current_mode,
+                        is_screen_on,
+                        read_battery_temp(),
+                        temp_sensor_path
+                            .as_ref()
+                            .and_then(|p| crate::utils::read_f64_from_file(p).ok())
+                            .map(|v| (v / 1000.0) as f32),
+                        &format!("{:.0}", thermal_cap_current * 100.0),
+                        &format!("{:.0}", thermal_free_current * 100.0),
+                        cpu_governor.is_active(),
+                        &fmt_opt(Some(tm.psi_cpu_some()), 2),
+                        &fmt_opt(Some(tm.psi_io_some()), 2),
+                        &fmt_opt(Some(tm.psi_mem_some()), 2),
+                        &fmt_opt(tm.gpu_busy(), 0),
+                        &fmt_opt(tm.batt_voltage_v(), 3),
+                        &fmt_opt(tm.batt_current_ma(), 0),
+                        &fmt_opt(tm.batt_power_w(), 2),
                         last_bpf_stats.0,
                         last_bpf_stats.1,
                         last_bpf_stats.2,
-                        &fmt_opt(tm.batt_current_ma(), "0"),
-                        &fmt_opt(tm.batt_voltage_v(), "3"),
-                        &fmt_opt(tm.batt_power_w(), "2"),
-                        &current_mode,
                     );
                     telemetry_log_counter += 1;
                     if telemetry_log_counter % 20 == 0 && log::log_enabled!(log::Level::Debug) {
@@ -571,11 +581,11 @@ pub fn start_scheduler_thread(
                                     "cpu" => format!("{:.1}", tm.psi_cpu_some()),
                                     "io" => format!("{:.1}", tm.psi_io_some()),
                                     "mem" => format!("{:.1}", tm.psi_mem_some()),
-                                    "gpu" => fmt_opt(tm.gpu_busy(), "0"),
+                                    "gpu" => fmt_opt(tm.gpu_busy(), 0),
                                     "wakeups" => last_bpf_stats.0.to_string(),
                                     "migrations" => last_bpf_stats.1.to_string(),
                                     "freq" => last_bpf_stats.2.to_string(),
-                                    "power" => fmt_opt(tm.batt_power_w(), "2")
+                                    "power" => fmt_opt(tm.batt_power_w(), 2)
                                 )
                             )
                         );
@@ -650,19 +660,7 @@ pub fn start_scheduler_thread(
                             )
                         );
                     }
-                    // 功耗监控日志：每 2s 无条件写一条（不只在变化时），便于画趋势图
-                    {
-                        let current_mode = mode_clone.lock().unwrap().clone();
-                        crate::logger::log_power(
-                            &batt_t.map(|t| format!("{:.1}", t)).unwrap_or_else(|| "-".to_string()),
-                            &cpu_t.map(|t| format!("{:.1}", t)).unwrap_or_else(|| "-".to_string()),
-                            &format!("{:.0}", thermal_cap_current * 100.0),
-                            &format!("{:.0}", thermal_free_current * 100.0),
-                            &current_mode,
-                            is_screen_on,
-                            cpu_governor.is_active(),
-                        );
-                    }
+                    // 功耗监控已并入 status.log snapshot 行（1s），此处不再重复写
                 }
 
                 // 触摸事件（事件驱动）：每次醒来先处理触摸队列。on_touch 更新共享
@@ -860,15 +858,9 @@ pub fn start_scheduler_thread(
                             "new" => mode.as_str(),
                             "temp" => temperature
                         )));
-                        // 前台监控日志：每次前台切换都记录，不管模式是否变更
-                        let active_gov = if ak_governor.is_active() { "akmode" }
-                            else if fast_lock.is_active() { "fast" }
-                            else if cpu_governor.is_active() { "clg" }
-                            else { "system" };
-                        crate::logger::log_foreground(
-                            &package_name, &old_mode, &mode, temperature, is_screen_on, active_gov,
-                        );
-                        
+                        // 前台切换已改由 app_detect 直写 status.log fg 行（含同模式切换），
+                        // ModeChange 事件仅在模式变化时产生，此处不再重复记录
+
                         if old_mode != mode {
                             log::info!("{}", t_with_args("scheduler-mode-change-request", &fluent_args!(
                                 "old" => old_mode.clone(), "new" => mode.as_str(), "pkg" => package_name.as_str(), "temp" => temperature

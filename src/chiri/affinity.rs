@@ -289,7 +289,7 @@ impl AffinityManager {
     /// 写 top-app 的 uclamp.min（配置为 0 时不启用，避免与 CLG 上限语义打架）
     fn apply_uclamp(&self, cfg: &AffinityConfig) {
         if cfg.top_app_uclamp_min_pct > 0 && self.sys.cpuctl_top_app_exist {
-            crate::utils::try_write_file(
+            let _ = crate::utils::try_write_file(
                 "/dev/cpuctl/top-app/cpu.uclamp.min",
                 &cfg.top_app_uclamp_min_pct.to_string(),
             );

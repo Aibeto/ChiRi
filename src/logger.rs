@@ -213,142 +213,196 @@ pub fn update_level(level_str: &str) {
 }
 
 // ════════════════════════════════════════════════════════════════
-//  辅助文件日志：功耗监控 / 前台监控独立日志
+//  状态日志（logs/status.log，CSV 宽表）：daemon.log 之外的唯一状态文件
 // ════════════════════════════════════════════════════════════════
+//
+// 整合原 foreground / power / telemetry 三个独立 CSV，用 `type` 列区分行类型：
+// - snap 行（1s 一条，chiri 调度线程）：遥测 + 热保护 + 模式状态
+// - fg 行（事件驱动，app_detect）：前台包切换——**含同模式切换**。
+//   修复原 log_foreground 依赖 ModeChange 事件（仅模式变化才发送）导致
+//   同模式 App 切换无记录的失效问题。
+//
+// 开销控制（对比旧 append_aux_log 每行 3 次 open + stat）：
+// - Mutex 常驻 append 句柄：每次写入仅一次 write syscall；
+// - 每 256 行巡检一次：轮转（8MB）+ 被删自愈（外部删除 status.log 后自动重建）；
+// - 写失败重开重试一次，全程不 unwrap、不阻塞调度线程。
 
-/// 功耗监控日志路径（CSV 格式，供 WebUI/脚本分析）
-const POWER_LOG_REL: &str = "logs/power.log";
-/// 前台监控日志路径
-const FG_LOG_REL: &str = "logs/foreground.log";
-/// 辅助日志单文件上限：1MB，保留 1 份备份（够用，不浪费磁盘）
-const AUX_LOG_MAX_BYTES: u64 = 1024 * 1024;
+/// 状态日志路径（CSV 宽表）
+const STATUS_LOG_REL: &str = "logs/status.log";
+/// 单文件上限 8MB，保留 1 份备份；1s 一条约 250B，轮转周期约 6 小时
+const STATUS_LOG_MAX_BYTES: u64 = 8 * 1024 * 1024;
+/// 每 N 行巡检一次（轮转 + 被删自愈）；1s 一条时约 4 分钟巡检一次
+const STATUS_CHECK_EVERY: u64 = 256;
 
-/// 向辅助日志文件追加一行（CSV 格式），文件不存在自动创建含表头。
-/// 写失败静默跳过，不阻塞主流程。
-pub fn append_aux_log(rel_path: &str, header: &str, line: &str) {
-    let root = common::get_module_root();
-    let path = root.join(rel_path);
+/// CSV 表头（列序由 status_log_snapshot / status_log_fg 保证对齐）：
+/// ts,type,mode,screen_on,batt_temp,cpu_temp,thermal_cap_pct,thermal_free_pct,clg_active,
+/// psi_cpu_some,psi_io_some,psi_mem_some,gpu_busy_pct,batt_voltage_v,batt_current_ma,
+/// batt_power_w,wakeups,migrations,freq_trans,fg_temp,package,old_mode,new_mode
+const STATUS_HEADER: &str = "timestamp,type,mode,screen_on,batt_temp,cpu_temp,thermal_cap_pct,thermal_free_pct,clg_active,psi_cpu_some,psi_io_some,psi_mem_some,gpu_busy_pct,batt_voltage_v,batt_current_ma,batt_power_w,wakeups,migrations,freq_trans,fg_temp,package,old_mode,new_mode";
+
+/// 常驻写入器：append 句柄 + 巡检计数
+struct StatusWriter {
+    file: Option<fs::File>,
+    since_check: u64,
+}
+
+/// 进程级单例（Mutex::new 为 const，可静态初始化）
+static STATUS_WRITER: Mutex<StatusWriter> = Mutex::new(StatusWriter {
+    file: None,
+    since_check: 0,
+});
+
+/// 打开（或重建）状态日志：create+append；空文件补表头。
+/// 返回 None 表示打开失败（调用方下次写入时再试）。
+fn status_open() -> Option<fs::File> {
+    let path = common::get_module_root().join(STATUS_LOG_REL);
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
-    // 首次写入：文件不存在就先写表头
-    if !path.exists() {
-        if let Ok(mut f) = fs::OpenOptions::new().create(true).write(true).open(&path) {
-            let _ = f.write_all(header.as_bytes());
-            let _ = f.write_all(b"\n");
-            let _ = f.flush();
-        }
-    }
-    // 超限时简单轮转：path -> path.1
-    if fs::metadata(&path).map(|m| m.len()).unwrap_or(0) >= AUX_LOG_MAX_BYTES {
-        let bak = root.join(format!("{}.1", rel_path));
-        let _ = fs::remove_file(&bak);
-        let _ = fs::rename(&path, &bak);
-        if let Ok(mut f) = fs::OpenOptions::new().create(true).write(true).open(&path) {
-            let _ = f.write_all(header.as_bytes());
-            let _ = f.write_all(b"\n");
-            let _ = f.flush();
-        }
-    }
-    if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(&path) {
-        let _ = f.write_all(line.as_bytes());
+    let mut f = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .ok()?;
+    if f.metadata().map(|m| m.len()).unwrap_or(1) == 0 {
+        let _ = f.write_all(STATUS_HEADER.as_bytes());
         let _ = f.write_all(b"\n");
-        let _ = f.flush();
+    }
+    Some(f)
+}
+
+/// 巡检：轮转（超 8MB）与被删自愈（外部删除后 metadata 报错 → 重开重建）
+fn status_check(w: &mut StatusWriter) {
+    let path = common::get_module_root().join(STATUS_LOG_REL);
+    match fs::metadata(&path) {
+        Ok(m) if m.len() < STATUS_LOG_MAX_BYTES => return,
+        Ok(_) => {
+            // 轮转：path -> path.1（旧备份覆盖删除）
+            let bak = common::get_module_root().join(format!("{}.1", STATUS_LOG_REL));
+            let _ = fs::remove_file(&bak);
+            let _ = fs::rename(&path, &bak);
+        }
+        Err(_) => {} // 文件被删：丢弃旧句柄（fd 仍指向孤儿 inode），下方重开重建
+    }
+    w.file = status_open();
+}
+
+/// 写一行到 status.log（调用方保证 fields 与 STATUS_HEADER 列数对齐）
+fn status_write_line(fields: &[&str]) {
+    let line = fields.join(",");
+    let mut w = STATUS_WRITER.lock().unwrap_or_else(|p| p.into_inner());
+    if w.file.is_none() {
+        w.file = status_open();
+    }
+    let write_ok = match w.file.as_mut() {
+        Some(f) => f
+            .write_all(line.as_bytes())
+            .and_then(|_| f.write_all(b"\n"))
+            .is_ok(),
+        None => false,
+    };
+    if !write_ok {
+        // 写失败（磁盘/句柄异常）：重开重试一次，仍失败则丢弃本行
+        w.file = status_open();
+        if let Some(f) = w.file.as_mut() {
+            let _ = f.write_all(line.as_bytes());
+            let _ = f.write_all(b"\n");
+        }
+    }
+    w.since_check += 1;
+    if w.since_check >= STATUS_CHECK_EVERY {
+        w.since_check = 0;
+        status_check(&mut w);
     }
 }
 
-/// 写功耗监控日志（CSV 一行）。
-/// 字段：timestamp,batt_temp,cpu_temp,thermal_cap_pct,thermal_free_pct,mode,screen_on,clg_active
-pub fn log_power(
-    batt_temp: &str,
-    cpu_temp: &str,
-    thermal_cap: &str,
-    thermal_free: &str,
+/// 缺失数值的占位
+const NA: &str = "-";
+
+/// 数值格式化（None → "-"）
+fn fmt_num(v: Option<f32>, digits: usize) -> String {
+    v.map(|x| format!("{:.*}", digits, x))
+        .unwrap_or_else(|| NA.to_string())
+}
+
+/// 写 snapshot 行（1s 一条，chiri 调度线程）：
+/// 遥测（PSI/GPU/电池，含 OPlus bcc 实时数据）+ 热保护（温度/压制/豁免）+ 模式状态。
+/// 替代原 power.log（2s）+ telemetry.log（1s）两条流，精度与信息量不变、文件合一。
+#[allow(clippy::too_many_arguments)]
+pub fn status_log_snapshot(
     mode: &str,
     screen_on: bool,
+    batt_temp: Option<f32>,
+    cpu_temp: Option<f32>,
+    thermal_cap: &str,
+    thermal_free: &str,
     clg_active: bool,
-) {
-    let ts = format_now();
-    let header =
-        "timestamp,batt_temp,cpu_temp,thermal_cap_pct,thermal_free_pct,mode,screen_on,clg_active";
-    let line = format!(
-        "{},{},{},{},{},{},{},{}",
-        ts,
-        batt_temp,
-        cpu_temp,
-        thermal_cap,
-        thermal_free,
-        mode,
-        if screen_on { "1" } else { "0" },
-        if clg_active { "1" } else { "0" },
-    );
-    append_aux_log(POWER_LOG_REL, header, &line);
-}
-
-/// 写前台监控日志（CSV 一行）。
-/// 字段：timestamp,package,old_mode,new_mode,temperature,screen_on,active_governor
-pub fn log_foreground(
-    package: &str,
-    old_mode: &str,
-    new_mode: &str,
-    temperature: f64,
-    screen_on: bool,
-    active_governor: &str,
-) {
-    let ts = format_now();
-    let header = "timestamp,package,old_mode,new_mode,temperature,screen_on,active_governor";
-    let line = format!(
-        "{},{},{},{},{:.1},{},{}",
-        ts,
-        package,
-        old_mode,
-        new_mode,
-        temperature,
-        if screen_on { "1" } else { "0" },
-        active_governor,
-    );
-    append_aux_log(FG_LOG_REL, header, &line);
-}
-
-/// 遥测日志路径（CSV 格式：PSI / GPU / 电池 / eBPF 扩展计数）
-const TELEMETRY_LOG_REL: &str = "logs/telemetry.log";
-
-/// 写遥测日志（CSV 一行，2s 周期）。
-/// 字段：timestamp,psi_cpu_some,psi_io_some,psi_mem_some,gpu_busy_pct,
-///       wakeups_2s,migrations_2s,freq_trans_2s,batt_current_ma,batt_voltage_v,batt_power_w,mode
-/// PSI 为 some avg10 百分比；缺失指标写 "-"。
-pub fn log_telemetry(
     psi_cpu: &str,
     psi_io: &str,
     psi_mem: &str,
     gpu_busy: &str,
+    batt_v: &str,
+    batt_i: &str,
+    batt_p: &str,
     wakeups: u32,
     migrations: u32,
-    freq_transitions: u32,
-    batt_current: &str,
-    batt_voltage: &str,
-    batt_power: &str,
-    mode: &str,
+    freq_trans: u32,
 ) {
-    let ts = format_now();
-    let header = "timestamp,psi_cpu_some,psi_io_some,psi_mem_some,gpu_busy_pct,\
-wakeups_2s,migrations_2s,freq_trans_2s,batt_current_ma,batt_voltage_v,batt_power_w,mode";
-    let line = format!(
-        "{},{},{},{},{},{},{},{},{},{},{},{}",
-        ts,
+    status_write_line(&[
+        &format_now(),
+        "snap",
+        mode,
+        if screen_on { "1" } else { "0" },
+        &fmt_num(batt_temp, 1),
+        &fmt_num(cpu_temp, 1),
+        thermal_cap,
+        thermal_free,
+        if clg_active { "1" } else { "0" },
         psi_cpu,
         psi_io,
         psi_mem,
         gpu_busy,
-        wakeups,
-        migrations,
-        freq_transitions,
-        batt_current,
-        batt_voltage,
-        batt_power,
-        mode,
-    );
-    append_aux_log(TELEMETRY_LOG_REL, header, &line);
+        batt_v,
+        batt_i,
+        batt_p,
+        &wakeups.to_string(),
+        &migrations.to_string(),
+        &freq_trans.to_string(),
+        NA,
+        NA,
+        NA,
+        NA,
+    ]);
+}
+
+/// 写 fg 行（事件驱动，app_detect 包切换确认时调用，含同模式切换）：
+/// 记录前台包名与切换前后的模式（old_mode 为前一前台包的生效模式）。
+pub fn status_log_fg(pkg: &str, screen_on: bool, temp: &str, old_mode: &str, new_mode: &str) {
+    status_write_line(&[
+        &format_now(),
+        "fg",
+        NA,
+        if screen_on { "1" } else { "0" },
+        NA,
+        NA,
+        NA,
+        NA,
+        NA,
+        NA,
+        NA,
+        NA,
+        NA,
+        NA,
+        NA,
+        NA,
+        NA,
+        NA,
+        NA,
+        temp,
+        pkg,
+        old_mode,
+        new_mode,
+    ]);
 }
 
 /// HH:MM:SS.mmm 格式本地时间（避免引入 chrono 依赖）
@@ -361,4 +415,186 @@ fn format_now() -> String {
     let m = (total_sec % 3600) / 60;
     let s = total_sec % 60;
     format!("{:02}:{:02}:{:02}.{:03}", h, m, s, now.subsec_millis())
+}
+
+// ════════════════════════════════════════════════════════════════
+//  启动日志归档：logs/ → logd/ziped_<毫秒时间戳>.zip（子线程异步打包）
+// ════════════════════════════════════════════════════════════════
+//
+// 流程（由 main.rs 在 logger::init 之前调用，保证新旧日志文件分离）：
+// 1. 把整个 logs/ 原子重命名为 logs 同级的 `ziped_<ts>` 临时目录（同分区 rename）；
+// 2. **复制回 watchdog.pid** 到新建的 logs/——看门狗先于本进程启动、WebUI
+//    stopScheduler 靠 logs/watchdog.pid 定位并终止看门狗，归档不能带走它；
+// 3. 子线程把临时目录打包为 logd/ziped_<ts>.zip（stored ZIP，无压缩、零新依赖），
+//    成功后删除临时目录并自然退出（无常驻线程）；失败保留临时目录并写入
+//    ARCHIVE_FAILED.txt 供事后排查（此时 logger 尚未 init，无法打点）；
+// 4. rename 失败或原目录为空时跳过归档，日志继续写入原 logs/，不影响启动。
+
+/// 启动归档入口。返回归档 zip 文件名（logger::init 后供 main info 打点）；
+/// 未归档（首次安装 / 空目录 / rename 失败）返回 None。
+pub fn archive_logs_on_startup(root: &Path) -> Option<String> {
+    let src = root.join("logs");
+    // 空目录或不存在：无归档价值（首次安装），main 随后新建 logs/
+    let has_entries = std::fs::read_dir(&src)
+        .map(|mut d| d.next().is_some())
+        .unwrap_or(false);
+    if !has_entries {
+        return None;
+    }
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let tmp_name = format!("ziped_{}", ts);
+    let tmp = root.join(&tmp_name);
+    std::fs::rename(&src, &tmp).ok()?;
+
+    // 新建 logs/ 并保留看门狗 pid（stopScheduler 的定位依据）
+    let new_logs = root.join("logs");
+    let _ = fs::create_dir_all(&new_logs);
+    let pid_src = tmp.join("watchdog.pid");
+    if pid_src.exists() {
+        let _ = fs::copy(&pid_src, new_logs.join("watchdog.pid"));
+    }
+
+    let zip_name = format!("ziped_{}.zip", ts);
+    let logd = root.join("logd");
+    let _ = fs::create_dir_all(&logd);
+    let zip_path = logd.join(&zip_name);
+    let dir_for_thread = tmp;
+    // 一次性子线程：打包完成（或失败落标记）即退出，无常驻
+    let _ = std::thread::Builder::new()
+        .name("log_archiver".to_string())
+        .spawn(
+            move || match pack_dir_stored_zip(&dir_for_thread, &zip_path) {
+                Ok(()) => {
+                    let _ = fs::remove_dir_all(&dir_for_thread);
+                }
+                Err(_) => {
+                    let _ = fs::write(
+                        dir_for_thread.join("ARCHIVE_FAILED.txt"),
+                        "zip packing failed; this directory was kept for inspection\n",
+                    );
+                }
+            },
+        );
+    Some(zip_name)
+}
+
+/// 递归收集目录下全部普通文件（logs/ 实际为平铺结构，递归仅作防御）
+fn collect_files(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
+    for entry in fs::read_dir(dir)? {
+        let p = entry?.path();
+        if p.is_dir() {
+            collect_files(&p, out)?;
+        } else {
+            out.push(p);
+        }
+    }
+    Ok(())
+}
+
+/// 把目录打包为 stored（不压缩）ZIP。零依赖手写 ZIP 结构：
+/// 每文件 [local file header + 文件名 + 原始数据] + central directory + EOCD。
+/// 日志文本压缩可省 ~80%，但引入 zip/flate2 依赖违背体积优先约定；stored 任何
+/// 解压器均可打开，体积换零依赖。只读文件、流式写出，失败返回 Err 交调用方处理。
+fn pack_dir_stored_zip(dir: &Path, zip_path: &Path) -> std::io::Result<()> {
+    let mut files: Vec<PathBuf> = Vec::new();
+    collect_files(dir, &mut files)?;
+    files.sort();
+    let mut w = std::io::BufWriter::new(fs::File::create(zip_path)?);
+    let mut central: Vec<u8> = Vec::new();
+    let mut offset: u32 = 0;
+    let mut count: u16 = 0;
+    // 固定时间戳 1980-01-01（DOS 日期最小合法值），归档不依赖原 mtime
+    const DOS_DATE: u16 = 0x21;
+    for f in &files {
+        let name_rel = f
+            .strip_prefix(dir)
+            .unwrap_or(f)
+            .to_string_lossy()
+            .replace('\\', "/");
+        let data = fs::read(f)?;
+        let crc = crc32_ieee(&data);
+        let n = name_rel.len() as u16;
+        let sz = data.len() as u32;
+        // local file header
+        w.write_all(&0x04034b50u32.to_le_bytes())?;
+        w.write_all(&20u16.to_le_bytes())?; // version needed: 2.0
+        w.write_all(&0u16.to_le_bytes())?; // flags
+        w.write_all(&0u16.to_le_bytes())?; // method: stored
+        w.write_all(&0u16.to_le_bytes())?; // mod time
+        w.write_all(&DOS_DATE.to_le_bytes())?;
+        w.write_all(&crc.to_le_bytes())?;
+        w.write_all(&sz.to_le_bytes())?; // compressed size
+        w.write_all(&sz.to_le_bytes())?; // uncompressed size
+        w.write_all(&n.to_le_bytes())?;
+        w.write_all(&0u16.to_le_bytes())?; // extra len
+        w.write_all(name_rel.as_bytes())?;
+        w.write_all(&data)?;
+        // central directory entry
+        central.extend_from_slice(&0x02014b50u32.to_le_bytes());
+        central.extend_from_slice(&20u16.to_le_bytes()); // version made by
+        central.extend_from_slice(&20u16.to_le_bytes()); // version needed
+        central.extend_from_slice(&0u16.to_le_bytes()); // flags
+        central.extend_from_slice(&0u16.to_le_bytes()); // method
+        central.extend_from_slice(&0u16.to_le_bytes()); // mod time
+        central.extend_from_slice(&DOS_DATE.to_le_bytes());
+        central.extend_from_slice(&crc.to_le_bytes());
+        central.extend_from_slice(&sz.to_le_bytes());
+        central.extend_from_slice(&sz.to_le_bytes());
+        central.extend_from_slice(&n.to_le_bytes());
+        central.extend_from_slice(&0u16.to_le_bytes()); // extra len
+        central.extend_from_slice(&0u16.to_le_bytes()); // comment len
+        central.extend_from_slice(&0u16.to_le_bytes()); // disk number
+        central.extend_from_slice(&0u16.to_le_bytes()); // internal attrs
+        central.extend_from_slice(&0u32.to_le_bytes()); // external attrs
+        central.extend_from_slice(&offset.to_le_bytes());
+        central.extend_from_slice(name_rel.as_bytes());
+        offset = offset.wrapping_add(30 + n as u32 + sz);
+        count = count.wrapping_add(1);
+    }
+    let cd_offset = offset;
+    let cd_size = central.len() as u32;
+    w.write_all(&central)?;
+    // EOCD
+    w.write_all(&0x06054b50u32.to_le_bytes())?;
+    w.write_all(&0u16.to_le_bytes())?; // this disk
+    w.write_all(&0u16.to_le_bytes())?; // cd start disk
+    w.write_all(&count.to_le_bytes())?;
+    w.write_all(&count.to_le_bytes())?;
+    w.write_all(&cd_size.to_le_bytes())?;
+    w.write_all(&cd_offset.to_le_bytes())?;
+    w.write_all(&0u16.to_le_bytes())?; // comment len
+    w.flush()?;
+    Ok(())
+}
+
+/// CRC32（IEEE 反射多项式 0xEDB88320），表驱动、首次调用时构建 256 项表
+fn crc32_ieee(data: &[u8]) -> u32 {
+    static TABLE: std::sync::OnceLock<[u32; 256]> = std::sync::OnceLock::new();
+    let table = TABLE.get_or_init(|| {
+        let mut t = [0u32; 256];
+        let mut i = 0usize;
+        while i < 256 {
+            let mut c = i as u32;
+            let mut k = 0;
+            while k < 8 {
+                c = if c & 1 != 0 {
+                    0xEDB88320 ^ (c >> 1)
+                } else {
+                    c >> 1
+                };
+                k += 1;
+            }
+            t[i] = c;
+            i += 1;
+        }
+        t
+    });
+    let mut crc = 0xFFFF_FFFFu32;
+    for &b in data {
+        crc = table[((crc ^ b as u32) & 0xFF) as usize] ^ (crc >> 8);
+    }
+    !crc
 }

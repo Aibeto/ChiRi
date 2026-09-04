@@ -474,6 +474,16 @@ pub fn app_detection_loop(
                 // 使用已获取的 config_snapshot，不再重复加锁
                 let new_mode = determine_mode(&config_snapshot, &final_pkg);
 
+                // 前台包切换直写 status.log fg 行：含同模式切换（修复原依赖
+                // ModeChange 事件——仅模式变化才发送——导致同模式切换无记录的失效）
+                crate::logger::status_log_fg(
+                    &final_pkg,
+                    current_screen_state,
+                    &format!("{:.1}", current_temp),
+                    &last_mode,
+                    &new_mode,
+                );
+
                 // force_refresh（配置重载/亮屏恢复）只驱动外层重新计算模式；
                 // 模式未变时不重发 ModeChange，避免 "balance -> balance" 冗余事件。
                 // 注意：同模式应用切换不发事件对 scheduler 无影响——CLG 按模式调频，

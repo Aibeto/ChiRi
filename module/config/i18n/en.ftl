@@ -18,7 +18,8 @@ main-chdir = [Main] Changed working directory to: { $dir }
 main-module-root = [Main] Module root: { $path }
 main-config-loaded = [Main] Config loaded: { $path } (loglevel={ $loglevel }, language={ $language })
 main-chiri-scheduler-selected = [Main] Specific SoC detected, enabling Chiri scheduler
-main-special-tuned-exported = [Main] Exported { $count } special-tuned whitelist entries to special_tuned.txt
+main-special-tuned-exported = [Main] exported { $count } internal special-tuned whitelist entries to special_tuned.txt
+main-log-archive-submitted = [Main] previous logs archived, packing in background to logd/{ $zip }
 monitor-thread-start-screen = [Main] Starting screen state watcher thread...
 monitor-thread-start-config-watch = [Main] Starting config watcher thread...
 monitor-thread-start-fps = [Main] Starting eBPF FPS monitor thread...

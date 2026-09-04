@@ -43,6 +43,11 @@ fn main() -> Result<()> {
 
     let root = common::get_module_root();
     let log_dir = root.join("logs");
+    // 启动日志归档：把上一轮整个 logs/ 重命名为 ziped_<毫秒时间戳> 并交子线程
+    // 异步打包为 logd/ziped_<ts>.zip（watchdog.pid 复制回新建的 logs/ 供
+    // stopScheduler 定位看门狗）；本进程日志全部写入新建的 logs/，互不干扰。
+    // 必须在 create_dir_all(log_dir)/logger::init 之前执行，保证新旧文件分离。
+    let archived_zip = logger::archive_logs_on_startup(&root);
     std::fs::create_dir_all(&log_dir)?;
 
     // 2. 判断是否启用 Chiri 专用调度器（检测到列表中的特定处理器时启用）
@@ -103,6 +108,17 @@ fn main() -> Result<()> {
     };
     load_language(&language);
     logger::init(&loglevel)?;
+
+    // 日志系统就绪后输出归档结果（归档线程在 logger::init 之前已启动，不阻塞）
+    if let Some(zip) = &archived_zip {
+        info!(
+            "{}",
+            t_with_args(
+                "main-log-archive-submitted",
+                &fluent_args!("zip" => zip.clone())
+            )
+        );
+    }
 
     // 日志系统就绪后再输出调试信息（init 前的 log 会被静默丢弃）
     if let Some(path) = &chdir_path {
