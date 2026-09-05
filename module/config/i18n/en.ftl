@@ -180,6 +180,20 @@ fas-pid-reloaded = [FAS] PID coefficients hot-reloaded: Kp={ $kp } Ki={ $ki } Kd
 fas-rules-reloaded = [FAS] rules hot-reloaded (margin={ $margin }, floor={ $floor }, ceil={ $ceil }, profiles={ $profiles })
 fas-policy-writer-invalid = [FAS] P{ $pid } policy writer invalid (max_valid: { $max_valid }, min_valid: { $min_valid }), skipping.
 
+# --- FAS (whitelist / scheduler integration) ---
+main-fas-whitelist-exported = [Main] exported { $count } FAS whitelist entries to fas_whitelist.txt
+app-detect-fas-fallback = [AppDetect] foreground app hit FAS whitelist, entering FAS mode: { $pkg }
+app-detect-fas-rejected = [AppDetect] non-whitelisted app { $pkg } mapped to FAS mode { $mode }, rejected, falling back to global mode
+app-detect-fas-global-rejected = [AppDetect] global mode { $mode } is a FAS mode and does not apply to non-whitelisted app { $pkg }, falling back to balance
+scheduler-fas-activate = [Scheduler] FAS instance activated: { $pkg } (pid={ $pid })
+scheduler-fas-switch = [Scheduler] FAS instance hot-switched: { $old } -> { $new }
+scheduler-fas-deactivate = [Scheduler] FAS instance deactivated (frequencies restored): { $pkg }
+scheduler-fas-destroy = [Scheduler] FAS instance destroyed (not foregrounded for 60s): { $pkg }
+scheduler-fas-doze-enable = [Scheduler] FAS keeps control during screen OFF: low-frequency lock written
+scheduler-fas-doze-restore = [Scheduler] FAS restored on screen ON: scheduling frequencies rewritten
+scheduler-fas-init-failed = [Scheduler] FAS instance init failed, falling back to CLG: { $pkg }
+scheduler-fas-cooldown = [Scheduler] FAS init failed, entering { $secs }s cooldown; CLG takes over during cooldown
+
 # --- Scheduler: Settings ---
 apply-settings-for-mode = Applying settings for mode: { $mode }
 settings-applied-success = Settings for mode '{ $mode }' applied successfully.

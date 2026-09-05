@@ -78,6 +78,9 @@ fn main() -> Result<()> {
     // “特调”标签与专属选项：每行一条 `包名:特调模式列表(逗号分隔):优先回退模式`。
     // 只导出精确包名条目（正则条目无法按包名精确查找）；WebUI 只读该文件，不提供修改入口。
     // 仅在 Chiri 专属调度激活时导出——非 Chiri（Yumi）设备不生成该文件，WebUI 据此隐藏特调功能。
+    // 日志延后到 logger::init 之后输出（init 前的 log 会被静默丢弃），见下方「日志系统就绪」块。
+    let mut exported_special: Option<usize> = None;
+    let mut exported_fas: Option<usize> = None;
     if chiri_active {
         let exact: Vec<&common::SpecialTunedEntry> = common::special_tuned_entries()
             .iter()
@@ -91,13 +94,16 @@ fn main() -> Result<()> {
             root.join("special_tuned.txt"),
             special_tuned_content.as_bytes(),
         );
-        info!(
-            "{}",
-            t_with_args(
-                "main-special-tuned-exported",
-                &fluent_args!("count" => exact.len().to_string())
-            )
-        );
+        exported_special = Some(exact.len());
+
+        // 导出 FAS 白名单（编译期嵌入，WebUI 只读展示用；WebUI 不可修改，daemon 不读磁盘）
+        let fas_content: String = common::fas_whitelist()
+            .iter()
+            .map(|(pkg, cfg)| format!("{pkg}:{cfg}\n"))
+            .collect();
+        if utils::try_write_file(root.join("fas_whitelist.txt"), fas_content.as_bytes()).is_ok() {
+            exported_fas = Some(common::fas_whitelist().len());
+        }
     }
 
     // 4. 立即加载语言与日志（两套 Config 的 meta 结构一致，先用它初始化）
@@ -118,6 +124,26 @@ fn main() -> Result<()> {
             t_with_args(
                 "main-log-archive-submitted",
                 &fluent_args!("zip" => zip.clone())
+            )
+        );
+    }
+
+    // 白名单导出结果（文件写入在 logger::init 之前完成，日志延后到此处才可见）
+    if let Some(count) = exported_special {
+        info!(
+            "{}",
+            t_with_args(
+                "main-special-tuned-exported",
+                &fluent_args!("count" => count.to_string())
+            )
+        );
+    }
+    if let Some(count) = exported_fas {
+        info!(
+            "{}",
+            t_with_args(
+                "main-fas-whitelist-exported",
+                &fluent_args!("count" => count.to_string())
             )
         );
     }

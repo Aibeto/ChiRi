@@ -4,8 +4,8 @@ xtask/target
 yumi-ebpf/target
 
 # IDE
-.idea/
-.vscode/
+# .idea/
+# .vscode/
 *.swp
 *.swo
 *~
@@ -26,3 +26,11 @@ yumi-*.zip
 output/
 *.log
 logd/
+
+# plan
+.trae/documents/fas-decoupled-plan.md
+.trae/documents/fas-enable-plan.md
+.trae/documents/fas-remaining-waves-plan.md
+
+# reference
+AppOptR

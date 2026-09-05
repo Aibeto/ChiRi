@@ -126,7 +126,8 @@ pub fn start_monitor(
 
     // 5. 前台 PID 统一广播源
     //    FPS/CPU 两个 eBPF 监控共享同一份前台 PID，替代各自 500ms 的重复轮询。
-    //    （FAS 暂禁用：恢复 FAS 时在此为 fps_monitor clone 一个 Receiver）
+    //    fps_monitor 在下方启动块（FAS 已恢复，仅 ChiRi 且 FAS 可用时启动）
+    //    clone 一个 Receiver 消费同一广播。
     let initial_pid = app_detect::get_current_pid();
     let (tx_pid, rx_pid_cpu) = tokio::sync::watch::channel(initial_pid as u32);
     thread::Builder::new()
@@ -154,24 +155,33 @@ pub fn start_monitor(
         })?;
 
     // 6. 启动 eBPF FPS 监控线程 (带有独立的 Tokio 运行时)
-    // ==== FAS 暂禁用：FPS 帧监控仅服务于 FAS 调频，随 FAS 一并关闭，
-    //      避免空跑 uprobe attach + RingBuf 轮询 + 无效 FrameUpdate 事件。
-    //      恢复 FAS 时取消下行注释，并把 rx_pid_cpu.clone() 一并传入。 ====
-    // log::debug!("{}", t("monitor-thread-start-fps"));
-    // let tx_fps = tx.clone();
-    // thread::Builder::new()
-    //     .name("fps_monitor_ebpf".to_string())
-    //     .spawn(move || {
-    //         if let Ok(rt) = tokio::runtime::Runtime::new() {
-    //             rt.block_on(async {
-    //                 if let Err(e) = fps_monitor::start_fps_loop(tx_fps).await {
-    //                     error!("{}", t_with_args("monitor-fps-crashed", &fluent_args!("error" => e.to_string())));
-    //                 }
-    //             });
-    //         } else {
-    //             error!("{}", t("monitor-fps-tokio-failed"));
-    //         }
-    //     })?;
+    //    FAS 帧事件源：FPS 帧监控仅服务于 FAS 调频，仅 ChiRi 且 FAS 配置可用时启动
+    //    （FpsManager 空 uprobe attach + RingBuf 轮询对 Yumi 设备是纯开销），
+    //    Yumi 设备零开销。PID 来源复用上方 pid_watcher 的共享广播（rx_pid_cpu clone）。
+    if crate::common::is_chiri_soc() && crate::common::fas_available() {
+        log::debug!("{}", t("monitor-thread-start-fps"));
+        let tx_fps = tx.clone();
+        let rx_pid_fps = rx_pid_cpu.clone();
+        thread::Builder::new()
+            .name("fps_monitor_ebpf".to_string())
+            .spawn(move || {
+                if let Ok(rt) = tokio::runtime::Runtime::new() {
+                    rt.block_on(async {
+                        if let Err(e) = fps_monitor::start_fps_loop(tx_fps, rx_pid_fps).await {
+                            error!(
+                                "{}",
+                                t_with_args(
+                                    "monitor-fps-crashed",
+                                    &fluent_args!("error" => e.to_string())
+                                )
+                            );
+                        }
+                    });
+                } else {
+                    error!("{}", t("monitor-fps-tokio-failed"));
+                }
+            })?;
+    }
 
     // 7. 启动 eBPF CPU 负载监控线程
     log::debug!("{}", t("monitor-thread-start-cpu"));

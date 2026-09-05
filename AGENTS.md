@@ -1,6 +1,6 @@
 # AGENTS.md
 
-> 上次更新时间：2026-09-04
+> 上次更新时间：2026-09-05
 > 最后更新位于此 head 之后：40577b0af15ce66a0875546b1d98d730fa2925af
 
 本文档为 AI 编程助手（Cursor / Claude Code / Trae 等）在本仓库工作时的指导文件。
@@ -24,13 +24,13 @@ src/                  # Rust 守护进程主代码
   monitor/            # 监控层：app_detect / fps_monitor / cpu_monitor / screen_detect / telemetry（两套调度共享）
   scheduler/          # 调度层 Yumi（即将废弃，作为 ChiRi 基础保留、勿动逻辑）：FAS 引擎、CLG 负载调速器
     fas/              # FAS 核心：PID 控制器、帧率档位、frame_pipeline
-  chiri/              # ChiRi 调度（发展主线；特定 SoC 触发；含 CLG、akmode 明日方舟特调、touch_detect 触摸升频、affinity 按核亲和/线程迁移、core_ctl 核心在线接管）
+  chiri/              # ChiRi 调度（发展主线；特定 SoC 触发；含 CLG、akmode 明日方舟特调、fas_manager FAS 帧感知调度、touch_detect 触摸升频、affinity 按核亲和/线程迁移、core_ctl 核心在线接管）
   chiri/affinity_blacklist.txt  # 线程亲和黑名单（编译期嵌入：系统关键进程默认名单 + re: 正则；含 com.example 示例；用户/WebUI 不可改）
   common.rs / fas_types.rs / i18n.rs / logger.rs
 yumi-ebpf/            # eBPF 探针（bpfel-unknown-none，build-std 编译；独立 workspace，不在根 members；sched_switch + queueBuffer + 遥测计数探针）
 xtask/                # 构建脚本（cargo xtask build 完成编译打包 zip）
 module/               # Magisk/KernelSU 模块载体（module.prop、customize.sh、service.sh）
-  config/             # config.yaml / rules.yaml / i18n (en.ftl / zh.ftl)；<soc>/config.yaml 处理器子目录（各 SoC 自带，8475/8998 参数相同、各自一份）+ normal/akmode.yaml、normal/scenemode.yaml（编译期嵌入）
+  config/             # config.yaml / rules.yaml / i18n (en.ftl / zh.ftl)；<soc>/config.yaml 处理器子目录（各 SoC 自带，8475/8998 参数相同、各自一份）+ normal/akmode.yaml、normal/scenemode.yaml、normal/fas.yaml（FAS 白名单）、normal/fas/<配置名>.yaml 每应用 FAS 调优（编译期嵌入）
 webui/                # Vue 3 + TypeScript + Vite + Pinia + Vant 管理界面
 updateInformation/    # 更新.json 与 changelog
 .github/workflows/    # CI：Node 24 + Rust nightly + NDK r29 + cargo-ndk
@@ -84,11 +84,11 @@ cd webui && npm run type-check
 
 - `CHIRI_SOC_HINTS` 在 common.rs 维护，新增机型只追加列表，不要绑定单一型号；同时提供 `config/{片段}/config.yaml` 和核心组区间 `common::chiri_core_ranges()`。匹配只看硬件标识片段，不检查磁盘目录（配置编译进二进制，硬件命中即生效）。
 
-- FAS 暂禁用期间的保留代码（fps_monitor 整模块、`DaemonEvent` 的 `FrameUpdate`/`pid`/`foreground_max_util`、capacity 权重函数等）统一加 `#[allow(dead_code)]` 并注明"恢复 FAS 时启用"，不要删除。FPS 帧监控（fps_monitor）仅服务于 FAS 调频，FAS 禁用期间不启动（见 `mod.rs` 注释块）。`foreground_max_util` 仅 FAS 消费，FAS 禁用期间经 `FAS_FG_UTIL_ENABLED=false` 跳过计算（发送 0.0，两套调度器均忽略）；`get_thread_tids/compute_tgid_util/compute_thread_level_util` 加 `#[allow(dead_code)]` 保留（恢复 FAS 时置 true）。
+- FAS 已恢复为 ChiRi 专属主线功能（引擎在 src/scheduler/fas/，算法未改；ChiRi 侧 src/chiri/fas_manager.rs 提供解耦多实例生命周期管理，见 ChiRi 调度子系统 FAS 小节）。fps_monitor 仅 `is_chiri_soc() && fas_available()` 时恢复启动，复用共享 pid_watcher 广播——`start_fps_loop` 接收 watch::Receiver，内部经 mpsc 桥接喂给 fps_probe 线程；`DaemonEvent` 的 `FrameUpdate`/`pid`/`foreground_max_util` 已恢复消费。`FAS_FG_UTIL_ENABLED` 由 const bool 改为运行时 AtomicBool（cpu_monitor `start_cpu_loop` 入口按 `is_chiri_soc() && fas_available()` 置位，Yumi 设备保持 false、行为零变化）；cpu_monitor 的 `get_thread_tids/compute_tgid_util/compute_thread_level_util` 已恢复使用（allow 标注移除）。保留 `#[allow(dead_code)]` 的仅剩两处引擎热重载预留方法（fas/pid.rs `update_coefficients`、fas/policy_mgmt.rs `reload_rules`，注明「per-app 配置编译期嵌入、ConfigReload 不再重载 FAS」）。main.rs 在 chiri_active 门控内导出两个运行时文件：special_tuned.txt 与 fas_whitelist.txt（后者每行 `包名:配置名`，供 WebUI 只读）。Yumi 仅恢复 `pub mod fas;` 模块声明供 crate 路径引用，其余 FAS 接线保持注释冻结，Yumi 运行时行为零变化。
 
 - 负载采样间隔：`cpu_monitor` 的 `SystemLoadUpdate` 按 SoC 参数化，main.rs 按 `is_chiri_soc()` 传入 `start_monitor`→`start_cpu_loop`（ChiRi 160ms / Yumi 200ms，Yumi 200ms 为原值勿改）；akmode 激活时经共享 `Arc<AtomicBool>`（main.rs 创建、`AkmodeGovernor` 接管/释放时置位）切换到 40ms。akmode 消费该负载流做动态限频（档位固定，max 随负载在内核频率表中逐档升降，范围均为硬件上下限）；CLG 消费同一事件流，tick 语义按当前采样间隔（各 rate_limit_ticks/smoothing 按各自 tick 调优）。
 
-- **事件循环低开销原则（性能响应零延迟约束下）**：所有性能敏感路径（负载事件/模式切换/触摸升频）都是**推送事件**——`recv_timeout` 被事件到达立即打断，轮询周期只影响非性能的定时任务。据此：① chiri `scheduler_ipc` 用**动态超时**阻塞到「最近一个周期任务 deadline」（telemetry 1s / thermal+亲和 2s / mode file 5s / fast_lock 重写 5s 各自取 min，上限 `EVENT_POLL_MS=1s`），空闲从每秒 10 次空转降到 \~1 次，勿改回固定 100ms 轮询；② CLG Worker 的 `run()` 超时分支只做触摸窗口清理 + 防篡改重写（1s 粒度），负载/触摸决策全走推送事件即时触发，勿把超时改回 160ms；③ 新增周期任务时**必须把它的 deadline 纳入** `recv_timeout` 的 wait 计算（取 min），否则任务会被拖到最长 1s 粒度；④ 高频 `debug!` 中的 `format!/collect/join` 构造发生在宏求值前，INFO 级别下每 tick 白白分配——用 `log::log_enabled!(log::Level::Debug)` 门控（scheduler-event-load / clg-tick-log / akmode-tick-log / cpu-monitor-tick-log 已做）。
+- **事件循环低开销原则（性能响应零延迟约束下）**：所有性能敏感路径（负载事件/模式切换/触摸升频）都是**推送事件**——`recv_timeout` 被事件到达立即打断，轮询周期只影响非性能的定时任务。据此：① chiri `scheduler_ipc` 用**动态超时**阻塞到「最近一个周期任务 deadline」（telemetry 1s / thermal+亲和 2s / mode file 5s / fast_lock 重写 5s 各自取 min，上限 `EVENT_POLL_MS=1s`），空闲从每秒 10 次空转降到 \~1 次，勿改回固定 100ms 轮询；② CLG Worker 的 `run()` 超时分支只做触摸窗口清理 + 防篡改重写（1s 粒度），负载/触摸决策全走推送事件即时触发，勿把超时改回 160ms；③ 新增周期任务时**必须把它的 deadline 纳入** `recv_timeout` 的 wait 计算（取 min），否则任务会被拖到最长 1s 粒度；④ 高频 `debug!` 中的 `format!/collect/join` 构造发生在宏求值前，INFO 级别下每 tick 白白分配——用 `log::log_enabled!(log::Level::Debug)` 门控（scheduler-event-load / clg-tick-log / akmode-tick-log / cpu-monitor-tick-log 已做；FrameUpdate 帧事件 debug 打点同口径门控——FAS 恢复后逐帧 format 真实发生，勿裸打点）。
 
 ### 日志
 
@@ -104,19 +104,21 @@ cd webui && npm run type-check
 
 - 启动日志归档：main 在 `create_dir_all(logs)`/`logger::init` 之前调 `logger::archive_logs_on_startup`——把上一轮整个 `logs/` 原子 rename 为同级 `ziped_<毫秒时间戳>` 临时目录，交一次性子线程 `log_archiver` 打包为 `logd/ziped_<ts>.zip`（手写 stored ZIP，零新依赖，勿引入 zip/flate2）后删除临时目录并自然退出；打包失败保留临时目录并写 ARCHIVE_FAILED.txt（此时 logger 未 init 无法打点）。必须复制回 `logs/watchdog.pid`——看门狗先于 daemon 启动、WebUI stopScheduler 靠它终止看门狗，归档带走它会导致「关闭调度」失效。
 
-- 开发诊断日志（devimp/）：独立目录 `<模块根>/devimp/`（与 logs/ 平级，**不受日志归档影响**）。**按前台包名分组**：文件名 `devimp_<前台包名>_<unix 毫秒时间戳>.log`（首次写入惰性创建，整轮未开启 DEV 则不产生文件），scheduler_ipc 每秒经 `logger::set_devimp_package` 同步 `app_detect::get_current_package()`，**包名变化即关闭当前文件、下次写入以新包名+当前时间戳开新文件**；原始包名同时存入 logger 全局，**所有行类型的 package 列自动填充前台包名**（tick/core 不感知包名也带包名；place/event 仅在携带有效包名时覆盖，aff 后台迁移行传 "-" 是刻意不归属前台包，勿改 set_pkg）；空包名（启动初期尚未检测到前台应用）**不触发切文件**继续写当前文件，尚无任何包名时包名段为 `nopkg`（防 `devimp__` 空段）；单文件软上限 128MB **触顶自动换新时间戳文件继续写**（勿改回静默停写）。**写入量控制**：tick 行按 cluster 节流——决策签名（decision/tgt_perf/cur_freq/max_freq/thermal/touch/防抖进度）变化才写、无变化 2s 心跳（`DEVIMP_TICK_HEARTBEAT`，状态在切文件时清零），稳态从 akmode 25 行/s/组 降到 0.5 行/s/组，勿改回每 tick 必写；place/core 低频快照每 `DEVL_ROW_EVERY_ROUNDS=4` 轮（8s）一轮；snap 1s 一行保留（功耗关联锚点）。文件名含包名段、字典序≠时间序，清理（`devimp_prepare` 启动一次 + 触顶换文件后）一律按文件 mtime 排序保留最近 20 份，当前活跃文件不清理。总开关 `logger::set_devimp_active`（scheduler_ipc 按 `Config.meta.dev_record` 同步，meta 允许外部修改的字段之一、WebUI「开发记录」开关 + 热重载）；模式名经 `logger::set_devimp_mode` 同步、各行 mode 列自动填充。CSV 宽表 40 列 + `type` 列：`tick`（每决策 tick × 每核心组的调频决策轨迹，CLG Worker 与 akmode on_load_update 写入）、`snap`（1s 环境上下文，前台包名**实时取自** **`app_detect::get_current_package()`**——ModeChange 仅模式变化时才有事件，用事件维护会写过期包名）、`place`（低频快照：前台线程的包名/线程名/落点核，全部来自 affinity 缓存——comm 在线程首见 stat 采样时缓存、fg_cmdline 每轮刷新一次，**零新增文件读**）、`aff`（亲和迁移动作 pin/promote/demote/restore/blacklist_skip，包名列用缓存 cmdline）、`core`（逐核 util + 钉核计数，与 place 同周期每 4 轮/8s 一次）、`event`（模式/屏幕/热/配置状态变化）。**共用数据减小开销**：电池/CPU 温度在 1s snap 块读一次存入 `last_batt_temp/last_cpu_temp`，status.csv、devimp snap、thermal（2s）三处共用（thermal 复用 ≤1s 旧值，带回滞的秒级判定无影响）；affinity 的逐核 util/在线位图/线程 comm 均为缓存复用。未开启开关时所有写入点零 IO。
+- 开发诊断日志（devimp/）：独立目录 `<模块根>/devimp/`（与 logs/ 平级，**不受日志归档影响**）。**按前台包名分组**：文件名 `devimp_<前台包名>_<unix 毫秒时间戳>.log`（首次写入惰性创建，整轮未开启 DEV 则不产生文件），scheduler_ipc 每秒经 `logger::set_devimp_package` 同步 `app_detect::get_current_package()`，**包名变化即关闭当前文件、下次写入以新包名+当前时间戳开新文件**；原始包名同时存入 logger 全局，**所有行类型的 package 列自动填充前台包名**（tick/core 不感知包名也带包名；place/event 仅在携带有效包名时覆盖，aff 后台迁移行传 "-" 是刻意不归属前台包，勿改 set_pkg）；空包名（启动初期尚未检测到前台应用）**不触发切文件**继续写当前文件，尚无任何包名时包名段为 `nopkg`（防 `devimp__` 空段）；单文件软上限 128MB **触顶自动换新时间戳文件继续写**（勿改回静默停写）。**写入量控制**：tick 行按 cluster 节流——决策签名（decision/tgt_perf/cur_freq/max_freq/thermal/touch/防抖进度）变化才写、无变化 2s 心跳（`DEVIMP_TICK_HEARTBEAT`，状态在切文件时清零），稳态从 akmode 25 行/s/组 降到 0.5 行/s/组，勿改回每 tick 必写；place/core 低频快照每 `DEVL_ROW_EVERY_ROUNDS=4` 轮（8s）一轮；snap 1s 一行保留（功耗关联锚点）。文件名含包名段、字典序≠时间序，清理（`devimp_prepare` 启动一次 + 触顶换文件后）一律按文件 mtime 排序保留最近 20 份，当前活跃文件不清理。总开关 `logger::set_devimp_active`（scheduler_ipc 按 `Config.meta.dev_record` 同步，meta 允许外部修改的字段之一、WebUI「开发记录」开关 + 热重载）；模式名经 `logger::set_devimp_mode` 同步、各行 mode 列自动填充。CSV 宽表 40 列 + `type` 列：`tick`（每决策 tick × 每核心组的调频决策轨迹，CLG Worker 与 akmode on_load_update 写入）、`snap`（1s 环境上下文，前台包名**实时取自** **`app_detect::get_current_package()`**——ModeChange 仅模式变化时才有事件，用事件维护会写过期包名）、`place`（低频快照：前台线程的包名/线程名/落点核，全部来自 affinity 缓存——comm 在线程首见 stat 采样时缓存、fg_cmdline 每轮刷新一次，**零新增文件读**）、`aff`（亲和迁移动作 pin/promote/demote/restore/blacklist_skip，包名列用缓存 cmdline）、`core`（逐核 util + 钉核计数，与 place 同周期每 4 轮/8s 一次）、`event`（模式/屏幕/热/配置状态变化；含 `kind="fas"` 行，action: activate/deactivate/destroy/doze/wake——FAS 实例生命周期状态变化即时打点，见 FAS 小节）。**共用数据减小开销**：电池/CPU 温度在 1s snap 块读一次存入 `last_batt_temp/last_cpu_temp`，status.csv、devimp snap、thermal（2s）三处共用（thermal 复用 ≤1s 旧值，带回滞的秒级判定无影响）；affinity 的逐核 util/在线位图/线程 comm 均为缓存复用。未开启开关时所有写入点零 IO。
 
 - 新增日志 key 同时补 `module/config/i18n/zh.ftl` 与 `en.ftl`，命名格式 `模块-描述`。
 
 ### 配置（嵌入、快照与热重载）
 
-- 调优配置编译期嵌入二进制（防篡改）：`common.rs` 用 `include_str!` 打包 `module/config/{soc}/config.yaml ×3`、默认 `config.yaml`、`normal/akmode.yaml`、`normal/scenemode.yaml` 与 i18n 两个 ftl。运行时一律以 `common::embedded_config_str()`（按 `matched_soc_hint()` 选择）为准，磁盘同名文件只是「自愈快照 + meta 覆盖入口」。
+- 调优配置编译期嵌入二进制（防篡改）：`common.rs` 用 `include_str!` 打包 `module/config/{soc}/config.yaml ×3`、默认 `config.yaml`、`normal/akmode.yaml`、`normal/scenemode.yaml`、`normal/fas.yaml`（FAS 白名单）与 i18n 两个 ftl。运行时一律以 `common::embedded_config_str()`（按 `matched_soc_hint()` 选择）为准，磁盘同名文件只是「自愈快照 + meta 覆盖入口」。
+
+- FAS 配置文件（均编译期嵌入）：`module/config/normal/fas.yaml` 定义 `fas.apps: {包名: 配置名}` 白名单，经 common.rs include_str! + OnceLock 解析，运行时导出 `fas_whitelist.txt` 对外只读，用户/WebUI 不可修改；`module/config/normal/fas/<配置名>.yaml`（如 fas/endfield.yaml）为每应用 FAS 调优，编译期嵌入不导出（`FasRulesConfig` 全字段，含新增 `doze_perf` 字段），按 `common::embedded_fas_app_str` 的 arm 查找。**FAS 游戏三步**：fas.yaml 加一行 → common.rs::embedded_fas_app_str 加 arm → 新建 `normal/fas/<配置名>.yaml`（可复制 `normal/fas-example.yaml` 全字段说明书裁剪——该文件仅文档参考、不被加载）。FAS 配置已脱离 rules.yaml（rules.yaml 的 `fas_rules` 注释模板与 `RulesConfig.fas_rules` 字段保留为 Yumi 冻结区向后兼容）。
 
 - `Config::load(path)`（chiri 与 scheduler 各一份，替代旧 `from_file`）用嵌入内容做基准，仅从磁盘文件反序列化 meta 段（`common::read_external_meta` 返回 `ExternalMetaOverrides`，只取 loglevel + dev_record，调优字段与其他 meta 字段即使被篡改也不读入）。
 
 - 快照自愈：`common::sync_config_snapshot()` 在 main 启动时与两套 config_watcher 热重载后，把「嵌入内容 + 磁盘 meta 覆盖」写回 `get_config_path()`（内容一致时跳过写入防 inotify 成环），磁盘文件被篡改/删除都会被还原/重建。允许外部修改的字段只有两个：meta.loglevel（WebUI 日志等级切换）与 meta.dev_record（WebUI「开发记录」开关，控制 devimp/ 诊断日志写入，热重载生效；布尔替换必须写裸值——serde_yaml 把带引号的 "true" 解析为字符串而非 bool；language 等其余内容固定，外部修改无效且会被快照自愈还原）。
 
-- `rules.yaml` 保持磁盘读写（WebUI 全局模式切换、应用性能模式需要）。运行时状态文件（active_config.txt / current_mode.txt / special_tuned.txt 导出 / 日志）不变。
+- `rules.yaml` 保持磁盘读写（WebUI 全局模式切换、应用性能模式需要）。运行时状态文件（active_config.txt / current_mode.txt / special_tuned.txt 导出 / fas_whitelist.txt 导出 / 日志）不变。
 
 - `matched_soc_hint()` 已不检查磁盘目录存在性。新增配置项需同步更新反序列化结构体与默认值；改 `module/config/` 下的 yaml 源文件后重新编译才生效。**`module/config/config-example.yaml`** **是完整字段说明书（不参与加载），任何新增/删除/改语义的配置段与 meta 字段都必须同步更新它**（含注释说明取值范围与机型差异），否则模板与实际配置脱节。
 
@@ -156,6 +158,8 @@ cd webui && npm run type-check
 - 不开放 YAML 编辑：`/config` 页只查看生效配置文件（`active_config.txt` 解析路径 + meta 抬头：配置名/作者/日志语言/日志等级）并切换日志等级（`bridge.ts::setLogLevel` 只替换 `meta.loglevel` 行、保留注释与其余内容，config_watcher 热重载即时生效），另提供「开发记录」开关（`bridge.ts::setDevRecord` 同口径替换 `meta.dev_record` 行，布尔裸值；MockBridge 需同步提供同名方法——`Bridge = isDev ? MockBridge : RealBridge` 是联合类型，缺方法 type-check 报错）；rules.yaml 仅在 WebUI 内部读写（全局模式切换、应用性能模式），不提供整文件编辑。
 
 - rules.yaml 写入防 null：js-yaml 会把值为 null 的字段序列化成 `app_modes: null`，而 serde_yaml 无法把 null 反序列化为 HashMap（`#[serde(default)]` 只对缺失字段生效），导致守护进程每次加载 rules.yaml 告警。`bridge.ts::saveRulesConfig` 写盘前移除 null/undefined 的 `app_modes` 键；守护进程侧 `monitor/config.rs` 的 `RulesConfig::app_modes` 用 `deserialize_with`（untagged 枚举）显式兼容 null 为空表，已存在 null 的旧文件也不告警。
+
+- FAS 标签（只读）：`bridge.ts::getFasWhitelist` 读 `fas_whitelist.txt`（每行 split(':')，解析异常回空表），仅 `isChiri && fasWhitelist[pkg]` 时应用列表显示 FAS 标签，且该 van-cell `pointer-events:none` 禁止打开模式选择——FAS 仅白名单驱动、非用户可选模式（mode_fas 动作项保持注释）；Home 页 `currentMode==='fas'` 显示 mode_fas/desc_fas；MockBridge 同步提供 `getFasWhitelist`（联合类型硬约束，缺方法 type-check 报错）。
 
 ## ChiRi 调度子系统
 
@@ -206,6 +210,24 @@ WebUI 侧：
 - 特调在 WebUI 为只读标注：`getSpecialTuned` 读白名单，仅 `isChiri && specialTuned[pkg]` 时在应用列表显示「特调：{fallback}」标签（Yumi 设备不显示）；不提供专属特调模式选项、不做特调清理/重扫修复，档位切换与普通应用一致（写 rules.yaml 的 `app_modes`/`global_mode`，特调起始档由 scheduler 侧识别）。应用列表提供「重新扫描」按钮（扫描中禁用防并发）。
 
 - 当前模式读取与自愈：`bridge.ts::getCurrentMode` 读 `current_mode.txt`（空文件回退 `balance`）；守护进程启动时写一次初始模式、模式切换时写入，并常态每 5 秒重写一次（两套 scheduler_ipc 均实现），防止文件被意外清空/删除后 WebUI 读不到状态。
+
+### FAS 帧感知调度（解耦多实例，ChiRi 专属）
+
+- 白名单与模式判定：`module/config/normal/fas.yaml` 精确包名→配置名；`determine_mode` 优先级 = FAS 白名单 > 特调 > app_modes > global_mode；rules.yaml 中 "fas" 映射视为非法（`app-detect-fas-rejected` / `app-detect-fas-global-rejected` 告警回退）；`fas_available()` = 白名单非空且至少一个应用配置解析成功（fps_monitor/FAS_FG_UTIL 联动门控见「架构与事件流」）。
+
+- 解耦多实例（`src/chiri/fas_manager.rs` 的 `FasManager`）：每个白名单应用一个独立 FasInstance（FasController + 专属 'static FasRulesConfig + last_fg）。C1 进前台（ModeChange→fas / PackageSwitch→fas）立即创建或复用（60s 内切回免重建 policies 快照）；C2 去激活（reset_all_freqs + clear_game）必须先于任何下一 governor（CLG/akmode/fast）的 init——保证对方快照真实系统状态，杜绝快照污染；C3 非活跃实例 60s（`FAS_INSTANCE_TTL`）后由 1s 遥测块 reap 注销（纯内存清理，活跃实例豁免）；C5 失败/收尾 deactivate_all。事件路由 C6：FrameUpdate/SystemLoadUpdate/温度只喂活跃实例。
+
+- 同模式热切换：新增 `DaemonEvent::PackageSwitch { package_name, pid }`（app_detect 主循环在模式不变且 ChiRi 且前台包变化时发射；Yumi 设备不发射、Yumi 调度器空 arm）。fas→fas 切换序列 = deactivate_active → activate → 息屏中则重新 enter_doze → fas_affinity_hook；另有 1s 遥测兜底（事件丢失/启动即 fas 自愈：非活跃且冷却外且白名单命中 → 三 governor release 后 activate；启动残留 fas 模式且前台非白名单且三 governor 均不活跃 → CLG balance 自愈）。
+
+- FAS 模式下 CLG/akmode/fast 全部暂停（三 governor release 后接管）；激活失败（load_policies 后无可用 policy）→ 300s 冷却（`FAS_COOLDOWN`，镜像 AKMODE_COOLDOWN）+ CLG balance 回退；进入 fas 的回退分支也先释放三 governor（可能从特调/极速切入）。
+
+- 移除的调度（FAS 接管期间豁免）：ChiRi 热保护整体跳过（温控移除，FAS 温度由 FasManager 每 3s 独立读传感器喂引擎内部限温，endfield 配置 core_temp_threshold=0 即关闭；1s 遥测温度读数保留）；触摸升频不参与（fas 非 boost，`is_boost_mode` 不含 fas）；scenemode 进入判定豁免 fas（息屏保持接管，不进 scenemode）；config_dirty/ConfigReload 的 CLG 分支对 fas 模式守卫（FAS 配置编译期嵌入静态）。
+
+- 息屏 doze（唯一保持接管场景）：息屏 active 实例全部 policy 写低频锁（`find_nearest_freq(doze_perf)` + apply_freq_locked，doze_perf 默认 0.18 clamp 0.05..0.30）；亮屏 apply_freqs() 按 PID/perf_index 状态重写——**勿改回 force_reapply**（其重写 doze 后陈旧的 current_freq，见经验教训）；FrameUpdate 漏帧自愈（doze 中收到帧先 exit_doze）；息屏中进 fas 有 enter_doze 竞态保险；亮屏时 FAS 未激活（冷却回退路径）则 CLG 从 doze 恢复 balance。
+
+- 线程亲和预留接口：`fas_affinity_hook(affinity_mgr, corectl_mgr, active, fg_pid)` 在 chiri/mod.rs（当前无操作），FAS 激活/去激活时调用；后续做 FAS 线程钉核只实现该函数，无需再改事件循环接线。
+
+- 调度能力范围（相对 CLG 的扩展仅频率维度）：per-policy min=max 锁频（PolicyController，1.5s 回读校验防内核覆写）+ 容量加权分频 + util 软封顶 + PID/Jank 帧级响应；不做 cpuset/uclamp/core_ctl。
 
 ### CLG 调频语义（动态上限制）
 
@@ -341,6 +363,10 @@ WebUI 侧：
 - 含 `std::ops::Range<usize>` 字段的结构体别 `derive(Copy)`：CI（`-Z build-std` + nightly）编译 `common::CoreGroupRanges` 时报 E0204（字段不实现 Copy），即便标准库中 `Range<usize>` 实现了 Copy。按值 move 或显式 `clone()` 即可，用 `#[derive(Debug, Clone)]` 够了，不要加 Copy。
 
 - 日志文件被删不能崩：`src/logger.rs` 用自实现 `SelfHealingAppender`（替换 log4rs `RollingFileAppender`），每次写入按路径 `create+append` 重新打开，`daemon.log` 被外部删除会自动重建；循环轮转与锁上锁全程 `Result`/剥除 poison，绝不 `unwrap`。别改回 log4rs 滚动追加器。
+
+- FAS doze 恢复必须用 apply_freqs 而非 force_reapply：后者按 PolicyController 内缓存的 current_freq 重写，doze 低频锁已把 current_freq 拉到低位，force_reapply 会把恢复后的频率钉死在 doze 值（亮屏全程跑在息屏锁频上）。
+
+- FasManager 复用路径不显式 reset_runtime（其为 pub(super) 引擎内部方法）：依赖引擎 app_switch_gap 语义——去激活时已 clear_game，复活后首个真实帧的帧间隔跨越失前台时长、必然超过 app_switch_gap_ms，引擎 handle_early_exit 内部自动 reset_runtime 并落 app_switch_resume_perf；手动补 reset 反而破坏该语义。
 
 - 看门狗崩溃自愈 + 进程模型：`service.sh`（开机）/`action.sh`（手动启动）用 `nohup sh -c` 拉起统一定义的看门狗循环，启动时把自己 PID 写入 `logs/watchdog.pid`。循环内 `"$DAEMON"` 崩溃返回非 0 仍会 `sleep 3` 自动重启；仅当存在卸载标记 `$MODDIR/.uninstalling`（`uninstall.sh` 开头 touch）或主进程二进制被删时才 `break` 退出。旧写法 `"$1" || exit 0` 在 yumi 崩溃（返回非 0）时会直接让看门狗退出、无法自愈，禁止复用。`service.sh` 开头的清理必须先按 `logs/watchdog.pid` kill 旧看门狗再 `killall yumi`（脚本被重新执行——模块热更新/管理器重载——时只 killall 会留下旧看门狗，3s 后与新看门狗各拉起一个 daemon，形成双实例并行写两份 devimp/status 日志）；`action.sh` 已有同口径清理。
 

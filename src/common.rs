@@ -34,15 +34,13 @@
 
 use crate::monitor::config::RulesConfig;
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::env;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// 守护进程全局事件总线
-/// FAS 暂禁用：`FrameUpdate` 变体暂无生产者、`ModeChange.pid` 与 `SystemLoadUpdate.foreground_max_util`
-/// 暂无消费者，均为恢复 FAS 时保留，故允许 dead_code。
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub enum DaemonEvent {
     /// 低频事件：前台应用切换或环境温度变化引起的模式改变
@@ -51,6 +49,11 @@ pub enum DaemonEvent {
         pid: i32,
         mode: String,
         temperature: f64,
+    },
+    /// 同模式前台包切换（模式不变、应用变化，ChiRi 侧 FAS fas→fas 热切换消费）
+    PackageSwitch {
+        package_name: String,
+        pid: i32,
     },
     /// 高频事件：eBPF 捕获到的底层渲染帧数据
     FrameUpdate {
@@ -362,6 +365,108 @@ pub fn is_special_mode_allowed(pkg: &str, mode: &str) -> bool {
     special_tuned_entry(pkg)
         .map(|e| e.modes.iter().any(|m| m == mode))
         .unwrap_or(false)
+}
+
+// ════════════════════════════════════════════════════════════════
+//  FAS（帧感知调度）白名单与每应用配置（编译期嵌入）
+//  白名单运行时导出到模块根 fas_whitelist.txt 供 WebUI 只读展示；
+//  每应用配置不导出。用户/WebUI 不可修改。
+// ════════════════════════════════════════════════════════════════
+
+const FAS_WHITELIST_TEXT: &str = include_str!("../module/config/normal/fas.yaml");
+const FAS_APP_ENDFIELD_TEXT: &str = include_str!("../module/config/normal/fas/endfield.yaml");
+
+/// 按配置名返回对应应用的嵌入 FAS 配置文本。
+/// 新增 FAS 游戏：module/config/normal/fas.yaml 白名单加一行 + 此处加 arm + 新建配置文件。
+pub fn embedded_fas_app_str(name: &str) -> Option<&'static str> {
+    match name {
+        "endfield" => Some(FAS_APP_ENDFIELD_TEXT),
+        _ => None,
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct FasWhitelistFile {
+    #[serde(default)]
+    fas: FasWhitelistSection,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct FasWhitelistSection {
+    #[serde(default)]
+    apps: HashMap<String, String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct FasAppFile {
+    #[serde(default)]
+    fas_rules: crate::fas_types::FasRulesConfig,
+}
+
+static FAS_WHITELIST: OnceLock<HashMap<String, String>> = OnceLock::new();
+static FAS_APP_CONFIGS: OnceLock<HashMap<String, crate::fas_types::FasRulesConfig>> =
+    OnceLock::new();
+
+/// FAS 白名单（精确包名 → 配置名），编译期嵌入，解析失败回退空表。
+pub fn fas_whitelist() -> &'static HashMap<String, String> {
+    FAS_WHITELIST.get_or_init(|| {
+        match serde_yaml::from_str::<FasWhitelistFile>(FAS_WHITELIST_TEXT) {
+            Ok(f) => f.fas.apps,
+            Err(e) => {
+                log::warn!("fas-config-parse-failed: {e}");
+                HashMap::new()
+            }
+        }
+    })
+}
+
+/// 精确匹配 FAS 白名单。
+pub fn fas_whitelist_entry(pkg: &str) -> Option<&'static String> {
+    fas_whitelist().get(pkg)
+}
+
+/// 按配置名取该应用的 FAS 规则（首次调用时解析全部白名单应用，normalize 后缓存）。
+pub fn fas_app_config(name: &str) -> Option<&'static crate::fas_types::FasRulesConfig> {
+    FAS_APP_CONFIGS
+        .get_or_init(|| {
+            let mut map = HashMap::new();
+            let mut names: Vec<&String> = fas_whitelist().values().collect();
+            names.sort();
+            names.dedup();
+            for name in names {
+                let Some(text) = embedded_fas_app_str(name) else {
+                    log::warn!("fas-config-missing: {name}");
+                    continue;
+                };
+                match serde_yaml::from_str::<FasAppFile>(text) {
+                    Ok(mut f) => {
+                        f.fas_rules.normalize();
+                        f.fas_rules.migrate_legacy_margins();
+                        map.insert(name.clone(), f.fas_rules);
+                    }
+                    Err(e) => log::warn!("fas-config-parse-failed ({name}): {e}"),
+                }
+            }
+            map
+        })
+        .get(name)
+}
+
+/// FAS 是否可用：白名单非空且至少一个应用配置解析成功。
+pub fn fas_available() -> bool {
+    if fas_whitelist().is_empty() {
+        return false;
+    }
+    // 触发惰性解析（fas_app_config 首次调用会解析全部白名单应用）
+    if let Some(name) = fas_whitelist().values().next() {
+        let _ = fas_app_config(name);
+    }
+    FAS_APP_CONFIGS.get().map_or(false, |m| !m.is_empty())
+}
+
+/// 模式名是否为 FAS。
+pub fn is_fas_mode(mode: &str) -> bool {
+    mode == "fas"
 }
 
 // ════════════════════════════════════════════════════════════════

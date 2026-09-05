@@ -94,6 +94,8 @@ const filteredApps = computed(() => {
 const getLabel = (pkg: string) => appLabelMap.value[pkg] || pkg;
 
 const openMenu = (pkg: string) => {
+  // FAS 白名单应用由守护进程 FAS 接管调度，不提供模式切换入口（与标签同口径：仅 ChiRi 设备）
+  if (store.isChiri && store.fasWhitelist[pkg]) return;
   selectedPkg.value = pkg;
   showActionSheet.value = true;
 };
@@ -132,6 +134,7 @@ const onSelectAction = async (item: any) => {
         :label="pkg"
         center
         clickable
+        :class="{ 'fas-locked': !!store.fasWhitelist[pkg] }"
         @click="openMenu(pkg)"
       >
         <template #icon>
@@ -147,11 +150,13 @@ const onSelectAction = async (item: any) => {
             <van-tag v-if="store.isChiri && store.specialTuned[pkg]" type="warning" size="medium" plain>
               {{ specialLabel(pkg) }}
             </van-tag>
+            <!-- FAS 白名单（只读标注，仅 Chiri 设备）：命中的应用由守护进程 FAS 接管，禁止切换模式 -->
+            <van-tag v-if="store.isChiri && store.fasWhitelist[pkg]" type="primary" size="medium" plain>FAS</van-tag>
             <!-- 用户自定义配置优先：显示自定义模式的原标签（与特调标签并存） -->
             <van-tag v-if="store.appRules[pkg]" type="primary" size="medium">
               {{ modeLabel(store.appRules[pkg]) }}
             </van-tag>
-            <span v-if="!store.appRules[pkg] && !(store.isChiri && store.specialTuned[pkg])" class="no-rule">{{ t('not_configured') }}</span>
+            <span v-if="!store.appRules[pkg] && !(store.isChiri && store.specialTuned[pkg]) && !store.fasWhitelist[pkg]" class="no-rule">{{ t('not_configured') }}</span>
           </div>
         </template>
       </van-cell>
@@ -172,4 +177,5 @@ const onSelectAction = async (item: any) => {
 .mode-tags { display: flex; align-items: center; gap: 4px; }
 .rescan-btn { font-size: 14px; color: #1989fa; cursor: pointer; }
 .rescan-btn.disabled { color: #c8c9cc; pointer-events: none; }
+.fas-locked { pointer-events: none; opacity: 0.65; }
 </style>

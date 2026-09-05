@@ -35,12 +35,15 @@ const mockMeta: Record<string, any> = {
   loglevel: "INFO"
 };
 
-const mockApps = ['com.android.chrome', 'com.tencent.mm', 'com.miHoYo.GenshinImpact', 'com.hypergryph.arknights'];
+const mockApps = ['com.android.chrome', 'com.tencent.mm', 'com.miHoYo.GenshinImpact', 'com.hypergryph.arknights', 'com.hypergryph.endfield'];
 
 // 内部特调白名单 mock：开发模式下预览“特调”标签与专属选项用
 const mockSpecialTuned: Record<string, { modes: string[]; fallback: string }> = {
   'com.hypergryph.arknights': { modes: ['akmode'], fallback: 'akmode' }
 };
+
+// FAS 白名单 mock：开发模式下预览“FAS”标签与模式切换禁用用
+const mockFasWhitelist: Record<string, string> = { 'com.hypergryph.endfield': 'endfield' };
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 let simulatedModeTxt = "balance";
 
@@ -52,6 +55,7 @@ export const MockBridge = {
   async getInstalledApps(): Promise<string[]> { await delay(500); return mockApps; },
   async getAppRules(): Promise<Record<string, string>> { await delay(300); return mockRules.app_modes; },
   async getSpecialTuned(): Promise<Record<string, { modes: string[]; fallback: string }>> { await delay(200); return { ...mockSpecialTuned }; },
+  async getFasWhitelist(): Promise<Record<string, string>> { await delay(200); return { ...mockFasWhitelist }; },
   async saveAppRule(pkg: string, mode: string): Promise<void> { 
     await delay(200); 
     

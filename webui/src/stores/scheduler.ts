@@ -10,6 +10,8 @@ export const useSchedulerStore = defineStore('scheduler', {
     isChiri: false,
     // 内部特调白名单（守护进程导出，只读展示“特调”标签与专属模式选项）
     specialTuned: {} as Record<string, { modes: string[]; fallback: string }>,
+    // FAS 白名单（守护进程导出，只读展示“FAS”标签并禁用该应用的模式切换）
+    fasWhitelist: {} as Record<string, string>,
     isDaemonRunning: false, // 必须有这个初始状态
     loading: false
   }),
@@ -18,17 +20,19 @@ export const useSchedulerStore = defineStore('scheduler', {
       this.loading = true;
       try {
         // 必须在这里同时调用四个接口
-        const [mode, rules, running, specialTuned, chiri] = await Promise.all([
+        const [mode, rules, running, specialTuned, fasWhitelist, chiri] = await Promise.all([
           Bridge.getCurrentMode(),
           Bridge.getAppRules(),
           Bridge.isDaemonRunning(),
           Bridge.getSpecialTuned(),
+          Bridge.getFasWhitelist(),
           Bridge.isChiri()
         ]);
         this.currentMode = mode;
         this.appRules = rules;
         this.isDaemonRunning = running; // 必须有这一行赋值
         this.specialTuned = specialTuned;
+        this.fasWhitelist = fasWhitelist;
         this.isChiri = chiri;
       } finally {
         this.loading = false;

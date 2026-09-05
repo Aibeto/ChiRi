@@ -17,6 +17,7 @@ const PATHS = {
   CONFIG_YAML: `${MODULE_BASE_PATH}/config/config.yaml`, 
   ACTIVE_CONFIG: `${MODULE_BASE_PATH}/active_config.txt`,
   SPECIAL_TUNED: `${MODULE_BASE_PATH}/special_tuned.txt`,
+  FAS_WHITELIST: `${MODULE_BASE_PATH}/fas_whitelist.txt`,
   CURRENT_MODE: `${MODULE_BASE_PATH}/current_mode.txt`,
   DAEMON_LOG: `${MODULE_BASE_PATH}/logs/daemon.log`,
   WATCHDOG_PID: `${MODULE_BASE_PATH}/logs/watchdog.pid`
@@ -233,6 +234,27 @@ const RealBridge = {
         const pkgName = (pkg || '').trim();
         if (pkgName && modes.length) {
           map[pkgName] = { modes, fallback: (fallback || '').trim() || modes[0] };
+        }
+      });
+      return map;
+    } catch (e) {
+      return {};
+    }
+  },
+
+  // 读取 FAS 白名单（每行 `包名:配置名`）。该文件由守护进程维护，WebUI 只读用于展示
+  // "FAS" 标签并禁用该应用的模式切换，不提供修改入口；
+  // 文件缺失（守护进程未启动等）时返回空表，标签静默降级。
+  async getFasWhitelist(): Promise<Record<string, string>> {
+    try {
+      const raw = await this.readFile(PATHS.FAS_WHITELIST);
+      const map: Record<string, string> = {};
+      raw.split('\n').forEach(line => {
+        const [pkg, config] = line.split(':');
+        const pkgName = (pkg || '').trim();
+        const cfg = (config || '').trim();
+        if (pkgName && cfg) {
+          map[pkgName] = cfg;
         }
       });
       return map;

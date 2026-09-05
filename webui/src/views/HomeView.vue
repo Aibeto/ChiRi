@@ -29,6 +29,10 @@ const modes = computed(() => [
 const currentModeInfo = computed(() => {
   const std = modes.value.find(m => m.key === store.currentMode);
   if (std) return std;
+  // FAS 帧率自适应调度接管期间显示专属卡片
+  if (store.currentMode === 'fas') {
+    return { key: store.currentMode, name: t('mode_fas'), desc: t('desc_fas'), icon: 'speed', color: '#E91E63' };
+  }
   const isSpecial = Object.values(store.specialTuned).some(e => e.modes.includes(store.currentMode));
   if (isSpecial) {
     return {

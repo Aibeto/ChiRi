@@ -193,13 +193,12 @@ fn eval_thermal_cap(
 
 pub mod config;
 pub mod scheduler;
-// FAS（帧感知调度）暂时禁用：功能存在 bug，需关闭调试。
-// 恢复时：取消下行注释，并恢复下方所有 `FAS`/`fas_controller` 相关调用。
-// pub mod fas;
+// FAS（帧感知调度）：引擎位于 crate::scheduler::fas（算法层），ChiRi 侧由 fas_manager 提供多实例生命周期管理。
 pub mod affinity;
 pub mod akmode;
 pub mod core_ctl;
 pub mod cpu_load_governor;
+pub mod fas_manager;
 pub mod touch_detect;
 pub mod fast;
 
@@ -313,6 +312,18 @@ fn apply_affinity_and_corectl(
     affinity.apply(screen_on, fg_pid, &config.affinity, boost, core_utils);
     let offline_on = scenemode_offline && config.core_ctl.scenemode_offline;
     corectl.set_power_state(config.core_ctl.enabled && boost, offline_on);
+}
+
+/// FAS 线程亲和预留接入点（当前无操作）。
+/// 预留：FAS 模式下前台关键线程钉核/大核亲和扩展时在此实现；
+/// 激活(true)/去激活(false)时由事件循环调用，后续扩展无需再改接线。
+fn fas_affinity_hook(
+    affinity_mgr: &mut affinity::AffinityManager,
+    corectl_mgr: &mut core_ctl::CoreCtlManager,
+    active: bool,
+    fg_pid: i32,
+) {
+    let _ = (affinity_mgr, corectl_mgr, active, fg_pid);
 }
 
 /// 启动 Chiri 调度线程组（由 main.rs 调用）：
@@ -462,7 +473,7 @@ pub fn start_scheduler_thread(
                 let _ = utils::try_write_file(&mode_file_path, mode.as_bytes());
             }
 
-            // let mut fas_controller = crate::scheduler::fas::FasController::new(); // FAS 暂禁用
+            // let mut fas_controller = crate::scheduler::fas::FasController::new(); // 已由 fas_manager 取代
             let mut cpu_governor = crate::chiri::cpu_load_governor::CpuLoadGovernor::new();
             // 明日方舟特调（akmode）：独立于 CLG 的 4 档齿轮调度器，前台为白名单应用时接管。
             // 传入特调激活共享标志，接管/释放时联动 Monitor 层切换采样间隔
@@ -472,6 +483,11 @@ pub fn start_scheduler_thread(
             // 极速模式（fast）专属锁频器：与 CLG 完全独立，不读 yaml 调频参数，
             // 直接锁所有 cluster 的 min=max=硬件最高频，每 5 秒重写防止外部篡改。
             let mut fast_lock = crate::chiri::fast::FastLock::new();
+
+            // FAS 实例管理器：温度源独立探测（与下方 thermal 的 temp_sensor_path 分开，语义不同；
+            // 无传感器传 None，FAS 内部限温默认关闭不影响其他功能）
+            let fas_temp_path = crate::utils::find_cpu_temp_path().ok().map(std::path::PathBuf::from);
+            let mut fas_mgr = fas_manager::FasManager::new(fas_temp_path);
 
             // CPU 亲和与线程迁移控制器 + core_ctl 核心在线接管（ChiRi 专属）
             let mut affinity_mgr = affinity::AffinityManager::new(sys_path_exist.clone());
@@ -483,15 +499,6 @@ pub fn start_scheduler_thread(
             let mut last_telemetry_log = Instant::now();
             let mut telemetry_log_counter: u32 = 0;
 
-            // ==== FAS 暂禁用：以下变量仅服务于 FAS 调度，暂注释 ====
-            // let rules_path = crate::monitor::config::get_rules_path();
-            // let mut current_rules = crate::utils::read_config::<crate::monitor::config::RulesConfig, _>(&rules_path).unwrap_or_default();
-
-            // 状态机变量
-            // let mut fas_suspended_at: Option<Instant> = None;    // FAS 暂禁用
-            // let mut fas_suspended_package = String::new();       // FAS 暂禁用
-            // const FAS_SUSPEND_GRACE_SECS: u64 = 5;               // FAS 暂禁用
-            
             let mut is_screen_on = true; // 屏幕状态标记
             // 息屏计时：屏幕熄灭时记录，超过 scene_mode_delay_secs 后切到 scenemode 低功耗
             let mut screen_off_at: Option<Instant> = None;
@@ -500,6 +507,10 @@ pub fn start_scheduler_thread(
             // 特调模式冷却：init_policies 因配置缺失/硬件不支持失败后，5 分钟内不再触发
             const AKMODE_COOLDOWN: Duration = Duration::from_secs(300);
             let mut akmode_cooldown_until: Option<Instant> = None;
+
+            // FAS 初始化失败冷却：load_policies 无可用 policy 后 5 分钟内不再触发，CLG balance 接管
+            const FAS_COOLDOWN: Duration = Duration::from_secs(300);
+            let mut fas_cooldown_until: Option<Instant> = None;
 
             // scenemode 饱和退出冷却：little 簇 util 持续顶满上限退回 powersave 后，
             // 300s 内不得重新进入 scenemode（防止与后台负载反复拉锯）
@@ -524,10 +535,6 @@ pub fn start_scheduler_thread(
             let mut thermal_free_current: f32 = config_clone.read().unwrap().thermal.free_above;
             // 启动即把配置豁免档同步给 governor（内部默认 0.80，配置可能不同）
             cpu_governor.set_thermal_limits(thermal_cap_current, thermal_free_current);
-
-            // ==== FAS 暂禁用：CPU 温度采样仅用于 FAS 限温，暂注释 ====
-            // let temp_sensor_path = crate::utils::find_cpu_temp_path().unwrap_or_default();
-            // let mut last_temp_update = Instant::now();
 
             let get_clg_cfg = |config: &Config, mode: &str| -> crate::chiri::config::CpuLoadGovernorConfig {
                 config.get_mode(mode).map(|m| m.cpu_load_governor.clone()).unwrap_or_else(|| {
@@ -637,7 +644,8 @@ pub fn start_scheduler_thread(
                     } else if current_mode == "fast" {
                         // fast_lock 不读 yaml 调参，仅需确保 CLG 未意外持有
                         if cpu_governor.is_active() { cpu_governor.release(); }
-                    } else {
+                    } else if current_mode != "fas" {
+                        // fas 模式下 CLG fallback 不参与热重载（FAS 配置编译期嵌入静态）
                         let clg_cfg = get_clg_cfg(&config_lock, &current_mode);
                         if clg_cfg.enabled {
                             if cpu_governor.is_active() { cpu_governor.reload_config(&clg_cfg); }
@@ -775,6 +783,77 @@ pub fn start_scheduler_thread(
                             )
                         );
                     }
+
+                    // FAS 实例注销巡检（60s TTL）：注销超时实例并回收频率
+                    fas_mgr.reap();
+
+                    // PackageSwitch 兜底（事件丢失/启动即 fas 自愈）：1s 巡检一次，
+                    // 包名实际变化才触发热切换，天然幂等。热切换逻辑与 PackageSwitch
+                    // arm 同款内联（借用检查下两处各自持有 governor 可变引用，无法
+                    // 提取公共闭包——与文件内既有风格一致）。
+                    if mode_clone.lock().unwrap().clone() == "fas" {
+                        let cur_pkg = crate::monitor::app_detect::get_current_package();
+                        if !cur_pkg.is_empty() {
+                            if fas_mgr.is_active() {
+                                if let Some(active) = fas_mgr.active_pkg() {
+                                    if active != cur_pkg.as_str() {
+                                        if crate::common::fas_whitelist_entry(&cur_pkg)
+                                            .and_then(|cfg| crate::common::fas_app_config(cfg))
+                                            .is_some()
+                                        {
+                                            let was_doze = fas_mgr.doze();
+                                            fas_mgr.deactivate_active();
+                                            if !fas_mgr.activate(&cur_pkg, crate::monitor::app_detect::get_current_pid()) {
+                                                fas_mgr.deactivate_all();
+                                                fas_cooldown_until = Some(Instant::now() + FAS_COOLDOWN);
+                                                log::warn!("{}", t_with_args("scheduler-fas-init-failed", &fluent_args!("pkg" => cur_pkg.as_str())));
+                                                // CLG balance 回退
+                                                let config_lock = config_clone.read().unwrap();
+                                                let clg_cfg = get_clg_cfg(&config_lock, "balance");
+                                                if clg_cfg.enabled { cpu_governor.init_policies(&clg_cfg); }
+                                            } else {
+                                                if was_doze {
+                                                    fas_mgr.enter_doze();
+                                                }
+                                                fas_affinity_hook(&mut affinity_mgr, &mut corectl_mgr, true,
+                                                    crate::monitor::app_detect::get_current_pid());
+                                            }
+                                        }
+                                        // 非白名单包（不应出现，determine 门控保证）：忽略，
+                                        // ModeChange 会在模式变化时退出 fas
+                                    }
+                                }
+                            } else if fas_cooldown_until.map_or(true, |until| Instant::now() >= until) {
+                                if crate::common::fas_whitelist_entry(&cur_pkg)
+                                    .and_then(|cfg| crate::common::fas_app_config(cfg))
+                                    .is_some()
+                                {
+                                    ak_governor.release();
+                                    fast_lock.release();
+                                    cpu_governor.release();
+                                    if !fas_mgr.activate(&cur_pkg, crate::monitor::app_detect::get_current_pid()) {
+                                        fas_mgr.deactivate_all();
+                                        fas_cooldown_until = Some(Instant::now() + FAS_COOLDOWN);
+                                        log::warn!("{}", t_with_args("scheduler-fas-init-failed", &fluent_args!("pkg" => cur_pkg.as_str())));
+                                        // CLG balance 回退
+                                        let config_lock = config_clone.read().unwrap();
+                                        let clg_cfg = get_clg_cfg(&config_lock, "balance");
+                                        if clg_cfg.enabled { cpu_governor.init_policies(&clg_cfg); }
+                                    } else if !is_screen_on {
+                                        fas_mgr.enter_doze();
+                                    } else {
+                                        fas_affinity_hook(&mut affinity_mgr, &mut corectl_mgr, true,
+                                            crate::monitor::app_detect::get_current_pid());
+                                    }
+                                } else if !cpu_governor.is_active() && !ak_governor.is_active() && !fast_lock.is_active() {
+                                    // 启动残留 fas 模式且前台非 FAS 应用：CLG balance 自愈接管
+                                    let config_lock = config_clone.read().unwrap();
+                                    let clg_cfg = get_clg_cfg(&config_lock, "balance");
+                                    if clg_cfg.enabled { cpu_governor.init_policies(&clg_cfg); }
+                                }
+                            }
+                        }
+                    }
                 }
 
                 // 热保护（2s 周期）：电池+CPU 双源取较小值。电池温升慢、反映整机发热；
@@ -782,89 +861,94 @@ pub fn start_scheduler_thread(
                 // 豁免档：当前性能比已高于豁免档时不压制，高负载不挡路。
                 if last_thermal_check.elapsed() >= THERMAL_CHECK_INTERVAL {
                     last_thermal_check = Instant::now();
-                    let (enabled, batt_soft, batt_hard, cpu_soft, cpu_hard, soft_cap, hard_cap, hyst, free_above) = {
-                        let t = &config_clone.read().unwrap().thermal;
-                        (
-                            t.enabled,
-                            t.batt_soft_temp_c,
-                            t.batt_hard_temp_c,
-                            t.cpu_soft_temp_c,
-                            t.cpu_hard_temp_c,
-                            t.soft_perf_cap,
-                            t.hard_perf_cap,
-                            t.hysteresis_c,
-                            t.free_above,
-                        )
-                    };
-                    let cur = thermal_cap_current;
-                    // 复用 snap 块（1s）缓存的温度，不再重复读文件（≤1s 旧值，
-                    // 对带回滞的秒级热判定无影响）
-                    let batt_t = last_batt_temp;
-                    let cpu_t = last_cpu_temp;
-                    let new_cap = if !enabled {
-                        1.0
-                    } else {
-                        match (batt_t, cpu_t) {
-                            (Some(b), Some(c)) => eval_thermal_cap(
-                                b, cur, batt_soft, batt_hard, soft_cap, hard_cap, hyst,
+                    // FAS 接管时整体跳过 ChiRi 热保护：温控移除，一切交由 FAS 引擎
+                    // （FasManager 内部独立刷新温度喂给引擎）。cap 冻结在当前值；
+                    // 2s 亲和块共用本计时器不受影响，1s 遥测块温度读数照常刷新。
+                    if mode_clone.lock().unwrap().clone() != "fas" {
+                        let (enabled, batt_soft, batt_hard, cpu_soft, cpu_hard, soft_cap, hard_cap, hyst, free_above) = {
+                            let t = &config_clone.read().unwrap().thermal;
+                            (
+                                t.enabled,
+                                t.batt_soft_temp_c,
+                                t.batt_hard_temp_c,
+                                t.cpu_soft_temp_c,
+                                t.cpu_hard_temp_c,
+                                t.soft_perf_cap,
+                                t.hard_perf_cap,
+                                t.hysteresis_c,
+                                t.free_above,
                             )
-                            .min(eval_thermal_cap(
-                                c, cur, cpu_soft, cpu_hard, soft_cap, hard_cap, hyst,
-                            )),
-                            (Some(b), None) => {
-                                eval_thermal_cap(b, cur, batt_soft, batt_hard, soft_cap, hard_cap, hyst)
-                            }
-                            (None, Some(c)) => {
-                                eval_thermal_cap(c, cur, cpu_soft, cpu_hard, soft_cap, hard_cap, hyst)
-                            }
-                            // 双传感器缺失/读失败：保持现状，下轮重试
-                            (None, None) => cur,
-                        }
-                    };
-                    // 解除方向限速：压制加深立即生效，解除每周期最多 +0.15 逐级恢复。
-                    // 立即全量解除会让温度马上反弹再触发深压——cap 以 ~8s 周期在
-                    // 40/70/100 间跳变（bang-bang 振荡），每次跳变都把 current_perf
-                    // 砸回低位再缓慢爬升，是高负载游戏周期性卡顿的直接来源
-                    let new_cap = if new_cap > thermal_cap_current {
-                        (thermal_cap_current + THERMAL_UNPRESS_STEP).min(new_cap)
-                    } else {
-                        new_cap
-                    };
-                    let cap_changed = (new_cap - thermal_cap_current).abs() > f32::EPSILON;
-                    let free_changed = (free_above - thermal_free_current).abs() > f32::EPSILON;
-                    if cap_changed || free_changed {
-                        thermal_cap_current = new_cap;
-                        thermal_free_current = free_above;
-                        cpu_governor.set_thermal_limits(new_cap, free_above);
-                        let fmt = |v: Option<f32>| {
-                            v.map(|t| format!("{:.1}", t))
-                                .unwrap_or_else(|| "-".to_string())
                         };
-                        log::debug!(
-                            "{}",
-                            t_with_args(
-                                "clg-thermal-cap",
-                                &fluent_args!(
-                                    "batt" => fmt(batt_t),
-                                    "cpu" => fmt(cpu_t),
-                                    "cap" => format!("{:.0}", new_cap * 100.0),
-                                    "free" => format!("{:.0}", free_above * 100.0)
+                        let cur = thermal_cap_current;
+                        // 复用 snap 块（1s）缓存的温度，不再重复读文件（≤1s 旧值，
+                        // 对带回滞的秒级热判定无影响）
+                        let batt_t = last_batt_temp;
+                        let cpu_t = last_cpu_temp;
+                        let new_cap = if !enabled {
+                            1.0
+                        } else {
+                            match (batt_t, cpu_t) {
+                                (Some(b), Some(c)) => eval_thermal_cap(
+                                    b, cur, batt_soft, batt_hard, soft_cap, hard_cap, hyst,
                                 )
-                            )
-                        );
-                        crate::logger::devimp_event(
-                            "thermal_change",
-                            "-",
-                            &format!(
-                                "batt={} cpu={} cap={:.0} free={:.0}",
-                                fmt(batt_t),
-                                fmt(cpu_t),
-                                new_cap * 100.0,
-                                free_above * 100.0
-                            ),
-                        );
+                                .min(eval_thermal_cap(
+                                    c, cur, cpu_soft, cpu_hard, soft_cap, hard_cap, hyst,
+                                )),
+                                (Some(b), None) => {
+                                    eval_thermal_cap(b, cur, batt_soft, batt_hard, soft_cap, hard_cap, hyst)
+                                }
+                                (None, Some(c)) => {
+                                    eval_thermal_cap(c, cur, cpu_soft, cpu_hard, soft_cap, hard_cap, hyst)
+                                }
+                                // 双传感器缺失/读失败：保持现状，下轮重试
+                                (None, None) => cur,
+                            }
+                        };
+                        // 解除方向限速：压制加深立即生效，解除每周期最多 +0.15 逐级恢复。
+                        // 立即全量解除会让温度马上反弹再触发深压——cap 以 ~8s 周期在
+                        // 40/70/100 间跳变（bang-bang 振荡），每次跳变都把 current_perf
+                        // 砸回低位再缓慢爬升，是高负载游戏周期性卡顿的直接来源
+                        let new_cap = if new_cap > thermal_cap_current {
+                            (thermal_cap_current + THERMAL_UNPRESS_STEP).min(new_cap)
+                        } else {
+                            new_cap
+                        };
+                        let cap_changed = (new_cap - thermal_cap_current).abs() > f32::EPSILON;
+                        let free_changed = (free_above - thermal_free_current).abs() > f32::EPSILON;
+                        if cap_changed || free_changed {
+                            thermal_cap_current = new_cap;
+                            thermal_free_current = free_above;
+                            cpu_governor.set_thermal_limits(new_cap, free_above);
+                            let fmt = |v: Option<f32>| {
+                                v.map(|t| format!("{:.1}", t))
+                                    .unwrap_or_else(|| "-".to_string())
+                            };
+                            log::debug!(
+                                "{}",
+                                t_with_args(
+                                    "clg-thermal-cap",
+                                    &fluent_args!(
+                                        "batt" => fmt(batt_t),
+                                        "cpu" => fmt(cpu_t),
+                                        "cap" => format!("{:.0}", new_cap * 100.0),
+                                        "free" => format!("{:.0}", free_above * 100.0)
+                                    )
+                                )
+                            );
+                            crate::logger::devimp_event(
+                                "thermal_change",
+                                "-",
+                                &format!(
+                                    "batt={} cpu={} cap={:.0} free={:.0}",
+                                    fmt(batt_t),
+                                    fmt(cpu_t),
+                                    new_cap * 100.0,
+                                    free_above * 100.0
+                                ),
+                            );
+                        }
+                        // 功耗监控已并入 status.csv snapshot 行（1s），此处不再重复写
                     }
-                    // 功耗监控已并入 status.csv snapshot 行（1s），此处不再重复写
                 }
 
                 // 触摸事件（事件驱动）：每次醒来先处理触摸队列。on_touch 更新共享
@@ -967,21 +1051,15 @@ pub fn start_scheduler_thread(
                             screen_off_at = Some(Instant::now());
                             scene_mode_active = false;
 
-                            // ==== FAS 暂禁用：息屏不再剥夺 FAS 频率控制权 ====
-                            // if current_mode == "fas" {
-                            //     fas_controller.reset_all_freqs();
-                            //     fas_controller.clear_game();
-                            //     fas_controller.policies.clear();
-                            //     fas_suspended_at = None;
-                            //     fas_suspended_package.clear();
-                            // }
-
                             // 特调模式下息屏保持 akmode 接管，不切换到 CLG doze：
                             // akmode 已统一为 schedutil，息屏后 schedutil 随负载自然降频省电，
                             // 无需 CLG 介入；避免 release + 亮屏 re-init 的 governor 反复切换。
                             if crate::common::is_special_mode(&current_mode) {
                                 // akmode 继续运行，CLG 保持释放状态
                                 log::info!("{}", t("scheduler-doze-special-keep"));
+                            } else if current_mode == "fas" && fas_mgr.is_active() {
+                                // FAS 息屏保持接管（C4）：写低频锁，不释放 FAS；亮屏 exit_doze 恢复
+                                fas_mgr.enter_doze();
                             } else {
                                 // 非特调模式：交回 CLG 处理深度睡眠
                                 ak_governor.release();
@@ -1053,20 +1131,30 @@ pub fn start_scheduler_thread(
                                 ak_governor.release();
                                 cpu_governor.release();
                                 fast_lock.init();
-                            } else if current_mode != "fas" {
+                            } else if current_mode == "fas" {
+                                if fas_mgr.is_active() {
+                                    fas_mgr.exit_doze();
+                                } else {
+                                    // FAS 未激活（冷却/失败回退路径）：CLG 从 doze 恢复到 balance
+                                    let clg_cfg = get_clg_cfg(&config_lock, "balance");
+                                    if clg_cfg.enabled {
+                                        if cpu_governor.is_active() {
+                                            cpu_governor.reload_config(&clg_cfg);
+                                        } else {
+                                            cpu_governor.init_policies(&clg_cfg);
+                                        }
+                                    }
+                                }
+                            } else {
                                 ak_governor.release();
                                 fast_lock.release();
                                 let clg_cfg = get_clg_cfg(&config_lock, &current_mode);
                                 if clg_cfg.enabled {
                                     // 息屏 doze 期间 CLG 仍持有 writer，热切换配置即可
-                                    if cpu_governor.is_active() { cpu_governor.reload_config(&clg_cfg); } 
+                                    if cpu_governor.is_active() { cpu_governor.reload_config(&clg_cfg); }
                                     else { cpu_governor.init_policies(&clg_cfg); }
-                                } 
+                                }
                                 else { cpu_governor.release(); }
-                            } else {
-                                // ==== FAS 暂禁用：原恢复 fas 时释放 CLG 并清空模式，现保持 CLG 接管 ====
-                                // cpu_governor.release();
-                                // *mode_clone.lock().unwrap() = String::new();
                             }
                             // 亲和/core_ctl 跟随亮屏恢复：亮屏强制重迁移前台线程
                             {
@@ -1139,42 +1227,61 @@ pub fn start_scheduler_thread(
                                 )));
                             }
 
-                            // ==== FAS 暂禁用：进游戏不再释放 CLG 控制权、不再激活 FAS ====
                             if mode == "fas" {
-                                // cpu_governor.release();
-                                // let can_resume = fas_suspended_at.map_or(false, |at| {
-                                //     at.elapsed().as_secs() < FAS_SUSPEND_GRACE_SECS && fas_suspended_package == package_name && !fas_controller.policies.is_empty()
-                                // });
-                                // if can_resume {
-                                //     fas_suspended_at = None;
-                                //     fas_suspended_package.clear();
-                                //     for policy in &mut fas_controller.policies { policy.force_reapply(); }
-                                // } else {
-                                //     fas_suspended_at = None;
-                                //     fas_suspended_package.clear();
-                                //     fas_controller.load_policies(&current_rules.fas_rules);
-                                // }
-                                // fas_controller.set_game(pid, &package_name);
-                                // fas_controller.set_temperature(temperature);
-                                // fas_controller.set_temp_threshold(current_rules.fas_rules.core_temp_threshold);
+                                // 防御复查：determine_mode 已门控白名单，此处兜底（不应发生）
+                                let fas_ready = crate::common::fas_whitelist_entry(&package_name)
+                                    .and_then(|cfg| crate::common::fas_app_config(cfg))
+                                    .is_some();
+                                let in_cooldown = fas_cooldown_until.map_or(false, |until| Instant::now() < until);
+                                // 防御性去激活（不应有活跃实例，无活跃时为无操作）
+                                fas_mgr.deactivate_active();
+                                if !fas_ready {
+                                    log::warn!(
+                                        "{}",
+                                        t_with_args("scheduler-fas-init-failed", &fluent_args!("pkg" => package_name.as_str()))
+                                    );
+                                    // 可能从特调/极速模式切入：先释放独立 governor 再交给 CLG，避免双 governor 并存
+                                    ak_governor.release();
+                                    fast_lock.release();
+                                    cpu_governor.release();
+                                    let config_lock = config_clone.read().unwrap();
+                                    let clg_cfg = get_clg_cfg(&config_lock, "balance");
+                                    if clg_cfg.enabled { cpu_governor.init_policies(&clg_cfg); }
+                                } else if in_cooldown {
+                                    log::warn!(
+                                        "{}",
+                                        t_with_args("scheduler-fas-cooldown", &fluent_args!("secs" => FAS_COOLDOWN.as_secs().to_string()))
+                                    );
+                                    ak_governor.release();
+                                    fast_lock.release();
+                                    cpu_governor.release();
+                                    let config_lock = config_clone.read().unwrap();
+                                    let clg_cfg = get_clg_cfg(&config_lock, "balance");
+                                    if clg_cfg.enabled { cpu_governor.init_policies(&clg_cfg); }
+                                } else {
+                                    // 三 governor 全停（互斥），再激活 FAS
+                                    ak_governor.release();
+                                    fast_lock.release();
+                                    cpu_governor.release();
+                                    if !fas_mgr.activate(&package_name, pid) {
+                                        fas_mgr.deactivate_all();
+                                        fas_cooldown_until = Some(Instant::now() + FAS_COOLDOWN);
+                                        log::warn!("{}", t_with_args("scheduler-fas-init-failed", &fluent_args!("pkg" => package_name.as_str())));
+                                        let config_lock = config_clone.read().unwrap();
+                                        let clg_cfg = get_clg_cfg(&config_lock, "balance");
+                                        if clg_cfg.enabled { cpu_governor.init_policies(&clg_cfg); }
+                                    } else {
+                                        fas_affinity_hook(&mut affinity_mgr, &mut corectl_mgr, true, pid);
+                                        // 息屏期间进入 fas 的竞态保险：立即写入 doze 低频锁
+                                        if !is_screen_on {
+                                            fas_mgr.enter_doze();
+                                        }
+                                    }
+                                }
                             } else {
-                                // ==== FAS 暂禁用：退游戏不再挂起/清理 FAS，直接交由 CLG 接管 ====
-                                // if fas_suspended_at.is_some() {
-                                //     fas_controller.reset_all_freqs();
-                                //     fas_controller.clear_game();
-                                //     fas_controller.policies.clear();
-                                //     fas_suspended_at = None;
-                                //     fas_suspended_package.clear();
-                                // }
-                                // if old_mode == "fas" && !fas_controller.policies.is_empty() {
-                                //     fas_suspended_at = Some(Instant::now());
-                                //     fas_suspended_package = package_name.clone();
-                                // } else if old_mode == "fas" {
-                                //     fas_controller.clear_game();
-                                //     fas_controller.policies.clear();
-                                //     fas_suspended_at = None;
-                                //     fas_suspended_package.clear();
-                                // }
+                                // 退出 FAS：去激活（恢复频率）必须先于任何下一 governor 的 init，保证对方快照真实系统状态
+                                fas_mgr.deactivate_active();
+                                fas_affinity_hook(&mut affinity_mgr, &mut corectl_mgr, false, 0);
 
                                 // 仅在亮屏时处理调度接管。如果息屏，Doze 配置仍在生效，这里不能覆盖它
                                 if is_screen_on {
@@ -1224,14 +1331,49 @@ pub fn start_scheduler_thread(
                                     }
                                 }
                             }
-                        } else if mode == "fas" {
-                            // FAS 暂禁用：原用于刷新 FAS 温度
-                            // fas_controller.set_temperature(temperature);
+                        }
+                    },
+
+                    // --- 2.5 同模式前台包切换（fas→fas 热切换通路，ChiRi 专属）---
+                    DaemonEvent::PackageSwitch { package_name, pid } => {
+                        let current_mode = mode_clone.lock().unwrap().clone();
+                        if current_mode == "fas" && fas_mgr.is_active() {
+                            let switched = match fas_mgr.active_pkg() {
+                                Some(active) if active != package_name.as_str() => {
+                                    if crate::common::fas_whitelist_entry(&package_name)
+                                        .and_then(|cfg| crate::common::fas_app_config(cfg))
+                                        .is_some()
+                                    {
+                                        let was_doze = fas_mgr.doze();
+                                        fas_mgr.deactivate_active();
+                                        if fas_mgr.activate(&package_name, pid) {
+                                            if was_doze {
+                                                fas_mgr.enter_doze();
+                                            }
+                                            fas_affinity_hook(&mut affinity_mgr, &mut corectl_mgr, true, pid);
+                                            true
+                                        } else {
+                                            false
+                                        }
+                                    } else {
+                                        true // 非白名单包（不应出现，determine 门控保证）：视为已处理，忽略
+                                    }
+                                }
+                                _ => true, // 同包去重或无活跃实例（交给 1s 遥测兜底）
+                            };
+                            if !switched {
+                                fas_mgr.deactivate_all();
+                                fas_cooldown_until = Some(Instant::now() + FAS_COOLDOWN);
+                                log::warn!("{}", t_with_args("scheduler-fas-init-failed", &fluent_args!("pkg" => package_name.as_str())));
+                                let config_lock = config_clone.read().unwrap();
+                                let clg_cfg = get_clg_cfg(&config_lock, "balance");
+                                if clg_cfg.enabled { cpu_governor.init_policies(&clg_cfg); }
+                            }
                         }
                     },
 
                     // --- 3. CPU 负载事件 (eBPF 驱动) ---
-                    DaemonEvent::SystemLoadUpdate { core_utils, foreground_max_util: _ } => {
+                    DaemonEvent::SystemLoadUpdate { core_utils, foreground_max_util } => {
                         // 刷新看门狗心跳：只要有负载事件到达即视为负载源存活
                         last_load_event = Instant::now();
                         // 快照逐核 util：按核亲和选核打分与 devimp tick 行的输入
@@ -1244,16 +1386,13 @@ pub fn start_scheduler_thread(
                                 "cores" => core_utils.iter().map(|u| format!("{:.0}", u * 100.0)).collect::<Vec<_>>().join(",")
                             )));
                         }
-                        // let current_mode = mode_clone.lock().unwrap().clone(); // FAS 暂禁用
-                        // ==== FAS 暂禁用：不再向 FAS 投喂 CPU 负载 ====
-                        // if is_screen_on && current_mode == "fas" && fas_suspended_at.is_none() {
-                        //     fas_controller.update_cpu_util(foreground_max_util);
-                        //     fas_controller.update_core_utils(&core_utils);
-                        // }
-                        // 特调（akmode）优先：白名单应用前台时投喂 akmode 做动态限频
+                        // 负载投喂优先级链：FAS 活跃时优先投喂（前台最重线程 util + 逐核 util）；
+                        // 否则特调（akmode）白名单应用前台时投喂 akmode 做动态限频
                         // （档位固定不切换，max 随负载在 [最低档, 生效档] 间变化）；
                         // 否则若 CLG 处于活动状态（日常模式或息屏 Doze），投喂 CLG。
-                        if ak_governor.is_active() {
+                        if fas_mgr.is_active() {
+                            fas_mgr.on_load_update(foreground_max_util, &core_utils);
+                        } else if ak_governor.is_active() {
                             ak_governor.on_load_update(&core_utils);
                         } else if cpu_governor.is_active() {
                             // Worker 架构：on_load_update 广播给各核心组 Worker，
@@ -1273,7 +1412,8 @@ pub fn start_scheduler_thread(
                                 .map_or(false, |off| off.elapsed().as_secs() >= 60);
                             if delay_hit {
                                 let current_mode = mode_clone.lock().unwrap().clone();
-                                if !crate::common::is_special_mode(&current_mode) {
+                                // fas 不参与 scenemode（FAS 自管息屏低频锁）；饱和退出逻辑无需改
+                                if !crate::common::is_special_mode(&current_mode) && current_mode != "fas" {
                                     let config_read = config_clone.read().unwrap();
                                     let delay = config_read.scene_mode_delay_secs.max(60);
                                     let scene_cfg =
@@ -1380,42 +1520,25 @@ pub fn start_scheduler_thread(
 
                     // --- 4. 帧率事件 (eBPF 驱动) ---
                     DaemonEvent::FrameUpdate { frame_delta_ns } => {
-                        // ==== FAS 暂禁用：帧率事件不再参与调频 ====
-                        // if !is_screen_on { continue; } // 息屏不处理渲染帧
-                        // let current_mode = mode_clone.lock().unwrap().clone();
-                        // if current_mode == "fas" {
-                        //     if !temp_sensor_path.is_empty() && last_temp_update.elapsed().as_secs() >= 3 {
-                        //         if let Ok(raw_temp) = crate::utils::read_f64_from_file(&temp_sensor_path) { 
-                        //             fas_controller.set_temperature(raw_temp / 1000.0); 
-                        //         }
-                        //         last_temp_update = Instant::now();
-                        //     }
-                        //     fas_controller.update_frame(frame_delta_ns);
-                        // }
-                        // 帧事件在 FAS 禁用期间不参与调频，仅在 DEBUG 时周期性输出
-                        log::debug!("{}", t_with_args("scheduler-event-frame", &fluent_args!(
-                            "delta_ms" => format!("{:.2}", frame_delta_ns as f64 / 1_000_000.0)
-                        )));
+                        // 帧事件喂给 FAS 活跃实例（内部含 doze 漏帧自愈与 3s 温度刷新）
+                        if is_screen_on && fas_mgr.is_active() {
+                            fas_mgr.on_frame(frame_delta_ns);
+                        }
+                        if log::log_enabled!(log::Level::Debug) {
+                            log::debug!("{}", t_with_args("scheduler-event-frame", &fluent_args!(
+                                "delta_ms" => format!("{:.2}", frame_delta_ns as f64 / 1_000_000.0)
+                            )));
+                        }
                     }
 
                     // --- 5. 热重载配置事件 ---
-                    DaemonEvent::ConfigReload(new_rules) => {
-                        let _ = new_rules; // FAS 暂禁用：原用于重载 current_rules.fas_rules
-                        // current_rules = new_rules;
+                    DaemonEvent::ConfigReload(_new_rules) => {
                         let current_mode = mode_clone.lock().unwrap().clone();
                         log::debug!("{}", t_with_args("scheduler-event-config-reload", &fluent_args!(
                             "mode" => current_mode.clone(),
                             "screen_on" => is_screen_on.to_string()
                         )));
-                        
-                        // ==== FAS 暂禁用：FAS 模式下不再重载 fas_rules ====
-                        // if current_mode == "fas" {
-                        //     if fas_controller.policies.is_empty() {
-                        //         fas_controller.load_policies(&current_rules.fas_rules);
-                        //     } else {
-                        //         fas_controller.reload_rules(&current_rules.fas_rules);
-                        //     }
-                        // } else 
+                        // fas 模式：FAS 配置编译期嵌入静态，rules.yaml 重载不参与
                         if is_screen_on { // 息屏时不要用新配置覆盖 Doze
                             let config_lock = config_clone.read().unwrap();
                             if crate::common::is_special_mode(&current_mode) {
@@ -1446,13 +1569,14 @@ pub fn start_scheduler_thread(
                                 // 极速模式不读 yaml 参数，ConfigReload 无需处理；
                                 // fast_lock 保持活跃，仅确保 CLG 未意外启动
                                 if cpu_governor.is_active() { cpu_governor.release(); }
-                            } else {
+                            } else if current_mode != "fas" {
                                 // 非特调、非极速模式：确保 fast_lock 释放，CLG 接管
+                                // （fas 模式下 CLG fallback 不参与热重载，FAS 配置编译期嵌入静态）
                                 ak_governor.release();
                                 fast_lock.release();
                                 let clg_cfg = get_clg_cfg(&config_lock, &current_mode);
                                 if clg_cfg.enabled {
-                                    if cpu_governor.is_active() { cpu_governor.reload_config(&clg_cfg); } 
+                                    if cpu_governor.is_active() { cpu_governor.reload_config(&clg_cfg); }
                                     else { cpu_governor.init_policies(&clg_cfg); }
                                 } else if cpu_governor.is_active() {
                                     cpu_governor.release();
@@ -1485,17 +1609,6 @@ pub fn start_scheduler_thread(
                         last_bpf_stats = (wakeups, migrations, freq_transitions);
                     }
                 }
-
-                // ==== FAS 暂禁用：定期检查 FAS 挂起状态是否超时 ====
-                // if let Some(suspended_at) = fas_suspended_at {
-                //     if suspended_at.elapsed().as_secs() >= FAS_SUSPEND_GRACE_SECS {
-                //         fas_controller.reset_all_freqs();
-                //         fas_controller.clear_game();
-                //         fas_controller.policies.clear();
-                //         fas_suspended_at = None;
-                //         fas_suspended_package.clear();
-                //     }
-                // }
             }
             }));
             if loop_result.is_err() {
@@ -1506,12 +1619,11 @@ pub fn start_scheduler_thread(
             cpu_governor.release();
             ak_governor.release();
             fast_lock.release();
+            // FAS 全部实例去激活（恢复频率）后清理
+            fas_mgr.deactivate_all();
             // 亲和布局与 core_ctl 同步恢复系统原始状态
             corectl_mgr.release();
             affinity_mgr.release();
-            // ==== FAS 暂禁用 ====
-            // fas_controller.reset_all_freqs();
-            // fas_controller.clear_game();
         })?;
 
     Ok(())

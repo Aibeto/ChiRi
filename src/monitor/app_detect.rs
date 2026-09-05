@@ -198,6 +198,23 @@ fn determine_mode(config: &RulesConfig, current_package: &str) -> String {
     let chiri = crate::common::is_chiri_soc();
     let special_enabled = chiri && crate::common::is_akmode_available();
 
+    // FAS 白名单最高优先（ChiRi 专属）：命中白名单且对应应用配置可用时直接进入 fas 模式，
+    // 不受 rules.yaml app_modes/global_mode 影响。
+    if chiri && crate::common::fas_available() {
+        if let Some(cfg_name) = crate::common::fas_whitelist_entry(current_package) {
+            if crate::common::fas_app_config(cfg_name).is_some() {
+                debug!(
+                    "{}",
+                    t_with_args(
+                        "app-detect-fas-fallback",
+                        &fluent_args!("pkg" => current_package)
+                    )
+                );
+                return "fas".to_string();
+            }
+        }
+    }
+
     // 白名单应用始终进特调（ChiRi 专属），不管 rules.yaml 配了什么。
     // 给该应用配的普通模式只作为特调起始档，scheduler 侧（get_ak_initial_tier）识别。
     if special_enabled {
@@ -221,7 +238,18 @@ fn determine_mode(config: &RulesConfig, current_package: &str) -> String {
     // 门控：特调模式只允许白名单应用；非白名单包名映射到特调模式时回退全局模式并告警
     // （WebUI 侧在扫描完成后会同步清理这类非法条目）。
     if let Some(mode) = config.app_modes.get(current_package) {
-        if crate::common::is_special_mode(mode) {
+        if crate::common::is_special_mode(mode) || crate::common::is_fas_mode(mode) {
+            // FAS 模式仅白名单驱动：app_modes 中手动映射的 "fas" 一律拒绝（防绕过白名单）
+            if crate::common::is_fas_mode(mode) {
+                warn!(
+                    "{}",
+                    t_with_args(
+                        "app-detect-fas-rejected",
+                        &fluent_args!("pkg" => current_package, "mode" => mode.as_str())
+                    )
+                );
+                return config.global_mode.clone();
+            }
             if special_enabled && crate::common::is_special_mode_allowed(current_package, mode) {
                 debug!(
                     "{}",
@@ -267,6 +295,17 @@ fn determine_mode(config: &RulesConfig, current_package: &str) -> String {
         }
     }
     let global = config.global_mode.clone();
+    // 全局模式不允许指定为 FAS（FAS 仅白名单驱动）
+    if crate::common::is_fas_mode(&global) {
+        warn!(
+            "{}",
+            t_with_args(
+                "app-detect-fas-global-rejected",
+                &fluent_args!("pkg" => current_package, "mode" => global.as_str())
+            )
+        );
+        return "balance".to_string();
+    }
     // 全局模式本身不允许直接指定特调：非白名单应用回退 balance（默认模式）
     if crate::common::is_special_mode(&global)
         && !(special_enabled && crate::common::is_special_mode_allowed(current_package, &global))
@@ -482,8 +521,8 @@ pub fn app_detection_loop(
 
                 // force_refresh（配置重载/亮屏恢复）只驱动外层重新计算模式；
                 // 模式未变时不重发 ModeChange，避免 "balance -> balance" 冗余事件。
-                // 注意：同模式应用切换不发事件对 scheduler 无影响——CLG 按模式调频，
-                // FAS 是独立模式（进入必然伴随模式变化），温度刷新走 FrameUpdate。
+                // 同模式应用切换对 CLG 无影响（按模式调频），但 ChiRi 的 FAS 需要
+                // 热切换 uprobe 目标，故下方分支补发 PackageSwitch 事件。
                 if last_mode != new_mode {
                     info!(
                         "{}",
@@ -500,6 +539,17 @@ pub fn app_detection_loop(
                         temperature: current_temp,
                     });
                     last_mode = new_mode;
+                } else if crate::common::is_chiri_soc()
+                    && !last_package.is_empty()
+                    && last_package != final_pkg
+                {
+                    // 同模式前台切换（ChiRi 专属）：补发 PackageSwitch 供 FAS 侧切换
+                    // uprobe 目标。首轮与亮屏后 last_package 为空不触发；Yumi 设备
+                    // 不发，事件流零变化。
+                    let _ = tx.send(DaemonEvent::PackageSwitch {
+                        package_name: final_pkg.clone(),
+                        pid: final_pid,
+                    });
                 }
                 last_package = final_pkg;
             } else {

@@ -1,0 +1,12 @@
+{
+  "rust-analyzer.cargo.target": "aarch64-linux-android",
+  "rust-analyzer.cargo.check.overrideCommand": [
+    "cargo",
+    "check",
+    "-p",
+    "yumi",
+    "--target",
+    "aarch64-linux-android"
+  ],
+  "rust-analyzer.cargo.check.allTargets": false
+}

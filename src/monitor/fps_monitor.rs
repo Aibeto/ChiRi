@@ -15,10 +15,6 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-// FAS 暂禁用期间本模块整体未接线（start_fps_loop 未被调用），代码为恢复 FAS 时保留，
-// 故允许 dead_code，避免编译警告噪音。
-#![allow(dead_code)]
-
 use std::collections::{HashMap, VecDeque};
 use std::mem::size_of;
 use std::num::NonZeroU32;
@@ -38,7 +34,6 @@ use tokio::sync::watch;
 use crate::common::DaemonEvent;
 use crate::fluent_args;
 use crate::i18n::{t, t_with_args};
-use crate::monitor::app_detect;
 
 // ─── 常量 ────────────────────────────────────────────────
 
@@ -238,36 +233,26 @@ impl FpsManager {
 
 // ─── 主入口 ──────────────────────────────────────────────
 
-pub async fn start_fps_loop(tx: SyncSender<DaemonEvent>) -> Result<(), anyhow::Error> {
+pub async fn start_fps_loop(
+    tx: SyncSender<DaemonEvent>,
+    mut rx_pid: watch::Receiver<u32>,
+) -> Result<(), anyhow::Error> {
     info!("{}", t("fps-monitor-init"));
 
-    let initial_pid = app_detect::get_current_pid();
-    let (tx_pid, mut rx_pid) = watch::channel(initial_pid);
+    // 初始 pid：共享 watch 通道的当前值（pid_watcher 创建通道时已写入）
+    let initial_pid = *rx_pid.borrow();
 
-    // PID 检测任务
-    {
-        tokio::spawn(async move {
-            let mut last_pid: i32 = initial_pid;
-            loop {
-                tokio::time::sleep(Duration::from_millis(500)).await;
-                let current_pid = app_detect::get_current_pid();
-                if current_pid != last_pid && current_pid > 0 {
-                    debug!(
-                        "{}",
-                        t_with_args(
-                            "fps-monitor-pid-filter-updated",
-                            &fluent_args!(
-                                "old" => last_pid.to_string(),
-                                "new" => current_pid.to_string()
-                            )
-                        )
-                    );
-                    last_pid = current_pid;
-                    let _ = tx_pid.send(current_pid);
-                }
+    // 订阅 pid_watcher 的共享前台 PID 广播（原 500ms 自轮询已删除）：
+    // FpsManager 由下方 fps_probe 线程独占，这里仅把变化值桥接给该线程做 switch_pid。
+    let (pid_tx, pid_rx) = std::sync::mpsc::channel::<u32>();
+    tokio::spawn(async move {
+        while rx_pid.changed().await.is_ok() {
+            let pid = *rx_pid.borrow();
+            if pid > 0 {
+                let _ = pid_tx.send(pid);
             }
-        });
-    }
+        }
+    });
 
     let tx_clone = tx.clone();
     std::thread::Builder::new()
@@ -287,9 +272,9 @@ pub async fn start_fps_loop(tx: SyncSender<DaemonEvent>) -> Result<(), anyhow::E
                 }
             };
 
-            // 初始 attach
+            // 初始 attach（共享 watch 通道当前值，pid_watcher 创建通道时已写入）
             if initial_pid > 0 {
-                if let Err(e) = manager.switch_pid(initial_pid as u32) {
+                if let Err(e) = manager.switch_pid(initial_pid) {
                     warn!(
                         "{}",
                         t_with_args(
@@ -302,27 +287,48 @@ pub async fn start_fps_loop(tx: SyncSender<DaemonEvent>) -> Result<(), anyhow::E
                 info!("{}", t("fps-monitor-init-no-pid"));
             }
 
-            // mio 轮询（只创建一次）
-            let mut poll = Poll::new().expect("mio Poll::new");
+            // mio 轮询（只创建一次；创建失败则本线程无法工作，告警退出交由看门狗自愈）
+            let mut poll = match Poll::new() {
+                Ok(p) => p,
+                Err(e) => {
+                    warn!(
+                        "{}",
+                        t_with_args(
+                            "fps-monitor-attach-failed-initial",
+                            &fluent_args!("error" => e.to_string())
+                        )
+                    );
+                    return;
+                }
+            };
             let mut events = Events::with_capacity(64);
             let token = Token(0);
             // 帧事件统计（周期性输出 debug 摘要）
             let mut frame_counter: u32 = 0;
 
-            // 注册 RingBuf fd（只注册一次，不会变）
-            if manager.has_active_probe() {
-                let fd = manager.ring_fd;
-                let mut source = SourceFd(&fd);
+            // 注册 RingBuf fd（只注册一次，不会变）。fd 与 attach 无关（探针 attach 前后
+            // fd 不变），必须无条件注册：daemon 启动早于首次前台检测，initial_pid 恒为 0、
+            // attach 稍后才发生——若按 has_active_probe() 门控，此路径下永远不注册，
+            // 帧处理将退化为 100ms 超时轮询、事件驱动唤醒失效。
+            let fd = manager.ring_fd;
+            let mut source = SourceFd(&fd);
+            if let Err(e) =
                 poll.registry()
                     .register(&mut source, token, Interest::READABLE)
-                    .expect("mio register");
+            {
+                // 注册失败仅丢失事件驱动唤醒，poll 超时兜底仍可处理帧
+                warn!(
+                    "{}",
+                    t_with_args(
+                        "fps-monitor-attach-failed-initial",
+                        &fluent_args!("error" => e.to_string())
+                    )
+                );
             }
 
             loop {
-                // ── PID 变化 ──
-                if rx_pid.has_changed().unwrap_or(false) {
-                    let new_pid = *rx_pid.borrow_and_update() as u32;
-
+                // ── PID 变化（tokio 订阅任务桥接的共享前台 PID 广播）──
+                while let Ok(new_pid) = pid_rx.try_recv() {
                     // 无需重新注册 Poll——RingBuf fd 不变
                     if let Err(e) = manager.switch_pid(new_pid) {
                         warn!(

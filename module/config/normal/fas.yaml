@@ -1,0 +1,9 @@
+# ── FAS（帧感知调度）白名单 ──────────────────────────────────
+# 编译期嵌入二进制（src/common.rs include_str!），用户/WebUI 不可修改。
+# 运行时由 main.rs 导出到模块根 fas_whitelist.txt，供 WebUI 只读展示。
+# 每项：<精确包名>: <fas 配置名>（对应 module/config/normal/fas/<配置名>.yaml）
+# 新增 FAS 游戏：本表加一行 + src/common.rs::embedded_fas_app_str 加一个 arm
+#               + 新建 module/config/normal/fas/<配置名>.yaml
+fas:
+  apps:
+    com.hypergryph.endfield: endfield

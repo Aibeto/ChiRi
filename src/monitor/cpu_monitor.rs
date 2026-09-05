@@ -33,10 +33,10 @@ use crate::i18n::{t, t_with_args};
 /// 见 `start_cpu_loop` 的 `sample_ms_normal` 参数。
 /// 特调采样周期（ms）：明日方舟特调激活时缩短到 40ms，保证特调档位判定的响应度
 const SAMPLE_MS_TUNED: u64 = 40;
-/// 前台应用 CPU 利用率计算开关：仅 FAS（帧感知调度）消费 foreground_max_util，
-/// FAS 暂禁用期间两套调度器均忽略该字段，跳过计算省掉每 tick 的 TGID/线程级开销。
-/// 恢复 FAS 时置 true 即可（compute_tgid_util / compute_thread_level_util 仍保留）。
-const FAS_FG_UTIL_ENABLED: bool = false;
+/// 前台应用 CPU 利用率计算开关：仅 FAS（帧感知调度）消费 foreground_max_util。
+/// FAS 禁用（false）期间两套调度器均忽略该字段，跳过计算省掉每 tick 的 TGID/线程级开销；
+/// start_cpu_loop 入口按「ChiRi 且 FAS 配置可用」动态置位，Yumi 设备恒为 false（行为零变化）。
+static FAS_FG_UTIL_ENABLED: AtomicBool = AtomicBool::new(false);
 
 /// 读取 PerCpuArray 计数 map 的全核总和（key 0 的所有 cpu 槽位累加）。
 /// map 缺失（None，eBPF 产物与 daemon 版本偏差时）返回 0，保持计数可选语义。
@@ -50,8 +50,7 @@ fn percpu_total(map: Option<&PerCpuArray<&mut aya::maps::MapData, u64>>) -> u64 
 }
 
 /// 读取前台进程的所有线程 TID（仅供 foreground 利用率降级路径使用）。
-/// FAS 暂禁用：foreground 计算被 FAS_FG_UTIL_ENABLED 跳过，恢复 FAS 时启用。
-#[allow(dead_code)]
+/// 仅在 FAS_FG_UTIL_ENABLED 置位（ChiRi 且 FAS 可用）时经降级路径被调用。
 fn get_thread_tids(pid: u32) -> Vec<u32> {
     let task_dir = format!("/proc/{}/task", pid);
     let mut tids = Vec::new();
@@ -88,6 +87,12 @@ pub async fn start_cpu_loop(
     program.load()?;
     program.attach("sched", "sched_switch")?;
     info!("{}", t("cpu-monitor-started"));
+
+    // FAS 恢复前台利用率计算：仅 ChiRi 且 FAS 配置可用时置位（Yumi 设备保持 false，
+    // 两套调度器对该字段均忽略，行为零变化）
+    if crate::common::is_chiri_soc() && crate::common::fas_available() {
+        FAS_FG_UTIL_ENABLED.store(true, Ordering::Relaxed);
+    }
 
     // ChiRi 专属：附加可选扩展探针（唤醒/线程迁移/频率切换计数，遥测观测用）。
     // 内核缺少对应 tracepoint 时挂载失败，warn 一次后跳过，不影响主探针；
@@ -319,8 +324,8 @@ pub async fn start_cpu_loop(
             // 2. 前台应用利用率计算
             //    主路径: 使用 tgid_run_time map (TGID 级聚合)
             //    只需查询 1 个 key，不受 thread_run_time HASH 驱逐影响
-            // FAS 暂禁用：foreground_max_util 无消费方，跳过计算（见 FAS_FG_UTIL_ENABLED）
-            let foreground_max_util = if FAS_FG_UTIL_ENABLED {
+            // FAS 禁用时 foreground_max_util 无消费方，跳过计算（见 FAS_FG_UTIL_ENABLED）
+            let foreground_max_util = if FAS_FG_UTIL_ENABLED.load(Ordering::Relaxed) {
                 if fg_pid == 0 {
                     0.0_f32
                 } else {
@@ -468,8 +473,7 @@ pub async fn start_cpu_loop(
 /// 关键设计: 基线只保存 raw 值（不含 pending delta），避免 pending 累积漂移
 ///
 /// 返回 Some(util) 表示成功，None 表示需要走降级路径
-/// FAS 暂禁用：foreground 计算被 FAS_FG_UTIL_ENABLED 跳过，恢复 FAS 时启用。
-#[allow(dead_code)]
+/// 仅在 FAS_FG_UTIL_ENABLED 置位（ChiRi 且 FAS 可用）时被 foreground 计算调用。
 fn compute_tgid_util(
     fg_pid: u32,
     tgid_run_map: &BpfHashMap<&mut aya::maps::MapData, u32, u64>,
@@ -544,8 +548,7 @@ fn compute_tgid_util(
 
 /// 降级路径: 逐 TID 遍历计算前台最重线程的利用率 (原始逻辑)
 /// 增加防驱逐保护：如果 map 返回值 < 上次记录值，跳过该 TID
-/// FAS 暂禁用：foreground 计算被 FAS_FG_UTIL_ENABLED 跳过，恢复 FAS 时启用。
-#[allow(dead_code)]
+/// 仅在 FAS_FG_UTIL_ENABLED 置位（ChiRi 且 FAS 可用）且 TGID 主路径失败时被调用。
 fn compute_thread_level_util(
     fg_pid: u32,
     thread_run_map: &BpfHashMap<&mut aya::maps::MapData, u32, u64>,

@@ -31,9 +31,9 @@ const CLG_STALE_POLL: Duration = Duration::from_secs(1);
 
 pub mod config;
 pub mod scheduler;
-// FAS（帧感知调度）暂时禁用：功能存在 bug，需关闭调试。
-// 恢复时：取消下行注释，并恢复下方所有 `FAS`/`fas_controller` 相关调用。
-// pub mod fas;
+// FAS（帧感知调度）引擎：ChiRi 侧经 crate::scheduler::fas::FasController 使用；
+// Yumi 调度器自身不启用 FAS（模式门控在 app_detect::determine_mode，Yumi 永不进入 fas 模式）。
+pub mod fas;
 pub mod cpu_load_governor;
 
 use crate::i18n::{t, load_language, t_with_args};
@@ -505,6 +505,11 @@ pub fn start_scheduler_thread(
                     // 仅 ChiRi SoC 的 cpu_monitor 会发送（Yumi 设备不加载扩展探针）；
                     // 此 arm 仅为枚举完备性，保证 Yumi 调度行为零变化。
                     DaemonEvent::BpfStats { .. } => {}
+
+                    DaemonEvent::PackageSwitch { package_name, pid } => {
+                        // 同模式前台包切换：仅 ChiRi FAS 消费（fas→fas 热切换），Yumi 不需要
+                        let _ = (package_name, pid);
+                    }
                 }
 
                 // ==== FAS 暂禁用：定期检查 FAS 挂起状态是否超时 ====

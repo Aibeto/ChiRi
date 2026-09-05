@@ -112,6 +112,9 @@ impl PidController {
         self.integral = 0.0; self.prev_error = 0.0; self.filtered_deriv = 0.0;
     }
 
+    /// 运行时更新 PID 基准系数（热重载预留能力；当前 per-app 配置为编译期嵌入，
+    /// FasManager 复用路径走 reset_runtime + apply_freqs，本方法暂无调用方）
+    #[allow(dead_code)]
     pub(super) fn update_coefficients(&mut self, kp: f32, ki: f32, kd: f32) {
         self.base_kp = kp; self.base_ki = ki; self.base_kd = kd;
         // 重新按当前 adapted_fps 缩放

@@ -1,0 +1,127 @@
+# ════════════════════════════════════════════════════════════════
+#  FAS（帧感知调度）配置完整字段说明书
+# ════════════════════════════════════════════════════════════════
+#  ⚠ 本文件仅作文档参考，不参与编译嵌入、不被任何代码加载
+#    （daemon 只加载 fas.yaml 白名单与 fas/<配置名>.yaml 每应用配置）
+#
+#  新增 FAS 游戏三步：
+#    1. module/config/normal/fas.yaml 白名单加一行：<精确包名>: <配置名>
+#    2. src/common.rs::embedded_fas_app_str() 加一个 match arm
+#    3. 新建 module/config/normal/fas/<配置名>.yaml（可复制下方模板裁剪，
+#       未列出的字段自动取 src/fas_types.rs::FasRulesConfig 默认值）
+#
+#  运行时行为速览（详见 AGENTS.md「FAS 帧感知调度」小节）：
+#    - 白名单应用前台 → 独立 FAS 实例接管（CLG/akmode/fast 全暂停，
+#      温控/触摸升频/scenemode 豁免），丢失前台 60 秒后实例注销
+#    - 帧事件驱动 per-policy 锁频（min=max）+ 容量加权分频 + PID/Jank
+#    - 息屏保持接管，写入 doze 低频锁（doze_perf），亮屏恢复
+# ════════════════════════════════════════════════════════════════
+
+# ── 白名单（fas.yaml 的结构参考）──────────────────────────────
+# 精确包名 → 配置名映射；配置名对应 module/config/normal/fas/<配置名>.yaml
+# 支持多个条目（每个 FAS 游戏独立实例，fas→fas 切换走 PackageSwitch 热替换）
+#
+# fas:
+#   apps:
+#     com.hypergryph.endfield: endfield
+
+# ── 每应用配置模板（fas/<配置名>.yaml 的结构）──────────────────
+# 顶层固定为 fas_rules: 段；下方全部字段均带默认值，可按需裁剪
+
+fas_rules:
+  # ── 帧率档位与余量 ────────────────────────────────────────
+  # 该应用可能渲染的目标帧率集合（运行时按实际帧率动态匹配档位）
+  fps_gears: [30.0, 60.0, 90.0, 120.0, 144.0]
+  # 帧率余量（fps）：目标帧率之上的容忍带，越小越激进
+  fps_margin: 3.0
+
+  # ── 每应用覆盖（可选；单应用配置文件中通常写本应用自身）──────
+  # target_fps: 限制档位匹配范围（不设则用 fps_gears 全档动态探测）
+  # fps_margin: 覆盖全局 fps_margin
+  per_app_profiles:
+    "com.hypergryph.endfield":
+      target_fps: [30, 60, 120]
+      fps_margin: 3.0
+
+  # ── PID 控制器（60fps 基准系数，运行时按 target_fps/60 缩放）──
+  # kp 比例：线性缩放；ki 积分：√ratio 缩放；kd 微分：ratio^0.3 缩放
+  pid:
+    kp: 0.050
+    ki: 0.010
+    kd: 0.006
+
+  # ── 集群算力感知（多簇分频权重，按 policy 枚举顺序对应）──────
+  # auto_capacity_weight=true 时由实测容量自动计算，此表仅作回退基准
+  auto_capacity_weight: true
+  cluster_profiles:
+    - capacity_weight: 1.0 # 小核
+    - capacity_weight: 1.5 # 中核
+    - capacity_weight: 2.5 # 大核
+    - capacity_weight: 3.5 # 超大核
+
+  # ── 归一化性能（Perf）范围：0.0=最低频 1.0=硬件最高频 ─────────
+  perf_floor: 0.22 # 性能地板（空闲下限）
+  perf_ceil: 1.0 # 性能天花板（允许达到硬件最高频）
+  perf_init: 0.45 # 接管/冷启动后的初始性能
+  perf_cold_boot: 0.85 # 冷启动（首次进入游戏）3.5s 内的高性能
+  freq_hysteresis: 0.015 # 频率迟滞带（防抖动）
+
+  # ── 重帧 / 加载检测（读条/过图）────────────────────────────
+  heavy_frame_threshold_ms: 150.0 # 单帧超过此值视为重帧
+  loading_cumulative_ms: 2500.0 # 累计重帧时长判定进入加载态
+  loading_normal_tolerance: 3 # 加载态中连续正常帧容忍数
+  loading_perf_floor: 0.60 # 加载态性能下限
+  loading_perf_ceiling: 0.70 # 加载态性能上限（压着加载即可）
+
+  # ── 加载后保护（防止读条结束瞬间的频率断崖）─────────────────
+  post_loading_ignore_frames: 5 # 加载结束后的观察帧数
+  post_loading_perf: 0.65 # 观察期性能
+  post_loading_downgrade_guard: 90 # 观察期内禁止降档的帧数
+
+  # ── 档位切换与阻尼 ────────────────────────────────────────
+  upgrade_confirm_frames: 60 # 升档确认帧数
+  downgrade_confirm_frames: 90 # 降档确认帧数
+  upgrade_cooldown_after_downgrade: 90 # 降档后的升档冷却帧数
+  gear_dampen_frames: 60 # 档位切换阻尼帧数
+
+  # ── 降档紧急提频（Boost：降档瞬间帧率骤降的抢救）────────────
+  downgrade_boost_perf_inc: 0.18 # 提升的 perf 量
+  downgrade_boost_duration: 45 # 持续帧数
+
+  # ── 连续稳态快速衰减（省电核心：稳帧后逐步降频）─────────────
+  fast_decay_frame_threshold: 75 # 连续稳态帧数触发
+  fast_decay_perf_threshold: 0.70 # perf 高于此值才衰减
+  fast_decay_max_step: 0.022 # 单帧最大衰减步长
+  fast_decay_min_step: 0.004 # 单帧最小衰减步长
+
+  # ── Jank 卡顿保护 ────────────────────────────────────────
+  jank_cooldown_frames: 15 # Jank 抢救后的冷却帧数
+
+  # ── PID 输出限幅（防过冲）────────────────────────────────
+  max_inc_damped: 0.045 # 阻尼期单帧最大升频
+  max_inc_normal: 0.075 # 正常期单帧最大升频
+  damped_perf_cap: 0.92 # 阻尼期性能上限
+
+  # ── 应用切换 / 失前台检测 ─────────────────────────────────
+  app_switch_gap_ms: 3000.0 # 帧间隔超过此值视为应用切换（触发内部复位）
+  app_switch_resume_perf: 0.60 # 切换恢复后的起始性能
+
+  # ── 其他底层机制 ─────────────────────────────────────────
+  freq_force_reapply_interval: 30 # 周期性强制重写频率（秒，防内核/厂商篡改）
+  fixed_max_frame_ms: 500.0 # 帧间隔上限截断（异常大间隔不进 PID）
+  cold_boot_ms: 3500 # 冷启动高性能持续时长（毫秒）
+  verify_freq_interval_secs: 3 # 频率回读校验周期（秒，防覆写）
+
+  # ── 温度限频（FAS 内建；默认关闭，与 ChiRi ThermalGuard 无关）──
+  # 阈值℃（0 = 禁用）；ChiRi 外部温控在 FAS 模式下不介入
+  core_temp_threshold: 0.0
+  # 触发限温时的最低 perf
+  core_temp_throttle_perf: 0.70
+
+  # ── CPU 负载辅助 ─────────────────────────────────────────
+  # 前台线程利用率软封顶除数（越小越激进：util 高时压 PID 输出）
+  util_cap_divisor: 0.45
+
+  # ── 息屏 doze 锁频比例（ChiRi 新增字段）─────────────────────
+  # 息屏保持接管时写入的低频锁（0.05~0.30，加载时 clamp）
+  doze_perf: 0.18

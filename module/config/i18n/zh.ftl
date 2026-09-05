@@ -179,6 +179,20 @@ fas-pid-reloaded = [FAS] PID 系数热重载: Kp={ $kp } Ki={ $ki } Kd={ $kd }
 fas-rules-reloaded = [FAS] 规则已热重载 (冗余={ $margin }, 地板={ $floor }, 天花板={ $ceil }, 配置数={ $profiles })
 fas-policy-writer-invalid = [FAS] P{ $pid } 策略写入器无效 (max_valid: { $max_valid }, min_valid: { $min_valid })，已跳过。
 
+# --- FAS（白名单/调度集成）---
+main-fas-whitelist-exported = [Main] 已导出 { $count } 个 FAS 白名单条目到 fas_whitelist.txt
+app-detect-fas-fallback = [AppDetect] 前台应用命中 FAS 白名单，进入 FAS 模式: { $pkg }
+app-detect-fas-rejected = [AppDetect] 非白名单应用 { $pkg } 映射到 FAS 模式 { $mode } 已拒绝，回退全局模式
+app-detect-fas-global-rejected = [AppDetect] 全局模式 { $mode } 为 FAS 模式，不适用于非白名单应用 { $pkg }，回退 balance
+scheduler-fas-activate = [Scheduler] FAS 实例激活: { $pkg } (pid={ $pid })
+scheduler-fas-switch = [Scheduler] FAS 实例热切换: { $old } -> { $new }
+scheduler-fas-deactivate = [Scheduler] FAS 实例去激活（频率已恢复）: { $pkg }
+scheduler-fas-destroy = [Scheduler] FAS 实例已注销（超过 60 秒未回前台）: { $pkg }
+scheduler-fas-doze-enable = [Scheduler] FAS 息屏保持接管: 已写入低频锁
+scheduler-fas-doze-restore = [Scheduler] FAS 亮屏恢复: 已重写调度频率
+scheduler-fas-init-failed = [Scheduler] FAS 实例初始化失败，已回退 CLG: { $pkg }
+scheduler-fas-cooldown = [Scheduler] FAS 初始化失败已冷却，{ $secs } 秒内由 CLG 接管
+
 # --- Scheduler: Settings ---
 apply-settings-for-mode = 正在应用模式: { $mode }
 settings-applied-success = 模式 '{ $mode }' 的设置已成功应用
