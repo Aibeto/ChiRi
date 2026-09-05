@@ -2,11 +2,11 @@
 # 编译期嵌入（src/common.rs::embedded_fas_app_str），不可编辑，不对外暴露。
 # 未列出的字段取 src/fas_types.rs::FasRulesConfig 默认值。
 fas_rules:
-  fps_gears: [30.0, 45.0, 60.0]
+  fps_gears: [30.0, 60.0, 90.0, 120.0, 144.0, 165.0]
   fps_margin: 3.0
   per_app_profiles:
     com.hypergryph.endfield:
-      target_fps: [30, 60, 120]
+      target_fps: [60]
       fps_margin: 3.0
   # FAS 内部限温关闭：一切交由帧感知调度（0 = 禁用）
   core_temp_threshold: 0.0
