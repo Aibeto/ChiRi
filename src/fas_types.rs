@@ -236,10 +236,6 @@ pub struct FasRulesConfig {
     /// CPU 负载辅助：前台线程利用率封顶的除数 (越小越激进)
     #[serde(default = "d_util_cap_divisor")]
     pub util_cap_divisor: f32,
-
-    /// 息屏 FAS doze 锁频比例（0.05..0.30）
-    #[serde(default = "d_doze_perf")]
-    pub doze_perf: f32,
 }
 
 pub fn default_fps_gears() -> Vec<f32> {
@@ -359,9 +355,6 @@ fn d_temp_perf() -> f32 {
 fn d_util_cap_divisor() -> f32 {
     0.45
 }
-fn d_doze_perf() -> f32 {
-    0.18
-}
 
 impl FasRulesConfig {
     /// 校验并规范化配置：
@@ -448,10 +441,6 @@ impl FasRulesConfig {
         if !self.util_cap_divisor.is_finite() {
             self.util_cap_divisor = d_util_cap_divisor();
         }
-        if !self.doze_perf.is_finite() {
-            self.doze_perf = d_doze_perf();
-        }
-        self.doze_perf = self.doze_perf.clamp(0.05, 0.30);
         if !self.app_switch_resume_perf.is_finite() {
             self.app_switch_resume_perf = d_switch_perf();
         }
@@ -536,7 +525,6 @@ impl Default for FasRulesConfig {
             core_temp_threshold: d_temp_thresh(),
             core_temp_throttle_perf: d_temp_perf(),
             util_cap_divisor: d_util_cap_divisor(),
-            doze_perf: d_doze_perf(),
         }
     }
 }

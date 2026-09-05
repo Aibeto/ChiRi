@@ -20,6 +20,7 @@ main-config-loaded = [Main] Config loaded: { $path } (loglevel={ $loglevel }, la
 main-chiri-scheduler-selected = [Main] Specific SoC detected, enabling Chiri scheduler
 main-special-tuned-exported = [Main] exported { $count } internal special-tuned whitelist entries to special_tuned.txt
 main-log-archive-submitted = [Main] previous logs archived, packing in background to logd/{ $zip }
+main-devimp-archive-submitted = [Main] previous devimp diagnostics archived, packing in background to logd/{ $zip }
 monitor-thread-start-screen = [Main] Starting screen state watcher thread...
 monitor-thread-start-config-watch = [Main] Starting config watcher thread...
 monitor-thread-start-fps = [Main] Starting eBPF FPS monitor thread...
@@ -80,6 +81,7 @@ fps-monitor-started = [FPS Monitor] eBPF FPS monitor started (per-PID uprobe mod
 fps-monitor-symbol-short-miss = [FPS Monitor] short symbol attach failed, trying long symbol...
 fps-monitor-attach-symbol = [FPS Monitor] attached with symbol: { $lib } (pid={ $pid })
 fps-monitor-frame-summary = [FPS Monitor] frame summary | pid={ $pid } window={ $window } latest={ $latest_ms }ms avg={ $avg_ms }ms
+fps-monitor-frames-dropped = [FPS Monitor] event channel congested, { $count } frame samples dropped (scheduler consuming too slowly)
 
 # --- Scheduler ---
 scheduler-ipc-started = [Scheduler] IPC Channel listener started.
@@ -189,8 +191,7 @@ scheduler-fas-activate = [Scheduler] FAS instance activated: { $pkg } (pid={ $pi
 scheduler-fas-switch = [Scheduler] FAS instance hot-switched: { $old } -> { $new }
 scheduler-fas-deactivate = [Scheduler] FAS instance deactivated (frequencies restored): { $pkg }
 scheduler-fas-destroy = [Scheduler] FAS instance destroyed (not foregrounded for 60s): { $pkg }
-scheduler-fas-doze-enable = [Scheduler] FAS keeps control during screen OFF: low-frequency lock written
-scheduler-fas-doze-restore = [Scheduler] FAS restored on screen ON: scheduling frequencies rewritten
+scheduler-fas-screen-release = [Scheduler] FAS released on screen OFF: frequencies restored, power saving delegated to CLG doze / scenemode
 scheduler-fas-init-failed = [Scheduler] FAS instance init failed, falling back to CLG: { $pkg }
 scheduler-fas-cooldown = [Scheduler] FAS init failed, entering { $secs }s cooldown; CLG takes over during cooldown
 

@@ -6,13 +6,16 @@
 //!
 //! 生命周期规则：
 //! - C1 创建/复用：activate() —— 无实例则 FasController::new + load_policies（快照真实系统状态），
-//!   有实例（60s 内切回）则复用：reset_runtime + apply_freqs 重写频率（不用 force_reapply，
-//!   其重写的是 doze 后陈旧的 current_freq）。
+//!   有实例（60s 内切回）则复用：set_game 挂回包名 + apply_freqs 重写频率。
 //! - C2 去激活：deactivate_active() —— 仅对活跃实例 reset_all_freqs + clear_game，
 //!   必须先于任何其他 governor（CLG/akmode/fast）的 init，保证对方快照到真实状态；
 //!   非活跃实例的频率已在各自去激活时恢复，绝不再写（避免踩坏后续 governor）。
 //! - C3 注销：reap() —— 非活跃实例 last_fg 超过 FAS_INSTANCE_TTL 后移除（纯内存清理）。
-//! - C4 息屏保持：enter_doze/exit_doze —— 息屏写低频锁、亮屏 apply_freqs 恢复，FAS 不释放。
+//! - C4 息屏释放：息屏时调用方 deactivate_active() 恢复频率并交由 CLG doze /
+//!   scenemode 全局接管，实例保留 60s；亮屏后由 ModeChange / 1s 兜底重新 activate()。
+//!   （原设计为息屏 enter_doze 写低频锁、亮屏 exit_doze 恢复，但锁频恢复依赖帧事件
+//!   驱动的 apply_freqs——锁屏前台无帧事件时全簇被锁死在最低频，亮屏后 0.2fps，
+//!   且息屏期间无法进入 CLG doze / scenemode，已废弃）
 //! - C5 收尾：deactivate_all() —— panic/线程退出时恢复全部频率。
 //! - C6 事件路由：on_frame/on_load_update/温度刷新只作用于活跃实例。
 
@@ -21,9 +24,8 @@ use std::time::{Duration, Instant};
 
 use log::info;
 
-use crate::fas_types::FasRulesConfig;
 use crate::fluent_args;
-use crate::i18n::{t, t_with_args};
+use crate::i18n::t_with_args;
 use crate::scheduler::fas::FasController;
 
 /// 非活跃实例保留时长：丢失前台后 60s 内切回可复用（免重建 policies 快照）
@@ -34,14 +36,12 @@ const FAS_TEMP_REFRESH: Duration = Duration::from_secs(3);
 struct FasInstance {
     package: String,
     controller: FasController,
-    rules: &'static FasRulesConfig,
     last_fg: Instant,
 }
 
 pub struct FasManager {
     instances: Vec<FasInstance>,
     active_pkg: Option<String>,
-    doze: bool,
     last_temp: f64,
     last_temp_read: Instant,
     temp_path: Option<PathBuf>,
@@ -53,7 +53,6 @@ impl FasManager {
         Self {
             instances: Vec::new(),
             active_pkg: None,
-            doze: false,
             last_temp: 0.0,
             last_temp_read: Instant::now(),
             temp_path,
@@ -64,12 +63,10 @@ impl FasManager {
     /// （调用方走冷却回退）。
     ///
     /// - 已是活跃实例 → 仅刷新 last_fg 与 set_game（重复 activate 不重复打点）；
-    /// - 已有实例（60s 内切回）→ 复用：set_game 挂回包名 + apply_freqs 按 perf_index 重写频率
-    ///   （不用 force_reapply，其重写的是 doze 后陈旧的 current_freq）。
-    ///   引擎的 `reset_runtime` 为 `pub(super)`（本次仅放开 `apply_freqs` 可见性），等效复位由
-    ///   引擎自带的应用切换语义完成：去激活时已 clear_game，复活后首个真实帧的帧间隔必然跨越
-    ///   失去前台的整段时长、超过 `app_switch_gap_ms`，`handle_early_exit` 会内部 reset_runtime
-    ///   并落 `app_switch_resume_perf`；
+    /// - 已有实例（60s 内切回）→ 复用：set_game 挂回包名 + apply_freqs 按 perf_index 重写频率。
+    ///   引擎状态复位由引擎自带的应用切换语义完成：去激活时已 clear_game，复活后首个
+    ///   真实帧的帧间隔必然跨越失去前台的整段时长、超过 `app_switch_gap_ms`，
+    ///   `handle_early_exit` 会内部 reset_runtime 并落 `app_switch_resume_perf`；
     /// - 新建 → FasController::new + load_policies，policies 为空返回 false。
     ///
     /// 随后 set_game(pid, pkg) + set_temperature(last_temp) + set_temp_threshold(rules.core_temp_threshold)，
@@ -147,7 +144,6 @@ impl FasManager {
         self.instances.push(FasInstance {
             package: pkg.to_string(),
             controller,
-            rules,
             last_fg: Instant::now(),
         });
         self.active_pkg = Some(pkg.to_string());
@@ -165,13 +161,12 @@ impl FasManager {
         true
     }
 
-    /// C2：去激活当前活跃实例（reset_all_freqs + clear_game），doze 复位。无活跃实例时为无操作。
+    /// C2：去激活当前活跃实例（reset_all_freqs + clear_game）。无活跃实例时为无操作。
     /// info 打点 scheduler-fas-deactivate（pkg）+ devimp event("fas", pkg, "deactivate")。
     pub fn deactivate_active(&mut self) {
         let Some(pkg) = self.active_pkg.take() else {
             return;
         };
-        self.doze = false;
         if let Some(inst) = self.instances.iter_mut().find(|i| i.package == pkg) {
             // 先恢复频率再清状态：调用方随后 init 其他 governor（CLG/akmode/fast）时，
             // 对方才能快照到真实的系统状态
@@ -194,51 +189,6 @@ impl FasManager {
         self.instances.clear();
     }
 
-    /// C4：息屏保持接管——活跃实例全部 policy 写入 doze 低频锁
-    /// （find_nearest_freq(rules.doze_perf) + apply_freq_locked）。幂等（已 doze 直接返回）。
-    /// info 打点 scheduler-fas-doze-enable + devimp event("fas", pkg, "doze")。
-    pub fn enter_doze(&mut self) {
-        if self.doze {
-            return;
-        }
-        // 无活跃实例则无可保持对象，交由调用方走 CLG doze
-        let Some(pkg) = self.active_pkg.clone() else {
-            return;
-        };
-        let Some(inst) = self.instances.iter_mut().find(|i| i.package == pkg) else {
-            return;
-        };
-        // 先拷出 doze_perf 再循环写 policies（规避借用冲突）
-        let dp = inst.rules.doze_perf;
-        for policy in inst.controller.policies.iter_mut() {
-            let f = policy.find_nearest_freq(dp);
-            policy.apply_freq_locked(f);
-        }
-        self.doze = true;
-        info!("{}", t("scheduler-fas-doze-enable"));
-        crate::logger::devimp_event("fas", &pkg, "doze");
-    }
-
-    /// C4：亮屏恢复——活跃实例 apply_freqs() 按 PID/perf_index 状态重写频率。幂等。
-    /// info 打点 scheduler-fas-doze-restore + devimp event("fas", pkg, "wake")。
-    pub fn exit_doze(&mut self) {
-        if !self.doze {
-            return;
-        }
-        self.doze = false;
-        if let Some(inst) = self.active_instance_mut() {
-            inst.controller.apply_freqs();
-        }
-        info!("{}", t("scheduler-fas-doze-restore"));
-        if let Some(pkg) = self.active_pkg.clone() {
-            crate::logger::devimp_event("fas", &pkg, "wake");
-        }
-    }
-
-    pub fn doze(&self) -> bool {
-        self.doze
-    }
-
     pub fn is_active(&self) -> bool {
         self.active_pkg.is_some()
     }
@@ -247,17 +197,14 @@ impl FasManager {
         self.active_pkg.as_deref()
     }
 
-    /// C6：帧事件（仅活跃实例）。doze 状态下先 exit_doze（漏帧自愈，亮屏事件丢失兜底）；
-    /// 内部每 FAS_TEMP_REFRESH 读一次 temp_path（毫摄氏度 /1000.0 存 last_temp 并 set_temperature）。
+    /// C6：帧事件（仅活跃实例）。内部每 FAS_TEMP_REFRESH 读一次 temp_path
+    /// （毫摄氏度 /1000.0 存 last_temp 并 set_temperature）。
     pub fn on_frame(&mut self, delta_ns: u64) {
         if !self.is_active() {
             return;
         }
         if let Some(inst) = self.active_instance_mut() {
             inst.last_fg = Instant::now();
-        }
-        if self.doze {
-            self.exit_doze();
         }
         self.refresh_temperature();
         if let Some(inst) = self.active_instance_mut() {

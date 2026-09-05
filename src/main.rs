@@ -42,14 +42,43 @@ fn main() -> Result<()> {
     }
 
     let root = common::get_module_root();
+
+    // 单实例锁：flock 互斥（进程存活期间持有，崩溃/被杀由内核自动释放）。
+    // 必须先于日志归档执行：否则第二个实例会把首个实例的 logs/ 整体归档改名。
+    // 背景：service.sh/action.sh/WebUI 的看门狗清理依赖 pidfile，logs/watchdog.pid
+    // 丢失时旧看门狗无法被终止，killall 后 3s 把 daemon 再拉起，与新实例并行——
+    // devimp_<pkg>_<毫秒时间戳>.log 按进程各自命名，同包名内容写进两份不同文件，
+    // status/daemon 日志同理。flock 在进程层兜底一切 shell 侧竞态：
+    // 拿锁失败即退出（看门狗 3s 后重试，旧实例退出后即可接管），全程至多一个实例。
+    // 锁文件放模块根而非 logs/（logs/ 每次启动被整体归档，不可作为锁锚点）。
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        if let Ok(lock_file) = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(root.join("daemon.lock"))
+        {
+            if unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+                eprintln!("yumi: another daemon instance holds daemon.lock, exiting");
+                std::process::exit(0);
+            }
+            // 故意泄漏 fd 持锁至进程退出；fd 关闭即释放锁
+            std::mem::forget(lock_file);
+        }
+    }
+
     let log_dir = root.join("logs");
-    // 启动日志归档：把上一轮整个 logs/ 重命名为 ziped_<毫秒时间戳> 并交子线程
-    // 异步打包为 logd/ziped_<ts>.zip（watchdog.pid 复制回新建的 logs/ 供
-    // stopScheduler 定位看门狗）；本进程日志全部写入新建的 logs/，互不干扰。
+    // 启动归档：把上一轮整个 logs/ 与 devimp/ 分别重命名为临时目录并交单个
+    // 子线程异步打包为 logd/ziped_<ts>.zip 与 logd/devimp_<ts>.zip（watchdog.pid
+    // 复制回新建的 logs/ 供 stopScheduler 定位看门狗）；打包完成后执行
+    // logd+devimp 预算清理（总大小 >128MB 时从最旧文件删到 <96MB）。
+    // 本进程日志全部写入新建的 logs/、devimp/，互不干扰。
     // 必须在 create_dir_all(log_dir)/logger::init 之前执行，保证新旧文件分离。
-    let archived_zip = logger::archive_logs_on_startup(&root);
+    let (archived_zip, archived_devimp) = logger::archive_on_startup(&root);
     std::fs::create_dir_all(&log_dir)?;
-    // devimp 诊断目录：清旧留新（保留最近 10 份），与日志归档互不影响
+    // devimp 目录已随归档新建；此处仅做容量清理兜底（归档失败时旧文件仍在）
     logger::devimp_prepare();
 
     // 2. 判断是否启用 Chiri 专用调度器（检测到列表中的特定处理器时启用）
@@ -123,6 +152,15 @@ fn main() -> Result<()> {
             "{}",
             t_with_args(
                 "main-log-archive-submitted",
+                &fluent_args!("zip" => zip.clone())
+            )
+        );
+    }
+    if let Some(zip) = &archived_devimp {
+        info!(
+            "{}",
+            t_with_args(
+                "main-devimp-archive-submitted",
                 &fluent_args!("zip" => zip.clone())
             )
         );

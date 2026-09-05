@@ -19,6 +19,7 @@ main-config-loaded = [Main] 已读取配置: { $path } (loglevel={ $loglevel }, 
 main-chiri-scheduler-selected = [Main] 检测到特定处理器，已启用 Chiri 专用调度器
 main-special-tuned-exported = [Main] 已导出 { $count } 个内部特调白名单条目到 special_tuned.txt
 main-log-archive-submitted = [Main] 上一轮日志已归档，后台打包至 logd/{ $zip }
+main-devimp-archive-submitted = [Main] 上一轮 devimp 诊断日志已归档，后台打包至 logd/{ $zip }
 monitor-thread-start-screen = [Main] 启动屏幕状态监控线程...
 monitor-thread-start-config-watch = [Main] 启动配置监控线程...
 monitor-thread-start-fps = [Main] 启动 eBPF FPS 监控线程...
@@ -79,6 +80,7 @@ fps-monitor-started = [FPS Monitor] eBPF FPS 监控启动成功（per-PID uprobe
 fps-monitor-symbol-short-miss = [FPS Monitor] 短签名符号 attach 失败，尝试长签名符号...
 fps-monitor-attach-symbol = [FPS Monitor] 使用符号 attach: { $lib } (pid={ $pid })
 fps-monitor-frame-summary = [FPS Monitor] 帧摘要 | pid={ $pid } 窗口={ $window } 最新={ $latest_ms }ms 平均={ $avg_ms }ms
+fps-monitor-frames-dropped = [FPS Monitor] 事件通道拥塞，已丢弃 { $count } 个帧样本（调度层消费不及时）
 
 # --- Scheduler ---
 scheduler-ipc-started = [Scheduler] IPC 通道监听器已启动
@@ -188,8 +190,7 @@ scheduler-fas-activate = [Scheduler] FAS 实例激活: { $pkg } (pid={ $pid })
 scheduler-fas-switch = [Scheduler] FAS 实例热切换: { $old } -> { $new }
 scheduler-fas-deactivate = [Scheduler] FAS 实例去激活（频率已恢复）: { $pkg }
 scheduler-fas-destroy = [Scheduler] FAS 实例已注销（超过 60 秒未回前台）: { $pkg }
-scheduler-fas-doze-enable = [Scheduler] FAS 息屏保持接管: 已写入低频锁
-scheduler-fas-doze-restore = [Scheduler] FAS 亮屏恢复: 已重写调度频率
+scheduler-fas-screen-release = [Scheduler] FAS 息屏释放: 频率已恢复，息屏降载交由 CLG doze / scenemode 全局接管
 scheduler-fas-init-failed = [Scheduler] FAS 实例初始化失败，已回退 CLG: { $pkg }
 scheduler-fas-cooldown = [Scheduler] FAS 初始化失败已冷却，{ $secs } 秒内由 CLG 接管
 

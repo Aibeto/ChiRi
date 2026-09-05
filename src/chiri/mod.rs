@@ -791,7 +791,10 @@ pub fn start_scheduler_thread(
                     // 包名实际变化才触发热切换，天然幂等。热切换逻辑与 PackageSwitch
                     // arm 同款内联（借用检查下两处各自持有 governor 可变引用，无法
                     // 提取公共闭包——与文件内既有风格一致）。
-                    if mode_clone.lock().unwrap().clone() == "fas" {
+                    // 仅亮屏时执行：息屏时 FAS 必须保持释放（CLG doze/scenemode 全局
+                    // 接管），app_detect 息屏期间不更新前台包名，此处激活会把息屏前的
+                    // 旧包名拉回 FAS 接管、绕过 doze。
+                    if is_screen_on && mode_clone.lock().unwrap().clone() == "fas" {
                         let cur_pkg = crate::monitor::app_detect::get_current_package();
                         if !cur_pkg.is_empty() {
                             if fas_mgr.is_active() {
@@ -801,7 +804,6 @@ pub fn start_scheduler_thread(
                                             .and_then(|cfg| crate::common::fas_app_config(cfg))
                                             .is_some()
                                         {
-                                            let was_doze = fas_mgr.doze();
                                             fas_mgr.deactivate_active();
                                             if !fas_mgr.activate(&cur_pkg, crate::monitor::app_detect::get_current_pid()) {
                                                 fas_mgr.deactivate_all();
@@ -812,9 +814,6 @@ pub fn start_scheduler_thread(
                                                 let clg_cfg = get_clg_cfg(&config_lock, "balance");
                                                 if clg_cfg.enabled { cpu_governor.init_policies(&clg_cfg); }
                                             } else {
-                                                if was_doze {
-                                                    fas_mgr.enter_doze();
-                                                }
                                                 fas_affinity_hook(&mut affinity_mgr, &mut corectl_mgr, true,
                                                     crate::monitor::app_detect::get_current_pid());
                                             }
@@ -839,8 +838,6 @@ pub fn start_scheduler_thread(
                                         let config_lock = config_clone.read().unwrap();
                                         let clg_cfg = get_clg_cfg(&config_lock, "balance");
                                         if clg_cfg.enabled { cpu_governor.init_policies(&clg_cfg); }
-                                    } else if !is_screen_on {
-                                        fas_mgr.enter_doze();
                                     } else {
                                         fas_affinity_hook(&mut affinity_mgr, &mut corectl_mgr, true,
                                             crate::monitor::app_detect::get_current_pid());
@@ -861,10 +858,12 @@ pub fn start_scheduler_thread(
                 // 豁免档：当前性能比已高于豁免档时不压制，高负载不挡路。
                 if last_thermal_check.elapsed() >= THERMAL_CHECK_INTERVAL {
                     last_thermal_check = Instant::now();
-                    // FAS 接管时整体跳过 ChiRi 热保护：温控移除，一切交由 FAS 引擎
+                    // FAS 活跃时整体跳过 ChiRi 热保护：温控移除，一切交由 FAS 引擎
                     // （FasManager 内部独立刷新温度喂给引擎）。cap 冻结在当前值；
                     // 2s 亲和块共用本计时器不受影响，1s 遥测块温度读数照常刷新。
-                    if mode_clone.lock().unwrap().clone() != "fas" {
+                    // fas 模式但实例未活跃（息屏已释放/冷却/初始化失败）时照常生效，
+                    // 否则 CLG doze 期间将失去热保护
+                    if !(mode_clone.lock().unwrap().clone() == "fas" && fas_mgr.is_active()) {
                         let (enabled, batt_soft, batt_hard, cpu_soft, cpu_hard, soft_cap, hard_cap, hyst, free_above) = {
                             let t = &config_clone.read().unwrap().thermal;
                             (
@@ -1057,13 +1056,19 @@ pub fn start_scheduler_thread(
                             if crate::common::is_special_mode(&current_mode) {
                                 // akmode 继续运行，CLG 保持释放状态
                                 log::info!("{}", t("scheduler-doze-special-keep"));
-                            } else if current_mode == "fas" && fas_mgr.is_active() {
-                                // FAS 息屏保持接管（C4）：写低频锁，不释放 FAS；亮屏 exit_doze 恢复
-                                fas_mgr.enter_doze();
                             } else {
-                                // 非特调模式：交回 CLG 处理深度睡眠
+                                // 非特调模式：交回 CLG 处理深度睡眠。
+                                // FAS 同样释放（接管前 governor 快照已恢复），息屏降载走全局
+                                // 的 CLG doze → scenemode 路径；实例保留 60s，亮屏后由
+                                // app_detect 的 ModeChange（+force_refresh）重新激活。
+                                // 旧设计 enter_doze 写低频锁后依赖帧事件恢复——锁屏无帧
+                                // 事件时全簇锁死最低频，亮屏 0.2fps，且永久阻塞 CLG 接管。
                                 ak_governor.release();
                                 fast_lock.release();
+                                if current_mode == "fas" && fas_mgr.is_active() {
+                                    fas_mgr.deactivate_active();
+                                    log::info!("{}", t("scheduler-fas-screen-release"));
+                                }
 
                                 // 让 CLG 接管，动态生成一个低功耗配置
                                 let config_lock = config_clone.read().unwrap();
@@ -1132,17 +1137,15 @@ pub fn start_scheduler_thread(
                                 cpu_governor.release();
                                 fast_lock.init();
                             } else if current_mode == "fas" {
-                                if fas_mgr.is_active() {
-                                    fas_mgr.exit_doze();
-                                } else {
-                                    // FAS 未激活（冷却/失败回退路径）：CLG 从 doze 恢复到 balance
-                                    let clg_cfg = get_clg_cfg(&config_lock, "balance");
-                                    if clg_cfg.enabled {
-                                        if cpu_governor.is_active() {
-                                            cpu_governor.reload_config(&clg_cfg);
-                                        } else {
-                                            cpu_governor.init_policies(&clg_cfg);
-                                        }
+                                // FAS 已在息屏时释放：CLG 从 doze 恢复到 balance，
+                                // 随后 app_detect（force_refresh）的 ModeChange / 1s 兜底
+                                // 会重新激活 FAS（activate 复用保留实例 + apply_freqs）
+                                let clg_cfg = get_clg_cfg(&config_lock, "balance");
+                                if clg_cfg.enabled {
+                                    if cpu_governor.is_active() {
+                                        cpu_governor.reload_config(&clg_cfg);
+                                    } else {
+                                        cpu_governor.init_policies(&clg_cfg);
                                     }
                                 }
                             } else {
@@ -1227,7 +1230,12 @@ pub fn start_scheduler_thread(
                                 )));
                             }
 
-                            if mode == "fas" {
+                            if mode == "fas" && !is_screen_on {
+                                // 息屏进入 fas 模式（罕见竞态）：不激活 FAS，保持
+                                // CLG doze 全局接管；亮屏后 app_detect 的 force_refresh
+                                // ModeChange / 1s 兜底会重新激活
+                                fas_mgr.deactivate_active();
+                            } else if mode == "fas" {
                                 // 防御复查：determine_mode 已门控白名单，此处兜底（不应发生）
                                 let fas_ready = crate::common::fas_whitelist_entry(&package_name)
                                     .and_then(|cfg| crate::common::fas_app_config(cfg))
@@ -1272,10 +1280,6 @@ pub fn start_scheduler_thread(
                                         if clg_cfg.enabled { cpu_governor.init_policies(&clg_cfg); }
                                     } else {
                                         fas_affinity_hook(&mut affinity_mgr, &mut corectl_mgr, true, pid);
-                                        // 息屏期间进入 fas 的竞态保险：立即写入 doze 低频锁
-                                        if !is_screen_on {
-                                            fas_mgr.enter_doze();
-                                        }
                                     }
                                 }
                             } else {
@@ -1344,12 +1348,8 @@ pub fn start_scheduler_thread(
                                         .and_then(|cfg| crate::common::fas_app_config(cfg))
                                         .is_some()
                                     {
-                                        let was_doze = fas_mgr.doze();
                                         fas_mgr.deactivate_active();
                                         if fas_mgr.activate(&package_name, pid) {
-                                            if was_doze {
-                                                fas_mgr.enter_doze();
-                                            }
                                             fas_affinity_hook(&mut affinity_mgr, &mut corectl_mgr, true, pid);
                                             true
                                         } else {
@@ -1412,8 +1412,9 @@ pub fn start_scheduler_thread(
                                 .map_or(false, |off| off.elapsed().as_secs() >= 60);
                             if delay_hit {
                                 let current_mode = mode_clone.lock().unwrap().clone();
-                                // fas 不参与 scenemode（FAS 自管息屏低频锁）；饱和退出逻辑无需改
-                                if !crate::common::is_special_mode(&current_mode) && current_mode != "fas" {
+                                // fas 模式下息屏已释放 FAS（CLG doze 接管），正常参与 scenemode；
+                                // FAS 仍活跃（防御：理论上不会发生）时不进入
+                                if !crate::common::is_special_mode(&current_mode) && !fas_mgr.is_active() {
                                     let config_read = config_clone.read().unwrap();
                                     let delay = config_read.scene_mode_delay_secs.max(60);
                                     let scene_cfg =
@@ -1520,7 +1521,7 @@ pub fn start_scheduler_thread(
 
                     // --- 4. 帧率事件 (eBPF 驱动) ---
                     DaemonEvent::FrameUpdate { frame_delta_ns } => {
-                        // 帧事件喂给 FAS 活跃实例（内部含 doze 漏帧自愈与 3s 温度刷新）
+                        // 帧事件喂给 FAS 活跃实例（内部含 3s 温度刷新）
                         if is_screen_on && fas_mgr.is_active() {
                             fas_mgr.on_frame(frame_delta_ns);
                         }

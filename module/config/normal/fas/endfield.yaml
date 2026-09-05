@@ -10,5 +10,3 @@ fas_rules:
       fps_margin: 3.0
   # FAS 内部限温关闭：一切交由帧感知调度（0 = 禁用）
   core_temp_threshold: 0.0
-  # 息屏 FAS doze 锁频比例（加载时 clamp 到 0.05~0.30）
-  doze_perf: 0.18

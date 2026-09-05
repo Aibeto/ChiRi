@@ -20,7 +20,7 @@ use std::mem::size_of;
 use std::num::NonZeroU32;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::ptr;
-use std::sync::mpsc::SyncSender;
+use std::sync::mpsc::{SyncSender, TrySendError};
 use std::time::Duration;
 
 use aya::Ebpf;
@@ -60,6 +60,10 @@ const FRAMETIME_WINDOW: usize = 144;
 struct ProbeState {
     last_ktime_ns: Option<u64>,
     frametimes: VecDeque<Duration>,
+    /// 本次 poll 尚未投喂给调度层的新帧间隔（ns）。
+    /// poll_frames 把 ring 里的每个事件 ingest 后，由 take_pending 全量取走；
+    /// 与 frametimes 分离保证投喂语义是「新帧」而非「最新一条」
+    pending: VecDeque<u64>,
 }
 
 impl ProbeState {
@@ -67,6 +71,7 @@ impl ProbeState {
         Self {
             last_ktime_ns: None,
             frametimes: VecDeque::with_capacity(FRAMETIME_WINDOW),
+            pending: VecDeque::new(),
         }
     }
 
@@ -78,6 +83,7 @@ impl ProbeState {
                     self.frametimes.pop_back();
                 }
                 self.frametimes.push_front(Duration::from_nanos(delta_ns));
+                self.pending.push_back(delta_ns);
             }
         }
         self.last_ktime_ns = Some(ktime_ns);
@@ -221,7 +227,18 @@ impl FpsManager {
         }
     }
 
+    /// 取走全部待投喂的新帧间隔（ns）。每 PID 独立队列合并返回；
+    /// 多 PID 挂载时顺序按队列拼接，不保证严格时间序（FAS 只消费活跃 PID 的样本）。
+    fn take_pending(&mut self) -> Vec<u64> {
+        let mut out = Vec::new();
+        for state in self.states.values_mut() {
+            out.extend(state.pending.drain(..));
+        }
+        out
+    }
+
     /// 当前 PID 的最新帧间隔
+    #[allow(dead_code)]
     fn latest_frametime(&self) -> Option<Duration> {
         self.states.get(&self.current_pid)?.latest_frametime()
     }
@@ -305,6 +322,8 @@ pub async fn start_fps_loop(
             let token = Token(0);
             // 帧事件统计（周期性输出 debug 摘要）
             let mut frame_counter: u32 = 0;
+            // 事件通道拥塞丢弃的帧样本数（仅计数，EMA 平滑可容忍少量丢失）
+            let mut dropped_frames: u64 = 0;
 
             // 注册 RingBuf fd（只注册一次，不会变）。fd 与 attach 无关（探针 attach 前后
             // fd 不变），必须无条件注册：daemon 启动早于首次前台检测，initial_pid 恒为 0、
@@ -356,7 +375,17 @@ pub async fn start_fps_loop(
 
                 manager.poll_frames();
 
-                if let Some(delta) = manager.latest_frametime() {
+                // 全量投喂本窗口新产生的帧间隔。此前每 100ms 只发送
+                // latest_frametime() 一条：60fps 下 6 帧丢 5 帧，所有以
+                // 「帧数」为单位的控制常数（upgrade/downgrade_confirm、
+                // jank_cooldown、fast_decay 阈值、freq_hold_frames 等）的
+                // 实际时间尺度被拉长 6 倍，PID/防抖/jank 响应全面钝化，
+                // 表现为平均帧下降且 1% Low 崩塌；且无新帧时会把同一条
+                // 陈旧 delta 反复投喂——静态 UI/暂停场景一条 heavy 帧被
+                // 重复计入 ~10 次即可在 1s 内累积出假 loading（perf 被钳
+                // 0.60~0.70），表现为纯 UI 界面卡顿。改为只投喂真实新帧。
+                let new_deltas = manager.take_pending();
+                for delta_ns in new_deltas {
                     frame_counter += 1;
                     if frame_counter % 60 == 0 {
                         let avg_ns = manager.states.get(&manager.current_pid)
@@ -365,18 +394,26 @@ pub async fn start_fps_loop(
                         debug!("{}", t_with_args("fps-monitor-frame-summary", &fluent_args!(
                             "pid" => manager.current_pid.to_string(),
                             "window" => manager.states.get(&manager.current_pid).map(|s| s.frametimes.len().to_string()).unwrap_or_default(),
-                            "latest_ms" => format!("{:.2}", delta.as_secs_f64() * 1000.0),
+                            "latest_ms" => format!("{:.2}", delta_ns as f64 / 1_000_000.0),
                             "avg_ms" => format!("{:.2}", avg_ns as f64 / 1_000_000.0)
                         )));
                     }
 
-                    if tx_clone
-                        .send(DaemonEvent::FrameUpdate {
-                            frame_delta_ns: delta.as_nanos() as u64,
-                        })
-                        .is_err()
-                    {
-                        return;
+                    match tx_clone.try_send(DaemonEvent::FrameUpdate {
+                        frame_delta_ns: delta_ns,
+                    }) {
+                        Ok(()) => {}
+                        // 通道拥塞：丢弃本帧样本。绝不能阻塞发送——fps_probe 阻塞
+                        // 会让 eBPF ring buffer 被新事件覆盖，丢失更多帧
+                        Err(TrySendError::Full(_)) => {
+                            dropped_frames = dropped_frames.saturating_add(1);
+                            if dropped_frames % 300 == 1 {
+                                warn!("{}", t_with_args("fps-monitor-frames-dropped", &fluent_args!(
+                                    "count" => dropped_frames.to_string()
+                                )));
+                            }
+                        }
+                        Err(TrySendError::Disconnected(_)) => return,
                     }
                 }
             }

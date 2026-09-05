@@ -286,6 +286,15 @@ impl FasController {
 
         for (idx, policy) in clusters.iter().enumerate() {
             let pid = policy.id;
+            // 先快照接管前 governor 再改写 performance：退出（reset_all_freqs）
+            // 时按快照恢复，防止 performance 泄漏到后续 CLG/akmode/系统调频
+            let orig_governor = fs::read_to_string(format!(
+                "/sys/devices/system/cpu/cpufreq/policy{}/scaling_governor",
+                pid
+            ))
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
             let _ = crate::utils::try_write_file(
                 &format!(
                     "/sys/devices/system/cpu/cpufreq/policy{}/scaling_governor",
@@ -376,6 +385,7 @@ impl FasController {
                 pid as usize,
                 profile,
                 max_f,
+                orig_governor,
             ));
         }
 

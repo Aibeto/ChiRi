@@ -28,7 +28,7 @@ use log4rs::encode::pattern::PatternEncoder;
 use once_cell::sync::OnceCell;
 use std::collections::HashMap;
 use std::fs;
-use std::io::Write as _;
+use std::io::{Read as _, Seek as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -398,8 +398,9 @@ fn format_now() -> String {
 // ════════════════════════════════════════════════════════════════
 //
 // 供离线分析改善调度的按核诊断数据，与 status.csv 分离：
-// - 独立目录 `devimp/`（模块根，与 logs/ 平级），**不受启动日志归档影响**
-//   （归档只 rename 整个 logs/ 目录，devimp/ 自行管理）；
+// - 独立目录 `devimp/`（模块根，与 logs/ 平级），**启动时随 logs/ 一起归档**到
+//   logd/devimp_<毫秒时间戳>.zip（子线程异步打包），归档后新建空目录接住
+//   本进程写入；
 // - **按前台包名分组**：文件名 `devimp_<包名>_<unix 毫秒时间戳>.log`，首次
 //   写入惰性创建（整轮未开启 DEV 则不产生文件）；scheduler_ipc 每秒经
 //   set_devimp_package 同步前台包名，包名变化即关闭当前文件、下次写入以
@@ -797,11 +798,16 @@ fn devimp_write_line(row: DevRow) {
     if rotated {
         // 触顶换新文件：清 tick 节流状态（新文件首 tick 即记录，不留心跳空窗）
         devimp_tick_state_clear();
+        // 触顶即新增了一个 128MB 级文件：顺手执行 logd+devimp 预算清理
+        // （总大小 >128MB 时从最旧文件删到 <96MB），防长会话期间无限膨胀
+        enforce_logd_devimp_limit(&common::get_module_root());
     }
 }
 
-/// 启动清理：仅保留最近 DEVIMP_KEEP_FILES 份历史诊断文件（按文件 mtime
-/// 排序，超出从旧到新删除）。main.rs 启动时调用一次，与日志归档互不影响。
+/// 启动兜底清理：仅保留最近 DEVIMP_KEEP_FILES 份历史诊断文件（按文件 mtime
+/// 排序，超出从旧到新删除）。main.rs 启动时调用一次；正常路径下 devimp/ 已被
+/// 启动归档整体 rename 走并新建为空目录，此函数仅作为归档 rename 失败时的
+/// 兜底（旧文件保留在原目录时防止无限堆积）。
 pub fn devimp_prepare() {
     let dir = common::get_module_root().join(DEVIMP_DIR_REL);
     let _ = fs::create_dir_all(&dir);
@@ -1011,67 +1017,153 @@ pub fn devimp_event(kind: &str, pkg: &str, reason: &str) {
 }
 
 // ════════════════════════════════════════════════════════════════
-//  启动日志归档：logs/ → logd/ziped_<毫秒时间戳>.zip（子线程异步打包）
+//  启动归档：logs/ → logd/ziped_<毫秒时间戳>.zip、devimp/ → logd/devimp_<ts>.zip
+//  （一次性子线程串行打包），打包完成后执行 logd+devimp 预算清理
 // ════════════════════════════════════════════════════════════════
 //
 // 流程（由 main.rs 在 logger::init 之前调用，保证新旧日志文件分离）：
-// 1. 把整个 logs/ 原子重命名为 logs 同级的 `ziped_<ts>` 临时目录（同分区 rename）；
+// 1. 把整个 logs/ 与 devimp/ 分别原子重命名为同级 `ziped_<ts>` / `ziped_devimp_<ts>`
+//    临时目录（同分区 rename），并新建空目录接住本进程的新写入；
 // 2. **复制回 watchdog.pid** 到新建的 logs/——看门狗先于本进程启动、WebUI
 //    stopScheduler 靠 logs/watchdog.pid 定位并终止看门狗，归档不能带走它；
-// 3. 子线程把临时目录打包为 logd/ziped_<ts>.zip（stored ZIP，无压缩、零新依赖），
-//    成功后删除临时目录并自然退出（无常驻线程）；失败保留临时目录并写入
+// 3. 单个一次性子线程把两个临时目录串行打包为 logd/ziped_<ts>.zip 与
+//    logd/devimp_<ts>.zip（stored ZIP，无压缩、零新依赖），成功后删除临时
+//    目录并自然退出（无常驻线程）；失败保留对应临时目录并写入
 //    ARCHIVE_FAILED.txt 供事后排查（此时 logger 尚未 init，无法打点）；
-// 4. rename 失败或原目录为空时跳过归档，日志继续写入原 logs/，不影响启动。
+// 4. 打包完成后执行 logd+devimp 预算清理：两目录总大小超过
+//    LOGD_DEVIMP_MAX_BYTES 时从最旧文件删除到低于 LOGD_DEVIMP_TARGET_BYTES；
+// 5. rename 失败或原目录为空时跳过对应归档，不影响启动。
 
-/// 启动归档入口。返回归档 zip 文件名（logger::init 后供 main info 打点）；
-/// 未归档（首次安装 / 空目录 / rename 失败）返回 None。
-pub fn archive_logs_on_startup(root: &Path) -> Option<String> {
-    let src = root.join("logs");
-    // 空目录或不存在：无归档价值（首次安装），main 随后新建 logs/
-    let has_entries = std::fs::read_dir(&src)
-        .map(|mut d| d.next().is_some())
-        .unwrap_or(false);
-    if !has_entries {
-        return None;
-    }
+/// logd/ + devimp/ 总大小预算：超过后从最旧文件开始清理（用户约定 128MB）
+const LOGD_DEVIMP_MAX_BYTES: u64 = 128 * 1024 * 1024;
+/// 预算清理目标：从最旧文件逐个删除，直到两目录总大小低于该值（96MB）
+const LOGD_DEVIMP_TARGET_BYTES: u64 = 96 * 1024 * 1024;
+
+/// 启动归档入口。返回 (logs 归档 zip 名, devimp 归档 zip 名)（logger::init 后供
+/// main info 打点）；未归档（首次安装 / 空目录 / rename 失败）对应项为 None。
+pub fn archive_on_startup(root: &Path) -> (Option<String>, Option<String>) {
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis())
         .unwrap_or(0);
-    let tmp_name = format!("ziped_{}", ts);
-    let tmp = root.join(&tmp_name);
-    std::fs::rename(&src, &tmp).ok()?;
 
-    // 新建 logs/ 并保留看门狗 pid（stopScheduler 的定位依据）
-    let new_logs = root.join("logs");
-    let _ = fs::create_dir_all(&new_logs);
-    let pid_src = tmp.join("watchdog.pid");
-    if pid_src.exists() {
-        let _ = fs::copy(&pid_src, new_logs.join("watchdog.pid"));
+    // ── logs/：rename → 新建 logs/ → 复制回 watchdog.pid ──
+    let mut logs_tmp: Option<PathBuf> = None;
+    let src_logs = root.join("logs");
+    let logs_has_entries = fs::read_dir(&src_logs)
+        .map(|mut d| d.next().is_some())
+        .unwrap_or(false);
+    if logs_has_entries {
+        let tmp = root.join(format!("ziped_{}", ts));
+        if fs::rename(&src_logs, &tmp).is_ok() {
+            let new_logs = root.join("logs");
+            let _ = fs::create_dir_all(&new_logs);
+            let pid_src = tmp.join("watchdog.pid");
+            if pid_src.exists() {
+                let _ = fs::copy(&pid_src, new_logs.join("watchdog.pid"));
+            }
+            logs_tmp = Some(tmp);
+        }
     }
 
-    let zip_name = format!("ziped_{}.zip", ts);
-    let logd = root.join("logd");
-    let _ = fs::create_dir_all(&logd);
-    let zip_path = logd.join(&zip_name);
-    let dir_for_thread = tmp;
-    // 一次性子线程：打包完成（或失败落标记）即退出，无常驻
-    let _ = std::thread::Builder::new()
-        .name("log_archiver".to_string())
-        .spawn(
-            move || match pack_dir_stored_zip(&dir_for_thread, &zip_path) {
-                Ok(()) => {
-                    let _ = fs::remove_dir_all(&dir_for_thread);
+    // ── devimp/：rename → 新建空目录接住本进程新写入 ──
+    let mut devimp_tmp: Option<PathBuf> = None;
+    let src_devimp = root.join("devimp");
+    let devimp_has_entries = fs::read_dir(&src_devimp)
+        .map(|mut d| d.next().is_some())
+        .unwrap_or(false);
+    if devimp_has_entries {
+        let tmp = root.join(format!("ziped_devimp_{}", ts));
+        if fs::rename(&src_devimp, &tmp).is_ok() {
+            let _ = fs::create_dir_all(&src_devimp);
+            devimp_tmp = Some(tmp);
+        }
+    }
+
+    // ── 单个一次性子线程：串行打包 + 预算清理 ──
+    let logs_zip = logs_tmp.is_some().then(|| format!("ziped_{}.zip", ts));
+    let devimp_zip = devimp_tmp.is_some().then(|| format!("devimp_{}.zip", ts));
+    if logs_tmp.is_some() || devimp_tmp.is_some() {
+        let logd = root.join("logd");
+        let _ = fs::create_dir_all(&logd);
+        let root = root.to_path_buf();
+        let logs_zip_name = format!("ziped_{}.zip", ts);
+        let devimp_zip_name = format!("devimp_{}.zip", ts);
+        let _ = std::thread::Builder::new()
+            .name("log_archiver".to_string())
+            .spawn(move || {
+                if let Some(dir) = logs_tmp {
+                    let zip_path = logd.join(&logs_zip_name);
+                    match pack_dir_stored_zip(&dir, &zip_path) {
+                        Ok(()) => {
+                            let _ = fs::remove_dir_all(&dir);
+                        }
+                        Err(_) => {
+                            let _ = fs::write(
+                                dir.join("ARCHIVE_FAILED.txt"),
+                                "zip packing failed; this directory was kept for inspection\n",
+                            );
+                        }
+                    }
                 }
-                Err(_) => {
-                    let _ = fs::write(
-                        dir_for_thread.join("ARCHIVE_FAILED.txt"),
-                        "zip packing failed; this directory was kept for inspection\n",
-                    );
+                if let Some(dir) = devimp_tmp {
+                    let zip_path = logd.join(&devimp_zip_name);
+                    match pack_dir_stored_zip(&dir, &zip_path) {
+                        Ok(()) => {
+                            let _ = fs::remove_dir_all(&dir);
+                        }
+                        Err(_) => {
+                            let _ = fs::write(
+                                dir.join("ARCHIVE_FAILED.txt"),
+                                "zip packing failed; this directory was kept for inspection\n",
+                            );
+                        }
+                    }
                 }
-            },
-        );
-    Some(zip_name)
+                // 两个 zip 均已落盘后才清点预算：此时总大小才包含新归档
+                enforce_logd_devimp_limit(&root);
+            });
+    }
+
+    (logs_zip, devimp_zip)
+}
+
+/// logd/ + devimp/ 预算清理：两目录总大小超过 LOGD_DEVIMP_MAX_BYTES 时，
+/// 按 mtime 从最旧文件逐个删除，直到总大小低于 LOGD_DEVIMP_TARGET_BYTES。
+/// 活跃写入文件（status/daemon/devimp 当前文件）mtime 最新，天然最后才轮到；
+/// devimp 写入器对被删文件可自愈（写入巡检发现 metadata Err 后重开重建）。
+/// 调用时机：启动归档打包完成后 + devimp 触顶换文件时（每次轮转最多增加
+/// 一个 128MB 文件，运行中触发频率极低，全目录 metadata 扫描开销可忽略）。
+fn enforce_logd_devimp_limit(root: &Path) {
+    let mut files: Vec<(std::time::SystemTime, u64, PathBuf)> = Vec::new();
+    let mut total: u64 = 0;
+    for dir in [root.join("logd"), root.join("devimp")] {
+        let mut paths: Vec<PathBuf> = Vec::new();
+        if collect_files(&dir, &mut paths).is_err() {
+            continue;
+        }
+        for p in paths {
+            let Ok(meta) = fs::metadata(&p) else {
+                continue;
+            };
+            let len = meta.len();
+            let mtime = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
+            total = total.saturating_add(len);
+            files.push((mtime, len, p));
+        }
+    }
+    if total <= LOGD_DEVIMP_MAX_BYTES {
+        return;
+    }
+    files.sort();
+    for (_, len, path) in &files {
+        if total < LOGD_DEVIMP_TARGET_BYTES {
+            break;
+        }
+        if fs::remove_file(path).is_ok() {
+            total = total.saturating_sub(*len);
+        }
+    }
 }
 
 /// 递归收集目录下全部普通文件（logs/ 实际为平铺结构，递归仅作防御）
@@ -1107,10 +1199,17 @@ fn pack_dir_stored_zip(dir: &Path, zip_path: &Path) -> std::io::Result<()> {
             .unwrap_or(f)
             .to_string_lossy()
             .replace('\\', "/");
-        let data = fs::read(f)?;
-        let crc = crc32_ieee(&data);
+        // 流式读：devimp 单文件软上限 128MB，整读入内存会瞬时翻倍内存占用；
+        // 先算 CRC 再写数据，两遍扫描换取常数级内存
+        let sz = f.metadata()?.len();
+        if sz > u32::MAX as u64 {
+            // ZIP32 大小字段上限（4GB）：归档文件集不应触及，跳过防写坏 zip
+            continue;
+        }
+        let mut src = fs::File::open(f)?;
+        let crc = crc32_file(&mut src)?;
         let n = name_rel.len() as u16;
-        let sz = data.len() as u32;
+        let sz = sz as u32;
         // local file header
         w.write_all(&0x04034b50u32.to_le_bytes())?;
         w.write_all(&20u16.to_le_bytes())?; // version needed: 2.0
@@ -1124,7 +1223,9 @@ fn pack_dir_stored_zip(dir: &Path, zip_path: &Path) -> std::io::Result<()> {
         w.write_all(&n.to_le_bytes())?;
         w.write_all(&0u16.to_le_bytes())?; // extra len
         w.write_all(name_rel.as_bytes())?;
-        w.write_all(&data)?;
+        // 文件数据流式拷贝（重开 fd 从头读）
+        let _ = src.seek(std::io::SeekFrom::Start(0));
+        std::io::copy(&mut src, &mut w)?;
         // central directory entry
         central.extend_from_slice(&0x02014b50u32.to_le_bytes());
         central.extend_from_slice(&20u16.to_le_bytes()); // version made by
@@ -1163,10 +1264,11 @@ fn pack_dir_stored_zip(dir: &Path, zip_path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// CRC32（IEEE 反射多项式 0xEDB88320），表驱动、首次调用时构建 256 项表
-fn crc32_ieee(data: &[u8]) -> u32 {
+/// CRC32（IEEE 反射多项式 0xEDB88320），表驱动、首次调用时构建 256 项表；
+/// `crc32_file` 为流式版本（8KB 分块），避免把 devimp 大文件整读进内存
+fn crc32_table() -> &'static [u32; 256] {
     static TABLE: std::sync::OnceLock<[u32; 256]> = std::sync::OnceLock::new();
-    let table = TABLE.get_or_init(|| {
+    TABLE.get_or_init(|| {
         let mut t = [0u32; 256];
         let mut i = 0usize;
         while i < 256 {
@@ -1184,10 +1286,22 @@ fn crc32_ieee(data: &[u8]) -> u32 {
             i += 1;
         }
         t
-    });
+    })
+}
+
+/// 流式计算文件 CRC32（8KB 分块，常数级内存）
+fn crc32_file(f: &mut fs::File) -> std::io::Result<u32> {
+    let table = crc32_table();
     let mut crc = 0xFFFF_FFFFu32;
-    for &b in data {
-        crc = table[((crc ^ b as u32) & 0xFF) as usize] ^ (crc >> 8);
+    let mut buf = [0u8; 8192];
+    loop {
+        let n = f.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        for &b in &buf[..n] {
+            crc = table[((crc ^ b as u32) & 0xFF) as usize] ^ (crc >> 8);
+        }
     }
-    !crc
+    Ok(!crc)
 }
