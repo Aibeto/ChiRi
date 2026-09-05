@@ -608,6 +608,10 @@ pub fn start_scheduler_thread(
                     let mode = mode_clone.lock().unwrap().clone();
                     let _ = utils::try_write_file(&mode_file_path, mode.as_bytes());
                     last_mode_file_write = Instant::now();
+                    // watchdog.pid 自愈：logs/ 被外部删除后该文件随目录消失，
+                    // WebUI stopScheduler 将无法终止看门狗（旧看门狗残留会把
+                    // daemon 再拉起，与重启实例形成双实例并行写两份日志）
+                    crate::logger::ensure_watchdog_pid_file();
                 }
 
                 // config.yaml 热重载联动：config_watcher 成功重载后置位。

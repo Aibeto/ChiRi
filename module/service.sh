@@ -33,7 +33,14 @@ mkdir -p "$LOG_DIR"
 #   echo "$(date): Joyose service disabled and data cleared." >> "$LOG_FILE"
 # fi
 
-# 3. 清理旧进程
+# 3. 清理旧进程（含旧看门狗）：重新执行本脚本（模块热更新/管理器重载）时
+#    若只 killall yumi，旧看门狗仍存活并在 3s 后把 daemon 再拉起——与新看门狗
+#    形成双 daemon 实例，devimp/status/daemon 日志各写两份。先按 pid 文件终止
+#    旧看门狗再清 daemon。
+if [ -f "$LOG_DIR/watchdog.pid" ]; then
+  kill "$(cat "$LOG_DIR/watchdog.pid" 2>/dev/null)" 2>/dev/null
+  rm -f "$LOG_DIR/watchdog.pid"
+fi
 killall -9 yumi > /dev/null 2>&1
 
 # 4. 设置权限

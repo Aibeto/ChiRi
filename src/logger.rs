@@ -233,8 +233,11 @@ pub fn update_level(level_str: &str) {
 const STATUS_LOG_REL: &str = "logs/status.csv";
 /// 单文件上限 8MB，保留 1 份备份；1s 一条约 250B，轮转周期约 6 小时
 const STATUS_LOG_MAX_BYTES: u64 = 8 * 1024 * 1024;
-/// 每 N 行巡检一次（轮转 + 被删自愈）；1s 一条时约 4 分钟巡检一次
-const STATUS_CHECK_EVERY: u64 = 256;
+/// 每 N 行巡检一次（轮转 + 被删自愈）。常驻句柄在文件被外部删除后指向
+/// 孤儿 inode，写入不报错、只能靠巡检发现——间隔过长会长时间"无文件可读"
+/// （logs/ 整目录被删后最长 256s 才重建 status.csv）。1s 一行时 16 行 ≈
+/// 16s 自愈窗口，stat 开销可忽略。
+const STATUS_CHECK_EVERY: u64 = 16;
 
 /// CSV 表头（列序由 status_log_snapshot 保证对齐）：
 /// ts,type,mode,package,charge,screen_on,batt_temp,cpu_temp,thermal_cap_pct,thermal_free_pct,
@@ -803,6 +806,38 @@ pub fn devimp_prepare() {
     let dir = common::get_module_root().join(DEVIMP_DIR_REL);
     let _ = fs::create_dir_all(&dir);
     devimp_prune(None);
+}
+
+/// logs/watchdog.pid 运行时自愈：logs/ 目录被外部删除时该文件随目录一起
+/// 消失，WebUI「关闭调度」靠它定位并终止看门狗——缺失时 stopScheduler 只能
+/// killall yumi 杀不死看门狗，看门狗 3s 后把 daemon 再拉起；用户此时手动
+/// 重启（action.sh）又清不掉无 pid 可寻的旧看门狗，最终新旧两个 daemon
+/// 实例并行，devimp/status/daemon 日志各写两份。
+/// 看门狗 sh 以 `echo $$ > pidfile` 记录自身 PID，而 daemon 正是该 sh 的
+/// 前台子进程（service.sh/action.sh 的 "$DAEMON"），`getppid()` 即看门狗 PID。
+/// 由两套 scheduler_ipc 的 5s 周期块调用；文件存在时零开销直返。
+pub fn ensure_watchdog_pid_file() {
+    let root = common::get_module_root();
+    let pid_path = root.join("logs/watchdog.pid");
+    if pid_path.exists() {
+        return;
+    }
+    if fs::create_dir_all(root.join("logs")).is_err() {
+        return;
+    }
+    let ppid = unsafe { libc::getppid() };
+    // ppid <= 1：daemon 非看门狗前台子进程（调试直跑/看门狗已被杀后的孤儿态，
+    // 由 init 收养），不写防 stopScheduler 误杀无关进程
+    if ppid <= 1 {
+        return;
+    }
+    // 校验父进程确为看门狗 sh（comm 为 sh/mksh），进一步防 pid 复用误写
+    let comm = fs::read_to_string(format!("/proc/{ppid}/comm")).unwrap_or_default();
+    let comm = comm.trim();
+    if comm != "sh" && comm != "mksh" {
+        return;
+    }
+    let _ = fs::write(&pid_path, ppid.to_string());
 }
 
 /// tick 行：CLG/akmode 调频决策轨迹（每决策 tick × 每核心组一行）。

@@ -98,7 +98,9 @@ cd webui && npm run type-check
 
 - devimp 锁序约定（防死锁）：`DEVIMP_MODE` / `DEVIMP_FG_PKG` / `DEVIMP_TICK_STATE` / `DEVIMP_WRITER` 四把锁**一律不嵌套持有**——WRITER 是写路径汇合点（scheduler_ipc/CLG Worker/亲和线程都会写），其临界区内只做文件 IO 与自身状态修改，绝不获取其他锁；曾在 WRITER 临界区内清 TICK_STATE（包名切换/触顶）已全部移出（`set_devimp_package` 用 `pkg_switched` 标志、`devimp_check` 返回 rotated 在锁外清）。新增写入路径必须遵守，否则反向获取即成环。
 
-- status 写入用常驻 append 句柄（`STATUS_WRITER`，每行仅 1 次 write syscall）+ 每 256 行巡检（8MB 轮转 1 备份、被删自愈）。禁止恢复每行 open/stat 的 `append_aux_log` 模式，勿再拆分 power/telemetry/foreground 独立文件。
+- status 写入用常驻 append 句柄（`STATUS_WRITER`，每行仅 1 次 write syscall）+ 每 16 行巡检（8MB 轮转 1 备份、被删自愈；常驻句柄在文件被删后指向孤儿 inode 写入不报错，只能靠巡检发现，16 行 ≈16s 自愈窗口，勿调回 256——会长时间"无文件可读"）。禁止恢复每行 open/stat 的 `append_aux_log` 模式，勿再拆分 power/telemetry/foreground 独立文件。
+
+- `logs/watchdog.pid` 运行时自愈：`logger::ensure_watchdog_pid_file()` 由两套 scheduler_ipc 的 5s 周期块（mode file 重写处）调用——logs/ 被外部删除后 pid 文件随目录消失，stopScheduler 将无法终止看门狗。看门狗 sh 是 daemon 的父进程（`"$DAEMON"` 前台拉起），`getppid()` 即其 PID；仅当文件缺失、ppid>1 且父进程 comm 为 sh/mksh 时重建（防调试直跑/孤儿态误写）。
 
 - 启动日志归档：main 在 `create_dir_all(logs)`/`logger::init` 之前调 `logger::archive_logs_on_startup`——把上一轮整个 `logs/` 原子 rename 为同级 `ziped_<毫秒时间戳>` 临时目录，交一次性子线程 `log_archiver` 打包为 `logd/ziped_<ts>.zip`（手写 stored ZIP，零新依赖，勿引入 zip/flate2）后删除临时目录并自然退出；打包失败保留临时目录并写 ARCHIVE_FAILED.txt（此时 logger 未 init 无法打点）。必须复制回 `logs/watchdog.pid`——看门狗先于 daemon 启动、WebUI stopScheduler 靠它终止看门狗，归档带走它会导致「关闭调度」失效。
 
@@ -340,7 +342,7 @@ WebUI 侧：
 
 - 日志文件被删不能崩：`src/logger.rs` 用自实现 `SelfHealingAppender`（替换 log4rs `RollingFileAppender`），每次写入按路径 `create+append` 重新打开，`daemon.log` 被外部删除会自动重建；循环轮转与锁上锁全程 `Result`/剥除 poison，绝不 `unwrap`。别改回 log4rs 滚动追加器。
 
-- 看门狗崩溃自愈 + 进程模型：`service.sh`（开机）/`action.sh`（手动启动）用 `nohup sh -c` 拉起统一定义的看门狗循环，启动时把自己 PID 写入 `logs/watchdog.pid`。循环内 `"$DAEMON"` 崩溃返回非 0 仍会 `sleep 3` 自动重启；仅当存在卸载标记 `$MODDIR/.uninstalling`（`uninstall.sh` 开头 touch）或主进程二进制被删时才 `break` 退出。旧写法 `"$1" || exit 0` 在 yumi 崩溃（返回非 0）时会直接让看门狗退出、无法自愈，禁止复用。
+- 看门狗崩溃自愈 + 进程模型：`service.sh`（开机）/`action.sh`（手动启动）用 `nohup sh -c` 拉起统一定义的看门狗循环，启动时把自己 PID 写入 `logs/watchdog.pid`。循环内 `"$DAEMON"` 崩溃返回非 0 仍会 `sleep 3` 自动重启；仅当存在卸载标记 `$MODDIR/.uninstalling`（`uninstall.sh` 开头 touch）或主进程二进制被删时才 `break` 退出。旧写法 `"$1" || exit 0` 在 yumi 崩溃（返回非 0）时会直接让看门狗退出、无法自愈，禁止复用。`service.sh` 开头的清理必须先按 `logs/watchdog.pid` kill 旧看门狗再 `killall yumi`（脚本被重新执行——模块热更新/管理器重载——时只 killall 会留下旧看门狗，3s 后与新看门狗各拉起一个 daemon，形成双实例并行写两份 devimp/status 日志）；`action.sh` 已有同口径清理。
 
 - WebUI「关闭调度」而非重启：`bridge.ts::stopScheduler` 先按 `logs/watchdog.pid` kill 掉看门狗（防止其把主进程再拉起），再 `killall -9 yumi`，实现彻底停止调度；恢复需点击模块 Action（`action.sh` 手动启动）或重启设备。不要在 ksu.exec 里用 `nohup ... &` 后台拉起——`ksu.exec` 返回会清理执行 shell 的进程组，直接拉起会被一并杀掉；要启动调度一律调用模块自身的 service.sh/action.sh（内含 `nohup`，且 disable_boost 幂等）。
 
