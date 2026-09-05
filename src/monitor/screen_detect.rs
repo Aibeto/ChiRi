@@ -22,14 +22,20 @@ use std::error::Error;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process;
+use std::sync::mpsc::SyncSender;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
+use crate::common::DaemonEvent;
 use crate::fluent_args;
 use crate::i18n::{t, t_with_args};
 
-fn update_state_if_changed(state_arc: &Arc<Mutex<bool>>, new_state: bool, source: &str) {
+/// 更新共享屏幕状态；返回是否发生状态变化。
+/// 变化时由调用方决定是否转发 `DaemonEvent::ScreenStateChange`：
+/// uevent 线程直推（零轮询延迟），verify_screen_state 自愈路径的变化
+/// 由 app_detect 主循环兜底转发（其循环本身每轮比对 arc）。
+fn update_state_if_changed(state_arc: &Arc<Mutex<bool>>, new_state: bool, source: &str) -> bool {
     let mut state_lock = state_arc.lock().unwrap();
     if *state_lock != new_state {
         debug!(
@@ -59,6 +65,9 @@ fn update_state_if_changed(state_arc: &Arc<Mutex<bool>>, new_state: bool, source
                 &fluent_args!("state" => state_str)
             )
         );
+        true
+    } else {
+        false
     }
 }
 
@@ -109,7 +118,10 @@ pub fn verify_screen_state(state_arc: &Arc<Mutex<bool>>) {
     }
 }
 
-pub fn monitor_screen_state_uevent(state_arc: Arc<Mutex<bool>>) -> Result<(), Box<dyn Error>> {
+pub fn monitor_screen_state_uevent(
+    state_arc: Arc<Mutex<bool>>,
+    tx: SyncSender<DaemonEvent>,
+) -> Result<(), Box<dyn Error>> {
     let mut socket = Socket::new(NETLINK_KOBJECT_UEVENT)?;
     let sa = SocketAddr::new(process::id(), 1);
     socket.bind(&sa)?;
@@ -139,10 +151,20 @@ pub fn monitor_screen_state_uevent(state_arc: Arc<Mutex<bool>>) -> Result<(), Bo
                                     &fluent_args!("action" => action.as_str())
                                 )
                             );
-                            if action == "early_suspend" {
-                                update_state_if_changed(&state_arc, false, "power");
+                            let new_state = if action == "early_suspend" {
+                                Some(false)
                             } else if action == "late_resume" {
-                                update_state_if_changed(&state_arc, true, "power");
+                                Some(true)
+                            } else {
+                                None
+                            };
+                            if let Some(state) = new_state {
+                                // 状态变化直接推送 ScreenStateChange：亮屏事件不再等
+                                // app_detect 息屏轮询（1s）转发，scenemode 下感知延迟
+                                // 从最坏 ~1.1s+ 降到 ~100ms（含背光稳定 sleep）
+                                if update_state_if_changed(&state_arc, state, "power") {
+                                    let _ = tx.send(DaemonEvent::ScreenStateChange(state));
+                                }
                             }
                         }
                     } else if event.subsystem == "backlight" && event.action == ActionType::Change {
@@ -167,7 +189,10 @@ pub fn monitor_screen_state_uevent(state_arc: Arc<Mutex<bool>>) -> Result<(), Bo
                                     )
                                 )
                             );
-                            update_state_if_changed(&state_arc, state, "backlight");
+                            // 同 power 分支：变化直推事件，消除 app_detect 轮询延迟
+                            if update_state_if_changed(&state_arc, state, "backlight") {
+                                let _ = tx.send(DaemonEvent::ScreenStateChange(state));
+                            }
                         } else {
                             debug!(
                                 "{}",

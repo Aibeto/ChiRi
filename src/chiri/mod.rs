@@ -65,6 +65,13 @@ const SCENEMODE_COOLDOWN: Duration = Duration::from_secs(300);
 const BATT_TEMP_PATH: &str = "/sys/class/power_supply/battery/temp";
 /// 电池状态节点（标准 power_supply 接口）：区分充电/放电
 const BATT_STATUS_PATH: &str = "/sys/class/power_supply/battery/status";
+/// 热保护解除斜坡步长：压制加深立即生效，解除方向每个采样周期（2s）最多
+/// 恢复 0.15。温度围绕阈值震荡时，若解除立即全量恢复，温度马上反弹触发
+/// 再压制——cap 在 40/70/100 间以 ~8s 周期反复跳变（bang-bang 振荡，
+/// devimp 实测 8475 高负载游戏 84% 时间处于压制），每次跳变都把
+/// current_perf 砸回低位再缓慢爬升，表现为周期性掉帧卡顿。限速解除后
+/// 恢复过程 8s 级渐进，温度反弹会在中途重新压制，不再打穿阈值。
+const THERMAL_UNPRESS_STEP: f32 = 0.15;
 
 /// 读电池温度（毫摄氏度）→ °C；节点缺失或读失败返回 None
 fn read_battery_temp() -> Option<f32> {
@@ -90,8 +97,77 @@ fn read_battery_charge_state() -> String {
     }
 }
 
+/// 温度传感器滤波器：物理范围门 + 毛刺丢弃 + 3 样本中值 + 斜率限制。
+/// MTK soc_max 等合成温区读数跳变极大（devimp 实测 2s 内 91.5→57.2°C，
+/// 物理上不可能），直接用于带回滞的阈值判定会让 cap 以 ~8s 周期反复跳变。
+/// 逐级平滑后才能作为秒级热判定的输入。
+struct TempFilter {
+    /// 物理合理区间 [min_c, max_c]：节点异常/未初始化的读数直接丢弃
+    min_c: f32,
+    max_c: f32,
+    /// 相对上次有效输出的最大可信跳变（°C），超过视为传感器毛刺丢弃
+    max_jump: f32,
+    /// 输出斜率限制（°C/样本）：真实热质量决定温度不可能瞬间大幅变化
+    max_step: f32,
+    window: [f32; 3],
+    win_len: usize,
+    win_idx: usize,
+    last_out: Option<f32>,
+}
+
+impl TempFilter {
+    fn new(min_c: f32, max_c: f32, max_jump: f32, max_step: f32) -> Self {
+        Self {
+            min_c,
+            max_c,
+            max_jump,
+            max_step,
+            window: [0.0; 3],
+            win_len: 0,
+            win_idx: 0,
+            last_out: None,
+        }
+    }
+
+    /// 喂入一个原始样本，返回滤波后的温度。样本被丢弃时返回上次输出
+    /// （首个有效样本到来前返回 None）。
+    fn push(&mut self, raw: f32) -> Option<f32> {
+        // 1) 物理范围门：明显不合理的读数（如 0.3°C 的电池温度节点）丢弃
+        if !(raw >= self.min_c && raw <= self.max_c) {
+            return self.last_out;
+        }
+        // 2) 毛刺丢弃：相对上次输出的跳变超过真实热质量的上限（如 2s 内
+        //    降 25°C 实为压制后频率骤降叠加合成温区切换热点），丢弃防止
+        //    误触发"温度骤降→解除→反弹"的振荡
+        if let Some(prev) = self.last_out {
+            if (raw - prev).abs() > self.max_jump {
+                return self.last_out;
+            }
+        }
+        // 3) 3 样本中值：滤掉单点毛刺
+        self.window[self.win_idx] = raw;
+        self.win_idx = (self.win_idx + 1) % 3;
+        self.win_len = (self.win_len + 1).min(3);
+        let mut sorted = self.window[..self.win_len].to_vec();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let median = sorted[sorted.len() / 2];
+        // 4) 斜率限制：压制/解除两个方向都平滑，消除控制环振荡
+        let out = match self.last_out {
+            None => median,
+            Some(prev) => prev + (median - prev).clamp(-self.max_step, self.max_step),
+        };
+        self.last_out = Some(out);
+        self.last_out
+    }
+}
+
 /// 单传感器三级判定（带回滞）：>= 硬限压 hard_cap；>= 软限压 soft_cap；
 /// 回落到 软限-hyst 以下解除；回滞带内无压制状态保持、压制中先退到软限档防阶跃。
+///
+/// `temp_c` 必须传入 `TempFilter::push` 的输出——1s snap 块把滤波值写入
+/// `last_batt_temp`/`last_cpu_temp`，本函数所在的 2s 热块复用这两个变量。
+/// 不要直接喂原始读数：soc_max 等合成温区跳变极大（实测 2s 内 ±25°C），
+/// 绕过滤波会让 cap 以 ~8s 周期 bang-bang 振荡。新增调用方同样必须传滤波值。
 fn eval_thermal_cap(
     temp_c: f32,
     current: f32,
@@ -520,6 +596,10 @@ pub fn start_scheduler_thread(
             // 温度变化秒级，对带回滞的判定无影响）
             let mut last_batt_temp: Option<f32> = None;
             let mut last_cpu_temp: Option<f32> = None;
+            // 温度滤波：MTK soc_max 合成温区跳变极大（实测 2s ±25°C），不滤波
+            // 会让热保护 cap 以 ~8s 周期在 40/70/100 间震荡，高负载游戏周期性卡顿
+            let mut batt_filter = TempFilter::new(-10.0, 70.0, 10.0, 1.0);
+            let mut cpu_filter = TempFilter::new(5.0, 110.0, 12.0, 3.0);
             let loop_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             loop {
                 // 当前模式文件自愈：每 5 秒重写一次（即便内容未变也重写），
@@ -610,15 +690,24 @@ pub fn start_scheduler_thread(
                             .unwrap_or_else(|| "-".to_string())
                     };
                     let current_mode = mode_clone.lock().unwrap().clone();
-                    // 温度本秒读取一次，status/devimp/thermal（2s）三处共用
-                    last_batt_temp = if batt_sensor_exists { read_battery_temp() } else { None };
+                    // 温度本秒读取一次，status/devimp/thermal（2s）三处共用；
+                    // 滤波后的值参与热判定，原始值不再直供任何控制路径
+                    last_batt_temp = if batt_sensor_exists {
+                        read_battery_temp().and_then(|t| batt_filter.push(t))
+                    } else {
+                        None
+                    };
                     last_cpu_temp = temp_sensor_path
                         .as_ref()
                         .and_then(|p| crate::utils::read_f64_from_file(p).ok())
-                        .map(|v| (v / 1000.0) as f32);
+                        .map(|v| (v / 1000.0) as f32)
+                        .and_then(|t| cpu_filter.push(t));
                     // 前台包名实时取自 app_detect（含同模式切换；ModeChange 仅在
                     // 模式变化时才有事件，用事件维护会写过期包名）
                     let fg_package = crate::monitor::app_detect::get_current_package();
+                    // devimp 按前台包名分组：包名变化即切换新诊断文件（内部去重；
+                    // 空包名不切换，避免启动初期/瞬时空读反复开文件）
+                    crate::logger::set_devimp_package(&fg_package);
                     // 充放电状态：1s 一次读 status 节点（电流符号厂商方向不一，不可靠）
                     let charge_state = read_battery_charge_state();
                     crate::logger::status_log_snapshot(
@@ -643,11 +732,11 @@ pub fn start_scheduler_thread(
                         last_bpf_stats.2,
                     );
                     telemetry_log_counter += 1;
-                    // 开发记录 snap 行（1s）：环境上下文（开启 dev_record 才有 IO）
+                    // 开发记录 snap 行（1s）：环境上下文（开启 dev_record 才有 IO；
+                    // 前台包名由 set_devimp_package 已同步，行内自动填充）
                     if crate::logger::devimp_active() {
                         crate::logger::devimp_snap(
                             is_screen_on,
-                            &fg_package,
                             &fmt_opt(last_batt_temp, 1),
                             &fmt_opt(last_cpu_temp, 1),
                             &format!("{:.0}", thermal_cap_current * 100.0),
@@ -727,6 +816,15 @@ pub fn start_scheduler_thread(
                             // 双传感器缺失/读失败：保持现状，下轮重试
                             (None, None) => cur,
                         }
+                    };
+                    // 解除方向限速：压制加深立即生效，解除每周期最多 +0.15 逐级恢复。
+                    // 立即全量解除会让温度马上反弹再触发深压——cap 以 ~8s 周期在
+                    // 40/70/100 间跳变（bang-bang 振荡），每次跳变都把 current_perf
+                    // 砸回低位再缓慢爬升，是高负载游戏周期性卡顿的直接来源
+                    let new_cap = if new_cap > thermal_cap_current {
+                        (thermal_cap_current + THERMAL_UNPRESS_STEP).min(new_cap)
+                    } else {
+                        new_cap
                     };
                     let cap_changed = (new_cap - thermal_cap_current).abs() > f32::EPSILON;
                     let free_changed = (free_above - thermal_free_current).abs() > f32::EPSILON;
@@ -843,6 +941,15 @@ pub fn start_scheduler_thread(
                 match msg {
                     // --- 1. 屏幕状态事件 (息屏深度睡眠) ---
                     DaemonEvent::ScreenStateChange(screen_on) => {
+                        // 双源事件去重：uevent 线程直推 + app_detect verify 自愈兜底
+                        // 都可能上报同一次屏幕切换，状态未变化时只打点不处理
+                        if screen_on == is_screen_on {
+                            log::debug!("{}", t_with_args("scheduler-event-screen", &fluent_args!(
+                                "on" => screen_on.to_string(),
+                                "last" => is_screen_on.to_string()
+                            )));
+                            continue;
+                        }
                         log::debug!("{}", t_with_args("scheduler-event-screen", &fluent_args!(
                             "on" => screen_on.to_string(),
                             "last" => is_screen_on.to_string()

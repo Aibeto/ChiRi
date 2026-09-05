@@ -19,9 +19,10 @@ meta:
   author: "ChiRi" # 仅供文档参考
   language: "zh" # en / zh；以嵌入值为准，外部修改无效（会被快照自愈还原）
   loglevel: "INFO" # DEBUG / INFO / WARN / ERROR
-  # 开发记录开关：true 时守护进程向 devimp/devimp_<毫秒时间戳>.log
-  # 写入按核调度诊断日志（tick/snap/place/aff/core/event），
-  # 用于离线分析改善调度。布尔值必须裸写（serde_yaml 把带引号的
+  # 开发记录开关：true 时守护进程向 devimp/devimp_<前台包名>_<毫秒时间戳>.log
+  # 写入按核调度诊断日志（tick/snap/place/aff/core/event），前台包名切换自动
+  # 换新文件（单文件软上限 128MB，触顶换新文件继续写），用于离线分析改善调度。
+  # 布尔值必须裸写（serde_yaml 把带引号的
   # "true" 解析为字符串而非 bool）。允许外部修改（WebUI 开关 + 热重载）
   dev_record: false
 
@@ -96,16 +97,21 @@ CoreCtl:
 # CPU 温度只在极端热时参与（内核 95°C 温控才是主力）。
 # 豁免档 free_above：当前性能比已高于该值时不压制——高负载不挡路。
 # 仅对 CLG 模式生效（fast/akmode 不受影响）。
+# 温度输入经滤波（物理范围门 + 毛刺丢弃 + 3 样本中值 + 斜率限制）：
+# soc_max 等合成温区读数跳变极大（实测 2s 内 ±25°C），不滤波会让 cap
+# 以 ~8s 周期反复跳变（bang-bang 振荡，高负载游戏周期性卡顿）。
+# 解除方向限速：压制加深立即生效，解除每 2s 最多 +0.15 逐级恢复。
 Thermal:
   enabled: true
   # 电池软限（°C）：手机壳体开始发烫的临界点
   batt_soft_temp_c: 41
   # 电池硬限（°C）：手握明显发烫
   batt_hard_temp_c: 45
-  # CPU 软限（°C）：一般游戏不会到这里
-  cpu_soft_temp_c: 75
+  # CPU 软限（°C）：接近内核温控起控点才参与。soc_max 在大型游戏高负载下
+  # 常态 85°C+，阈值过低（如 75）会导致过半时间被软件压制、比官调更卡
+  cpu_soft_temp_c: 90
   # CPU 硬限（°C）：极端情况才触发
-  cpu_hard_temp_c: 85
+  cpu_hard_temp_c: 95
   # 软限触发后压到的性能比例
   soft_perf_cap: 0.70
   # 硬限触发后压到的性能比例（必须 <= soft_perf_cap）

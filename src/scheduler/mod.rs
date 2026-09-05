@@ -290,6 +290,16 @@ pub fn start_scheduler_thread(
                 match msg {
                     // --- 1. 屏幕状态事件 (息屏深度睡眠) ---
                     DaemonEvent::ScreenStateChange(screen_on) => {
+                        // 双源事件去重：uevent 线程直推 + app_detect verify 自愈兜底
+                        // 都可能上报同一次屏幕切换（screen_watcher 为共享层改动），
+                        // 状态未变化时只打点不处理，维持原有单事件行为
+                        if screen_on == is_screen_on {
+                            log::debug!("{}", t_with_args("scheduler-event-screen", &fluent_args!(
+                                "on" => screen_on.to_string(),
+                                "last" => is_screen_on.to_string()
+                            )));
+                            continue;
+                        }
                         log::debug!("{}", t_with_args("scheduler-event-screen", &fluent_args!(
                             "on" => screen_on.to_string(),
                             "last" => is_screen_on.to_string()

@@ -83,12 +83,16 @@ pub fn start_monitor(
 
     // 3. 启动屏幕状态监控线程
     log::debug!("{}", t("monitor-thread-start-screen"));
+    // uevent 线程直推 ScreenStateChange 事件：亮屏感知零轮询延迟，
+    // app_detect 的轮询转发退化为 verify 自愈兜底（双发由调度器消费端去重）
+    let tx_screen = tx.clone();
     thread::Builder::new()
         .name("screen_watcher".to_string())
         .spawn(move || {
-            if let Err(e) =
-                screen_detect::monitor_screen_state_uevent(screen_state_clone_for_watcher)
-            {
+            if let Err(e) = screen_detect::monitor_screen_state_uevent(
+                screen_state_clone_for_watcher,
+                tx_screen,
+            ) {
                 error!(
                     "{}",
                     t_with_args(

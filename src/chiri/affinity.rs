@@ -65,7 +65,10 @@ const BG_SCAN_WINDOW: usize = 64;
 const BG_LIST_EVERY_ROUNDS: u64 = 2;
 const PROMOTED_REVIEW_EVERY_ROUNDS: u64 = 2;
 const ONLINE_EVERY_ROUNDS: u64 = 4;
-const DEVL_ROW_EVERY_ROUNDS: u64 = 2;
+/// devimp 低频行（place/core）输出周期：2s/轮 × 4 = 8s 一轮。
+/// place 为前台线程全量快照（游戏可达数十线程），周期过长会丢放置变化
+/// 细节，过短则写入量过大——8s 是快照完整度与 IO 量的折衷
+const DEVL_ROW_EVERY_ROUNDS: u64 = 4;
 
 /// 线程迁移最小间隔（promote/demote 流程）：过于频繁的迁移带来 cache
 /// 冷却与调度抖动，负载窗口本身已做两窗/3 连防抖，这里只挡边界抖动

@@ -37,8 +37,11 @@ Thermal:
   enabled: true
   batt_soft_temp_c: 41
   batt_hard_temp_c: 45
-  cpu_soft_temp_c: 75
-  cpu_hard_temp_c: 85
+  # CPU 温度仅极端热时参与（内核 ~95°C 温控兜底）：合成温区在大型游戏高负载下
+  # 常态 85°C+，75/85 会导致过半时间被软件压制、比官调更卡；90/95 只在接近
+  # 内核起控点时提前轻压
+  cpu_soft_temp_c: 90
+  cpu_hard_temp_c: 95
   soft_perf_cap: 0.70
   hard_perf_cap: 0.40
   free_above: 0.80

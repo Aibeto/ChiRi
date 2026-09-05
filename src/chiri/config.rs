@@ -607,10 +607,10 @@ fn d_batt_hard_temp() -> f32 {
     45.0
 }
 fn d_cpu_soft_temp() -> f32 {
-    75.0
+    90.0
 }
 fn d_cpu_hard_temp() -> f32 {
-    85.0
+    95.0
 }
 fn d_thermal_soft_cap() -> f32 {
     0.70
