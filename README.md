@@ -10,10 +10,15 @@
 
 ## 项目介绍
 
-**ChiRi**是一个以日用流畅度为主的Android CPU调度，以日用流畅度为主，其次是轻度游戏
+**ChiRi**是一个以日用场景为主的Android CPU调度，以流畅度为主，其次是轻度游戏
 低功耗并不是主要目标，但并不代表极差的续航水平
 中高负载日用场景尚可，游戏差点意思（
 请记住，这不是一个以游戏性能为主的调度。
+
+## 基石
+
+- 模块基于 [yumi](https://github.com/imacte/yumi) 调度，ChiRi 调度仍有部分核心代码来自 [yumi](https://github.com/imacte/yumi) ，并保留回退兜底能力。
+- 线程调整功能有部分参考了 [AppOptR](https://gitee.com/sutoliu/AppOptR) 。
 
 ### 主要特性
 
@@ -75,6 +80,8 @@ ChiRi CLG 调度核心，使用白名单适配soc
 
 ### 常见问题
 
+待更新
+
 ## 项目统计
 
 <div align="center">
@@ -93,13 +100,21 @@ ChiRi CLG 调度核心，使用白名单适配soc
 
 ## 联系方式
 
+- **QQ群** - 1091201364
 - **GitHub Issues** - [项目问题和建议](https://github.com/Aibeto/ChiRi/issues)
+
+## 开发源代码许可
+
+| Project | License  | Repository                                 |
+| :------ | :------- | :----------------------------------------- |
+| yumi    | GPL v3.0 | [GitHub](https://github.com/imacte/yumi)   |
+| AppOptR | GPL v3.0 | [Gitee](https://gitee.com/sutoliu/AppOptR) |
+| ChiRi   | GPL v3.0 | [GitHub](https://github.com/Aibeto/ChiRi)  |
 
 ---
 
 <div align="center">
 
 <sub>ChiRi - 千漓</sub>
-<sub>Based on imacte/yumi</sub>
 
 </div>

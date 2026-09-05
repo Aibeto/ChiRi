@@ -1,5 +1,7 @@
 [阅读中文文档](README.md)
 
+> This document is out of date.
+
 # yumi - Intelligent CPU Scheduling Controller
 
 <div align="center">
@@ -15,7 +17,7 @@
 
 </div>
 
------
+---
 
 ## 📋 About The Project
 
@@ -23,23 +25,23 @@
 
 ### ✨ Key Features
 
-  * 🔄 **Smart Dynamic Mode Switching** — Automatically adjusts performance modes based on the current foreground application.
-  * 🎯 **FAS Frame-Aware Scheduling** — Built-in PID controller + frame time analysis engine for per-frame dynamic frequency scaling, balancing smoothness and power in gaming scenarios.
-  * 📊 **eBPF Kernel-Level Monitoring** — Zero-overhead CPU utilization and frame rate collection via `sched_switch` tracepoint and `queueBuffer` uprobe.
-  * ⚡ **CPU Load Governor (CLG)** — Adaptive frequency scaling based on real-time eBPF load data, replacing traditional kernel governors for everyday non-gaming scenarios.
-  * 🌡️ **Temperature-Aware Throttling** — Reads CPU temperature sensors in real time, automatically throttling when thresholds are exceeded.
-  * 🌙 **Smart Screen-Off Power Saving** — Automatically enters Doze mode when the screen is off, enforcing a low performance ceiling for maximum power savings.
-  * 🌐 **Lightweight WebUI** — No extra app required; manage all scheduling settings directly from your browser.
-  * 📱 **App Rule Management** — Set dedicated performance strategies for different applications, with per-app frame rate gear and margin support.
-  * 🔧 **Highly Configurable** — YAML configuration files support deep customization with hot-reload — no restart needed.
-  * 🌍 **Multi-Language Support** — Fluent-based i18n internationalization system, supporting Chinese and English log output.
+- 🔄 **Smart Dynamic Mode Switching** — Automatically adjusts performance modes based on the current foreground application.
+- 🎯 **FAS Frame-Aware Scheduling** — Built-in PID controller + frame time analysis engine for per-frame dynamic frequency scaling, balancing smoothness and power in gaming scenarios.
+- 📊 **eBPF Kernel-Level Monitoring** — Zero-overhead CPU utilization and frame rate collection via `sched_switch` tracepoint and `queueBuffer` uprobe.
+- ⚡ **CPU Load Governor (CLG)** — Adaptive frequency scaling based on real-time eBPF load data, replacing traditional kernel governors for everyday non-gaming scenarios.
+- 🌡️ **Temperature-Aware Throttling** — Reads CPU temperature sensors in real time, automatically throttling when thresholds are exceeded.
+- 🌙 **Smart Screen-Off Power Saving** — Automatically enters Doze mode when the screen is off, enforcing a low performance ceiling for maximum power savings.
+- 🌐 **Lightweight WebUI** — No extra app required; manage all scheduling settings directly from your browser.
+- 📱 **App Rule Management** — Set dedicated performance strategies for different applications, with per-app frame rate gear and margin support.
+- 🔧 **Highly Configurable** — YAML configuration files support deep customization with hot-reload — no restart needed.
+- 🌍 **Multi-Language Support** — Fluent-based i18n internationalization system, supporting Chinese and English log output.
 
 ## 🔧 System Requirements
 
-  * **Android Version**: Android 8.0 (API 26) and above.
-  * **Architecture Support**: ARM64 (AArch64).
-  * **Permissions Required**: Root access.
-  * **Kernel Requirements**: eBPF support (`CONFIG_BPF`, `CONFIG_BPF_SYSCALL`, etc.).
+- **Android Version**: Android 8.0 (API 26) and above.
+- **Architecture Support**: ARM64 (AArch64).
+- **Permissions Required**: Root access.
+- **Kernel Requirements**: eBPF support (`CONFIG_BPF`, `CONFIG_BPF_SYSCALL`, etc.).
 
 ## 🏗️ System Architecture
 
@@ -75,25 +77,25 @@ yumi uses a **Monitor + Scheduler** dual-thread architecture, decoupling data co
 
 The system uses five core events to drive scheduling decisions:
 
-| Event | Source | Description |
-| :--- | :--- | :--- |
-| `ModeChange` | app_detect | Mode change triggered by foreground app switch; carries package name, PID, mode, and temperature. |
-| `FrameUpdate` | fps_monitor (eBPF) | Triggered on each frame render completion; carries frame interval (nanosecond precision). |
-| `SystemLoadUpdate` | cpu_monitor (eBPF) | Triggered every 200ms; carries per-core utilization and foreground app's heaviest thread utilization. |
-| `ScreenStateChange` | screen_detect | Screen on/off events. |
-| `ConfigReload` | config_watcher | Configuration file change events. |
+| Event               | Source             | Description                                                                                           |
+| :------------------ | :----------------- | :---------------------------------------------------------------------------------------------------- |
+| `ModeChange`        | app_detect         | Mode change triggered by foreground app switch; carries package name, PID, mode, and temperature.     |
+| `FrameUpdate`       | fps_monitor (eBPF) | Triggered on each frame render completion; carries frame interval (nanosecond precision).             |
+| `SystemLoadUpdate`  | cpu_monitor (eBPF) | Triggered every 200ms; carries per-core utilization and foreground app's heaviest thread utilization. |
+| `ScreenStateChange` | screen_detect      | Screen on/off events.                                                                                 |
+| `ConfigReload`      | config_watcher     | Configuration file change events.                                                                     |
 
 ## 🎯 Performance Modes
 
 yumi offers five performance modes:
 
-| Mode | Icon | Characteristics | Use Case |
-| :--- | :--- | :--- | :--- |
-| **Powersave** | 🔋 | Maximizes battery life; CLG with low performance ceiling. | Standby, light use, reading. |
-| **Balance** | ⚖️ | CLG adaptive frequency scaling; optimal balance between performance and power. | Daily use, social apps. |
-| **Performance** | ⚡ | CLG high-responsiveness configuration; prioritizes performance. | Large applications, light gaming. |
-| **Fast** | 🚀 | CLG maximum performance output. | Heavy tasks, performance testing. |
-| **FAS (Frame-Aware Scheduling)** | 🎯 | PID controller analyzes frame times in real time; per-frame dynamic frequency scaling with automatic gear switching. | Gaming — balances smoothness and power saving. |
+| Mode                             | Icon | Characteristics                                                                                                      | Use Case                                       |
+| :------------------------------- | :--- | :------------------------------------------------------------------------------------------------------------------- | :--------------------------------------------- |
+| **Powersave**                    | 🔋   | Maximizes battery life; CLG with low performance ceiling.                                                            | Standby, light use, reading.                   |
+| **Balance**                      | ⚖️   | CLG adaptive frequency scaling; optimal balance between performance and power.                                       | Daily use, social apps.                        |
+| **Performance**                  | ⚡   | CLG high-responsiveness configuration; prioritizes performance.                                                      | Large applications, light gaming.              |
+| **Fast**                         | 🚀   | CLG maximum performance output.                                                                                      | Heavy tasks, performance testing.              |
+| **FAS (Frame-Aware Scheduling)** | 🎯   | PID controller analyzes frame times in real time; per-frame dynamic frequency scaling with automatic gear switching. | Gaming — balances smoothness and power saving. |
 
 ### CLG (CPU Load Governor) Overview
 
@@ -105,12 +107,12 @@ When the screen is off, the system automatically enters **Doze mode**, where CLG
 
 yumi includes a lightweight built-in WebUI. All management operations can be performed through a browser — no extra app installation needed.
 
-  * **Mode Switching** — Switch performance modes in real time.
-  * **App Rule Management** — Configure dedicated performance strategies for different apps.
-  * **Configuration Editing** — Edit YAML configuration files online.
-  * **Log Viewer** — View yumi daemon logs in real time.
+- **Mode Switching** — Switch performance modes in real time.
+- **App Rule Management** — Configure dedicated performance strategies for different apps.
+- **Configuration Editing** — Edit YAML configuration files online.
+- **Log Viewer** — View yumi daemon logs in real time.
 
------
+---
 
 ### 🛠️ Scheduling Core (yumi)
 
@@ -118,30 +120,30 @@ The core of yumi is driven by a Rust daemon, **yumi**. It uses eBPF kernel probe
 
 #### Core Features
 
-  * **High-Performance Rust Implementation**: Extremely low system resource usage and minimal power consumption.
-  * **eBPF Kernel-Level Monitoring**: Precisely collects per-core CPU utilization and thread runtime via `sched_switch` tracepoint; captures rendering frame intervals with zero overhead via `queueBuffer` uprobe.
-  * **Real-time Configuration Monitoring**: Supports hot-reloading for `config.yaml` and `rules.yaml`, allowing mode switches without a reboot.
-  * **Built-in FAS Engine**: PID controller-driven frame-aware scheduling with automatic capacity weight detection, per-app configuration, and CPU utilization-assisted frequency scaling.
-  * **CLG Load Governor**: Adaptive frequency scaling based on real-time eBPF load data, replacing the kernel's native governor.
-  * **Multi-Language Internationalization**: Fluent-based i18n system supporting Chinese and English log output.
+- **High-Performance Rust Implementation**: Extremely low system resource usage and minimal power consumption.
+- **eBPF Kernel-Level Monitoring**: Precisely collects per-core CPU utilization and thread runtime via `sched_switch` tracepoint; captures rendering frame intervals with zero overhead via `queueBuffer` uprobe.
+- **Real-time Configuration Monitoring**: Supports hot-reloading for `config.yaml` and `rules.yaml`, allowing mode switches without a reboot.
+- **Built-in FAS Engine**: PID controller-driven frame-aware scheduling with automatic capacity weight detection, per-app configuration, and CPU utilization-assisted frequency scaling.
+- **CLG Load Governor**: Adaptive frequency scaling based on real-time eBPF load data, replacing the kernel's native governor.
+- **Multi-Language Internationalization**: Fluent-based i18n system supporting Chinese and English log output.
 
 #### Feature Modules
 
-| Feature Module | Description |
-| :--- | :--- |
-| **eBPF CPU Monitor** | Collects per-core idle/busy time and thread runtime via `sched_switch` tracepoint, with real-time state compensation (compensating for tasks currently executing but not yet triggering a context switch). |
-| **eBPF FPS Monitor** | Captures frame submission events via `queueBuffer` uprobe, with kernel-side PID filtering and zero-copy perf event transport to userspace. |
-| **FAS Frame-Aware Scheduling** | PID controller-driven; analyzes frame intervals in real time and maps them to CPU frequency via perf_index (0.0–1.0) for per-frame dynamic frequency scaling. |
-| **CLG Load Governor** | Adaptive frequency scaling based on real-time eBPF load data, with independent per-cluster control and up/down rate limiting. |
-| **CPU Frequency Control** | FastWriter high-performance sysfs writer with deduplication, unmount, and frequency verification; locked-frequency writes to each core cluster. |
-| **Auto Capacity Weight** | Runtime detection of each core cluster's `cpu_capacity` to automatically compute capacity_weight — no manual core architecture configuration needed. |
-| **Smart Screen-Off Power Saving** | Auto-enters Doze mode when screen is off with CLG forced into extreme power-saving configuration; auto-restores on screen on. |
-| **Temperature-Aware Throttling** | Real-time CPU temperature monitoring; limits FAS performance ceiling when threshold is exceeded. |
-| **I/O Scheduler Optimization** | Iterates over all block devices with customizable I/O schedulers, read-ahead size, merge policy, and iostats parameters. |
-| **Screen State Detection** | Monitors power/backlight events via Netlink uevent — zero-polling screen on/off detection. |
-| **Foreground App Detection** | Reads `top-app` cgroup process list with non-blocking debounce; automatically filters IMEs and system processes. |
+| Feature Module                    | Description                                                                                                                                                                                                |
+| :-------------------------------- | :--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **eBPF CPU Monitor**              | Collects per-core idle/busy time and thread runtime via `sched_switch` tracepoint, with real-time state compensation (compensating for tasks currently executing but not yet triggering a context switch). |
+| **eBPF FPS Monitor**              | Captures frame submission events via `queueBuffer` uprobe, with kernel-side PID filtering and zero-copy perf event transport to userspace.                                                                 |
+| **FAS Frame-Aware Scheduling**    | PID controller-driven; analyzes frame intervals in real time and maps them to CPU frequency via perf_index (0.0–1.0) for per-frame dynamic frequency scaling.                                              |
+| **CLG Load Governor**             | Adaptive frequency scaling based on real-time eBPF load data, with independent per-cluster control and up/down rate limiting.                                                                              |
+| **CPU Frequency Control**         | FastWriter high-performance sysfs writer with deduplication, unmount, and frequency verification; locked-frequency writes to each core cluster.                                                            |
+| **Auto Capacity Weight**          | Runtime detection of each core cluster's `cpu_capacity` to automatically compute capacity_weight — no manual core architecture configuration needed.                                                       |
+| **Smart Screen-Off Power Saving** | Auto-enters Doze mode when screen is off with CLG forced into extreme power-saving configuration; auto-restores on screen on.                                                                              |
+| **Temperature-Aware Throttling**  | Real-time CPU temperature monitoring; limits FAS performance ceiling when threshold is exceeded.                                                                                                           |
+| **I/O Scheduler Optimization**    | Iterates over all block devices with customizable I/O schedulers, read-ahead size, merge policy, and iostats parameters.                                                                                   |
+| **Screen State Detection**        | Monitors power/backlight events via Netlink uevent — zero-polling screen on/off detection.                                                                                                                 |
+| **Foreground App Detection**      | Reads `top-app` cgroup process list with non-blocking debounce; automatically filters IMEs and system processes.                                                                                           |
 
------
+---
 
 ### 🎯 FAS Frame-Aware Scheduling — In Depth
 
@@ -151,24 +153,24 @@ FAS (Frame Aware Scheduling) is yumi's built-in frame-aware dynamic frequency sc
 
 The FAS engine maintains a **perf_index** (performance index, range 0.0–1.0) and adjusts it via a PID controller based on real-time frame time feedback:
 
-  * **Frame time exceeds budget** → PID output is negative → perf_index rises → CPU frequency increases
-  * **Frame time meets budget** → PID output is positive → perf_index slowly falls → CPU frequency decreases
-  * **perf_index is mapped to actual frequency steps for each core cluster via capacity_weight**
+- **Frame time exceeds budget** → PID output is negative → perf_index rises → CPU frequency increases
+- **Frame time meets budget** → PID output is positive → perf_index slowly falls → CPU frequency decreases
+- **perf_index is mapped to actual frequency steps for each core cluster via capacity_weight**
 
 The PID controller uses three configurable coefficients (kp, ki, kd) to control proportional, integral, and derivative responses respectively. The integral term features a leak mechanism to prevent saturation, and the derivative term uses low-pass filtering to suppress noise.
 
 #### Core Mechanisms
 
-  * **Automatic Frame Rate Gear Switching**: Supports multiple frame rate targets (e.g., 30/60/90/120/144 fps) with automatic up/downshift based on actual rendering capability. Before downshifting, the engine first attempts a boost to confirm whether a downshift is truly necessary, preventing false downshifts. Supports low-perf stable-framerate upgrades and extreme framerate native gear detection.
-  * **CPU Load-Assisted Frequency Scaling**: Uses the foreground heaviest thread utilization collected via eBPF (EMA-smoothed) to apply a util_cap soft ceiling on perf_index, preventing frequency from running high with no actual load.
-  * **Auto Capacity Weight Detection**: Reads each core cluster's `cpu_capacity` at runtime and automatically computes capacity_weight (higher weight for big cores) — no manual core architecture configuration needed.
-  * **Per-App Configuration**: Supports individual frame rate gear lists and frame rate margins for each game, with runtime dynamic matching to the nearest gear.
-  * **Loading Scene Detection**: Automatically identifies game loading screens (sustained heavy frames). Upon entering loading state, it locks to mid-to-high frequencies and resumes normal scheduling with protection after loading ends.
-  * **Frequency Hysteresis**: Hysteresis bands are set between adjacent frequency steps to prevent rapid toggling at boundaries.
-  * **Jank Cooldown**: After a severe frame drop, the engine enters a cooldown period during which it maintains a higher frequency to avoid triggering a chain of stutters. Jank response intensity increases exponentially with consecutive drops.
-  * **Frequency Verification & Recovery**: Periodically reads back actual frequency to detect external overrides (e.g., thermal throttling), automatically unmounts and rewrites.
-  * **Windowed Mode Support**: FAS state supports suspend/resume (5-second grace period). After a brief interruption, scheduling can resume quickly without re-initialization.
-  * **perf_floor Deadlock Rescue**: Detects situations where perf_index is stuck at the floor for extended periods while frame rate is severely insufficient, automatically resetting to cold-boot performance level.
+- **Automatic Frame Rate Gear Switching**: Supports multiple frame rate targets (e.g., 30/60/90/120/144 fps) with automatic up/downshift based on actual rendering capability. Before downshifting, the engine first attempts a boost to confirm whether a downshift is truly necessary, preventing false downshifts. Supports low-perf stable-framerate upgrades and extreme framerate native gear detection.
+- **CPU Load-Assisted Frequency Scaling**: Uses the foreground heaviest thread utilization collected via eBPF (EMA-smoothed) to apply a util_cap soft ceiling on perf_index, preventing frequency from running high with no actual load.
+- **Auto Capacity Weight Detection**: Reads each core cluster's `cpu_capacity` at runtime and automatically computes capacity_weight (higher weight for big cores) — no manual core architecture configuration needed.
+- **Per-App Configuration**: Supports individual frame rate gear lists and frame rate margins for each game, with runtime dynamic matching to the nearest gear.
+- **Loading Scene Detection**: Automatically identifies game loading screens (sustained heavy frames). Upon entering loading state, it locks to mid-to-high frequencies and resumes normal scheduling with protection after loading ends.
+- **Frequency Hysteresis**: Hysteresis bands are set between adjacent frequency steps to prevent rapid toggling at boundaries.
+- **Jank Cooldown**: After a severe frame drop, the engine enters a cooldown period during which it maintains a higher frequency to avoid triggering a chain of stutters. Jank response intensity increases exponentially with consecutive drops.
+- **Frequency Verification & Recovery**: Periodically reads back actual frequency to detect external overrides (e.g., thermal throttling), automatically unmounts and rewrites.
+- **Windowed Mode Support**: FAS state supports suspend/resume (5-second grace period). After a brief interruption, scheduling can resume quickly without re-initialization.
+- **perf_floor Deadlock Rescue**: Detects situations where perf_index is stuck at the floor for extended periods while frame rate is severely insufficient, automatically resetting to cold-boot performance level.
 
 #### FAS Configuration (`rules.yaml`)
 
@@ -235,45 +237,45 @@ fas_rules:
 
 **Key Parameter Reference:**
 
-| Parameter | Type | Default | Description |
-| :--- | :--- | :--- | :--- |
-| `fps_gears` | float[] | [30,60,90,120,144] | Supported frame rate gear list; FAS automatically switches between these levels. |
-| `fps_margin` | string | "3.0" | Frame rate margin (fps). EMA budget = 1000 / (target − margin), providing a tolerance buffer. |
-| `pid.kp / ki / kd` | float | 0.050/0.010/0.006 | PID controller proportional, integral, and derivative coefficients. |
-| `auto_capacity_weight` | bool | true | Whether to auto-detect core cluster capacity weights. When disabled, uses manually configured `cluster_profiles`. |
-| `perf_floor` | float | 0.22 | Minimum perf_index (dynamically raised for high-refresh games). |
-| `perf_ceil` | float | 1.0 | Maximum perf_index. |
-| `perf_init` | float | 0.45 | Initial perf_index on normal startup. |
-| `perf_cold_boot` | float | 0.85 | perf_index during cold boot period (first 3.5 seconds). |
-| `freq_hysteresis` | float | 0.015 | Frequency hysteresis coefficient, preventing frequent toggling between adjacent steps. |
-| `heavy_frame_threshold_ms` | float | 150.0 | Heavy frame threshold (ms). Frames exceeding this value are treated as loading frames. |
-| `loading_cumulative_ms` | float | 2500.0 | Enters loading state when cumulative heavy frame duration exceeds this value. |
-| `post_loading_perf` | float | 0.65 | perf_index after loading ends. |
-| `core_temp_threshold` | float | 0.0 | Temperature throttling threshold (°C). 0 = disabled. |
-| `core_temp_throttle_perf` | float | 0.70 | Performance ceiling during temperature throttling. |
-| `util_cap_divisor` | float | 0.45 | Divisor for CPU load-assisted frequency scaling (smaller = more aggressive throttling). |
-| `upgrade_confirm_frames` | int | 60 | Consecutive frames meeting target before gear upgrade is executed. |
-| `downgrade_confirm_frames` | int | 90 | Consecutive frames below target before gear downgrade is executed. |
-| `upgrade_cooldown_after_downgrade` | int | 90 | Upgrade cooldown frames after a downgrade, preventing gear oscillation. |
-| `gear_dampen_frames` | int | 60 | Dampen frames after gear switch; no new gear switch during this period. |
-| `downgrade_boost_perf_inc` | float | 0.18 | Emergency perf boost increment before a downgrade. |
-| `downgrade_boost_duration` | int | 45 | Duration (frames) of the emergency boost before a downgrade. |
-| `fast_decay_frame_threshold` | int | 75 | Consecutive normal frames threshold to trigger fast decay. |
-| `fast_decay_perf_threshold` | float | 0.70 | Perf threshold below which fast decay is suppressed. |
-| `fast_decay_max_step` | float | 0.022 | Maximum fast decay step size. |
-| `fast_decay_min_step` | float | 0.004 | Minimum fast decay step size. |
-| `jank_cooldown_frames` | int | 15 | Jank cooldown frames; maintains higher frequency during cooldown. |
-| `max_inc_damped` | float | 0.045 | Maximum PID output in damped state. |
-| `max_inc_normal` | float | 0.075 | Maximum PID output in normal state. |
-| `damped_perf_cap` | float | 0.92 | Perf ceiling in damped state. |
-| `app_switch_gap_ms` | float | 3000.0 | App switch detection interval (ms). Frame gaps exceeding this are treated as app switches. |
-| `app_switch_resume_perf` | float | 0.60 | Recovery perf after an app switch. |
-| `freq_force_reapply_interval` | int | 30 | Frequency force-reapply interval in frames. |
-| `fixed_max_frame_ms` | float | 500.0 | Maximum frame interval (ms). Frames exceeding this are ignored. |
-| `cold_boot_ms` | int | 3500 | Cold boot duration (ms). Uses perf_cold_boot during this period. |
-| `per_app_profiles` | map | {} | Per-game configuration, supporting `target_fps` and `fps_margin`. |
+| Parameter                          | Type    | Default            | Description                                                                                                       |
+| :--------------------------------- | :------ | :----------------- | :---------------------------------------------------------------------------------------------------------------- |
+| `fps_gears`                        | float[] | [30,60,90,120,144] | Supported frame rate gear list; FAS automatically switches between these levels.                                  |
+| `fps_margin`                       | string  | "3.0"              | Frame rate margin (fps). EMA budget = 1000 / (target − margin), providing a tolerance buffer.                     |
+| `pid.kp / ki / kd`                 | float   | 0.050/0.010/0.006  | PID controller proportional, integral, and derivative coefficients.                                               |
+| `auto_capacity_weight`             | bool    | true               | Whether to auto-detect core cluster capacity weights. When disabled, uses manually configured `cluster_profiles`. |
+| `perf_floor`                       | float   | 0.22               | Minimum perf_index (dynamically raised for high-refresh games).                                                   |
+| `perf_ceil`                        | float   | 1.0                | Maximum perf_index.                                                                                               |
+| `perf_init`                        | float   | 0.45               | Initial perf_index on normal startup.                                                                             |
+| `perf_cold_boot`                   | float   | 0.85               | perf_index during cold boot period (first 3.5 seconds).                                                           |
+| `freq_hysteresis`                  | float   | 0.015              | Frequency hysteresis coefficient, preventing frequent toggling between adjacent steps.                            |
+| `heavy_frame_threshold_ms`         | float   | 150.0              | Heavy frame threshold (ms). Frames exceeding this value are treated as loading frames.                            |
+| `loading_cumulative_ms`            | float   | 2500.0             | Enters loading state when cumulative heavy frame duration exceeds this value.                                     |
+| `post_loading_perf`                | float   | 0.65               | perf_index after loading ends.                                                                                    |
+| `core_temp_threshold`              | float   | 0.0                | Temperature throttling threshold (°C). 0 = disabled.                                                              |
+| `core_temp_throttle_perf`          | float   | 0.70               | Performance ceiling during temperature throttling.                                                                |
+| `util_cap_divisor`                 | float   | 0.45               | Divisor for CPU load-assisted frequency scaling (smaller = more aggressive throttling).                           |
+| `upgrade_confirm_frames`           | int     | 60                 | Consecutive frames meeting target before gear upgrade is executed.                                                |
+| `downgrade_confirm_frames`         | int     | 90                 | Consecutive frames below target before gear downgrade is executed.                                                |
+| `upgrade_cooldown_after_downgrade` | int     | 90                 | Upgrade cooldown frames after a downgrade, preventing gear oscillation.                                           |
+| `gear_dampen_frames`               | int     | 60                 | Dampen frames after gear switch; no new gear switch during this period.                                           |
+| `downgrade_boost_perf_inc`         | float   | 0.18               | Emergency perf boost increment before a downgrade.                                                                |
+| `downgrade_boost_duration`         | int     | 45                 | Duration (frames) of the emergency boost before a downgrade.                                                      |
+| `fast_decay_frame_threshold`       | int     | 75                 | Consecutive normal frames threshold to trigger fast decay.                                                        |
+| `fast_decay_perf_threshold`        | float   | 0.70               | Perf threshold below which fast decay is suppressed.                                                              |
+| `fast_decay_max_step`              | float   | 0.022              | Maximum fast decay step size.                                                                                     |
+| `fast_decay_min_step`              | float   | 0.004              | Minimum fast decay step size.                                                                                     |
+| `jank_cooldown_frames`             | int     | 15                 | Jank cooldown frames; maintains higher frequency during cooldown.                                                 |
+| `max_inc_damped`                   | float   | 0.045              | Maximum PID output in damped state.                                                                               |
+| `max_inc_normal`                   | float   | 0.075              | Maximum PID output in normal state.                                                                               |
+| `damped_perf_cap`                  | float   | 0.92               | Perf ceiling in damped state.                                                                                     |
+| `app_switch_gap_ms`                | float   | 3000.0             | App switch detection interval (ms). Frame gaps exceeding this are treated as app switches.                        |
+| `app_switch_resume_perf`           | float   | 0.60               | Recovery perf after an app switch.                                                                                |
+| `freq_force_reapply_interval`      | int     | 30                 | Frequency force-reapply interval in frames.                                                                       |
+| `fixed_max_frame_ms`               | float   | 500.0              | Maximum frame interval (ms). Frames exceeding this are ignored.                                                   |
+| `cold_boot_ms`                     | int     | 3500               | Cold boot duration (ms). Uses perf_cold_boot during this period.                                                  |
+| `per_app_profiles`                 | map     | {}                 | Per-game configuration, supporting `target_fps` and `fps_margin`.                                                 |
 
------
+---
 
 ### ⚙️ Advanced Configuration (`config.yaml` Explained)
 
@@ -289,9 +291,9 @@ meta:
   language: "en"
 ```
 
-| Field | Type | Description |
-| :--- | :--- | :--- |
-| `loglevel` | string | Log level detail. Options: `DEBUG`, `INFO`, `WARN`, `ERROR`. Supports runtime hot-update. |
+| Field      | Type   | Description                                                                                             |
+| :--------- | :----- | :------------------------------------------------------------------------------------------------------ |
+| `loglevel` | string | Log level detail. Options: `DEBUG`, `INFO`, `WARN`, `ERROR`. Supports runtime hot-update.               |
 | `language` | string | Daemon log language. Currently supports `en` (English) and `zh` (Chinese). Supports runtime hot-switch. |
 
 #### 2️⃣ Function Toggles (`function`)
@@ -302,10 +304,10 @@ function:
   IOOptimization: true
 ```
 
-| Function | Description |
-| :--- | :--- |
-| `CpuIdleScalingGovernor`| Whether to allow custom CPU Idle governors (see `CpuIdle` section). |
-| `IOOptimization` | Enables I/O optimization, iterating over all block devices to apply scheduler and parameter settings (see `IO_Settings` section). |
+| Function                 | Description                                                                                                                       |
+| :----------------------- | :-------------------------------------------------------------------------------------------------------------------------------- |
+| `CpuIdleScalingGovernor` | Whether to allow custom CPU Idle governors (see `CpuIdle` section).                                                               |
+| `IOOptimization`         | Enables I/O optimization, iterating over all block devices to apply scheduler and parameter settings (see `IO_Settings` section). |
 
 #### 3️⃣ I/O Settings (`IO_Settings`)
 
@@ -319,12 +321,12 @@ IO_Settings:
   iostats: "0"
 ```
 
-| Field | Type | Description |
-| :--- | :--- | :--- |
-| `Scheduler` | string | I/O scheduler, e.g., `"none"`, `"mq-deadline"`, `"bfq"`, `"kyber"`. Leave empty to keep the system default. |
-| `read_ahead_kb` | string | Read-ahead size (KB). |
-| `nomerges` | string | Merge policy. `0` = allow merges, `1` = simple merges only, `2` = disable merges. |
-| `iostats` | string | I/O statistics. `0` = disable (recommended, reduces overhead), `1` = enable. |
+| Field           | Type   | Description                                                                                                 |
+| :-------------- | :----- | :---------------------------------------------------------------------------------------------------------- |
+| `Scheduler`     | string | I/O scheduler, e.g., `"none"`, `"mq-deadline"`, `"bfq"`, `"kyber"`. Leave empty to keep the system default. |
+| `read_ahead_kb` | string | Read-ahead size (KB).                                                                                       |
+| `nomerges`      | string | Merge policy. `0` = allow merges, `1` = simple merges only, `2` = disable merges.                           |
+| `iostats`       | string | I/O statistics. `0` = disable (recommended, reduces overhead), `1` = enable.                                |
 
 #### 4️⃣ CPU Idle (`CpuIdle`)
 
@@ -335,7 +337,7 @@ CpuIdle:
   current_governor: "ladder"
 ```
 
-  * `current_governor`: Sets the CPU Idle governor.
+- `current_governor`: Sets the CPU Idle governor.
 
 #### 5️⃣ Performance Mode Configuration
 
@@ -423,28 +425,28 @@ fast:
     down_fast_mult: 2.5
 ```
 
-| Parameter | Type | Default | Description |
-| :--- | :--- | :--- | :--- |
-| `up_threshold` | float | 0.80 | Target perf gains headroom margin when load exceeds this threshold (headroom ramps smoothly near the threshold). |
-| `down_threshold` | float | 0.50 | Ramps down at normal rate when load drops below this threshold; slow ramp-down inside the hysteresis band to avoid high-freq lockup. |
-| `smoothing_up` | float | 0.60 | Ramp-up smoothing coefficient (larger = faster). |
-| `smoothing_down` | float | 0.30 | Ramp-down smoothing coefficient (larger = faster). |
-| `down_rate_limit_ticks` | int | 3 | Ramp-down rate limit (in ticks, each tick = 200ms). |
-| `up_rate_limit_ticks` | int | 2 | Ramp-up rate limit (in ticks). Boost only after N consecutive high-load ticks to prevent transient spikes. |
-| `headroom_factor` | float | 1.25 | Target perf = actual load × headroom, providing frequency margin; headroom transitions linearly near up_threshold to avoid step oscillation. |
-| `headroom_ramp` | float | 0.15 | Headroom transition width: as load rises from up_threshold - headroom_ramp to up_threshold, headroom ramps linearly from 1.0 to headroom_factor. |
-| `perf_floor` | float | 0.15 | Performance floor. |
-| `perf_ceil` | float | 1.0 | Performance ceiling. |
-| `perf_init` | float | 0.50 | Initial performance value. |
-| `up_jump_threshold` | float | 0.35 | When target perf exceeds current perf by more than this amount, ramp up via the fast path. |
-| `slow_up_scale` | float | 0.02 | Minimum ramp-up rate basis inside the hysteresis band (scaling of smoothing_up); the rate ramps linearly toward full speed as util approaches up_threshold, preventing slow mid-load ramp-up. |
-| `slow_down_scale` | float | 0.5 | Scaling factor applied to smoothing_down inside the hysteresis band (down_threshold..up_threshold), preventing high-freq lockup and hunting. |
-| `down_fast_threshold` | float | 0.10 | Fast ramp-down triggers when load drops below this value (also bypasses the ramp-down confirmation delay). |
-| `down_fast_mult` | float | 2.5 | Multiplier applied to smoothing_down for fast ramp-down. |
-| `spike_jump_threshold` | float | 0.35 | Spike suppression: when load jumps more than this in a single tick, the increment is scaled by spike_decay, preventing isolated transient spikes (e.g. single core 0↔100%) from saturating perf instantly. |
-| `spike_decay` | float | 0.30 | Fraction of the spike increment that is kept (0 = fully suppressed, 1 = no suppression). |
+| Parameter               | Type  | Default | Description                                                                                                                                                                                                |
+| :---------------------- | :---- | :------ | :--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `up_threshold`          | float | 0.80    | Target perf gains headroom margin when load exceeds this threshold (headroom ramps smoothly near the threshold).                                                                                           |
+| `down_threshold`        | float | 0.50    | Ramps down at normal rate when load drops below this threshold; slow ramp-down inside the hysteresis band to avoid high-freq lockup.                                                                       |
+| `smoothing_up`          | float | 0.60    | Ramp-up smoothing coefficient (larger = faster).                                                                                                                                                           |
+| `smoothing_down`        | float | 0.30    | Ramp-down smoothing coefficient (larger = faster).                                                                                                                                                         |
+| `down_rate_limit_ticks` | int   | 3       | Ramp-down rate limit (in ticks, each tick = 200ms).                                                                                                                                                        |
+| `up_rate_limit_ticks`   | int   | 2       | Ramp-up rate limit (in ticks). Boost only after N consecutive high-load ticks to prevent transient spikes.                                                                                                 |
+| `headroom_factor`       | float | 1.25    | Target perf = actual load × headroom, providing frequency margin; headroom transitions linearly near up_threshold to avoid step oscillation.                                                               |
+| `headroom_ramp`         | float | 0.15    | Headroom transition width: as load rises from up_threshold - headroom_ramp to up_threshold, headroom ramps linearly from 1.0 to headroom_factor.                                                           |
+| `perf_floor`            | float | 0.15    | Performance floor.                                                                                                                                                                                         |
+| `perf_ceil`             | float | 1.0     | Performance ceiling.                                                                                                                                                                                       |
+| `perf_init`             | float | 0.50    | Initial performance value.                                                                                                                                                                                 |
+| `up_jump_threshold`     | float | 0.35    | When target perf exceeds current perf by more than this amount, ramp up via the fast path.                                                                                                                 |
+| `slow_up_scale`         | float | 0.02    | Minimum ramp-up rate basis inside the hysteresis band (scaling of smoothing_up); the rate ramps linearly toward full speed as util approaches up_threshold, preventing slow mid-load ramp-up.              |
+| `slow_down_scale`       | float | 0.5     | Scaling factor applied to smoothing_down inside the hysteresis band (down_threshold..up_threshold), preventing high-freq lockup and hunting.                                                               |
+| `down_fast_threshold`   | float | 0.10    | Fast ramp-down triggers when load drops below this value (also bypasses the ramp-down confirmation delay).                                                                                                 |
+| `down_fast_mult`        | float | 2.5     | Multiplier applied to smoothing_down for fast ramp-down.                                                                                                                                                   |
+| `spike_jump_threshold`  | float | 0.35    | Spike suppression: when load jumps more than this in a single tick, the increment is scaled by spike_decay, preventing isolated transient spikes (e.g. single core 0↔100%) from saturating perf instantly. |
+| `spike_decay`           | float | 0.30    | Fraction of the spike increment that is kept (0 = fully suppressed, 1 = no suppression).                                                                                                                   |
 
------
+---
 
 ### 📊 eBPF Probes — In Depth
 
@@ -454,19 +456,19 @@ yumi uses two eBPF probes for kernel-level data collection:
 
 Attached to `tracepoint/sched/sched_switch`, triggered on every context switch, recording:
 
-  * **Per-core idle/busy time**: Accumulated via `PERCPU_ARRAY`; userspace reads and computes real utilization.
-  * **Per-core current TID**: Used by userspace to compensate in real time for tasks that haven't yet triggered a sched_switch.
-  * **Thread runtime**: Recorded per-thread cumulative CPU time via `HASH` map, used to compute the foreground app's heaviest thread utilization.
+- **Per-core idle/busy time**: Accumulated via `PERCPU_ARRAY`; userspace reads and computes real utilization.
+- **Per-core current TID**: Used by userspace to compensate in real time for tasks that haven't yet triggered a sched_switch.
+- **Thread runtime**: Recorded per-thread cumulative CPU time via `HASH` map, used to compute the foreground app's heaviest thread utilization.
 
 #### FPS Probe (`yumi-ebpf`)
 
 Attached to `libgui.so`'s `Surface::queueBuffer` function (uprobe), triggered on every frame submission:
 
-  * **Kernel-side timestamp capture**: Records frame submission time via `bpf_ktime_get_ns()` in eBPF, transmitted to userspace via RingBuf with zero-copy.
-  * **Per-PID uprobe attachment**: Each target process holds an independent eBPF instance. On PID switch, the old instance is automatically detached and a new one attached to the new PID, ensuring only the target process's frame events are captured.
-  * **Userspace frame interval calculation**: Userspace reads consecutive frame timestamps from RingBuf, computes deltas, and filters abnormal frame intervals (1ms–200ms).
+- **Kernel-side timestamp capture**: Records frame submission time via `bpf_ktime_get_ns()` in eBPF, transmitted to userspace via RingBuf with zero-copy.
+- **Per-PID uprobe attachment**: Each target process holds an independent eBPF instance. On PID switch, the old instance is automatically detached and a new one attached to the new PID, ensuring only the target process's frame events are captured.
+- **Userspace frame interval calculation**: Userspace reads consecutive frame timestamps from RingBuf, computes deltas, and filters abnormal frame intervals (1ms–200ms).
 
------
+---
 
 ## 📥 Installation Instructions
 
@@ -508,41 +510,41 @@ Attached to `libgui.so`'s `Surface::queueBuffer` function (uprobe), triggered on
 
 **Q: The module can't get Root access?**
 
-  * Ensure your device is properly rooted and Magisk / KernelSU is installed.
-  * Check your Root manager settings to ensure the yumi Root request has been granted.
-  * Try reflashing the module or restarting the device.
+- Ensure your device is properly rooted and Magisk / KernelSU is installed.
+- Check your Root manager settings to ensure the yumi Root request has been granted.
+- Try reflashing the module or restarting the device.
 
 **Q: eBPF probes fail to load?**
 
-  * Ensure kernel supports eBPF (`CONFIG_BPF=y`, `CONFIG_BPF_SYSCALL=y`).
-  * Check the logs for eBPF error messages.
-  * Some older kernels may not support the required BPF features.
+- Ensure kernel supports eBPF (`CONFIG_BPF=y`, `CONFIG_BPF_SYSCALL=y`).
+- Check the logs for eBPF error messages.
+- Some older kernels may not support the required BPF features.
 
 **Q: Smart Dynamic Mode isn't working?**
 
-  * Verify that app rules are configured correctly.
-  * Verify that the yumi module is installed and running correctly.
-  * Check whether `ignored_apps` list accidentally excludes the target app.
+- Verify that app rules are configured correctly.
+- Verify that the yumi module is installed and running correctly.
+- Check whether `ignored_apps` list accidentally excludes the target app.
 
 **Q: Performance modes aren't switching?**
 
-  * Verify that the yumi module is installed and running correctly.
-  * View the yumi module logs to identify specific error messages.
-  * Verify the configuration file format is correct (YAML syntax sensitive).
+- Verify that the yumi module is installed and running correctly.
+- View the yumi module logs to identify specific error messages.
+- Verify the configuration file format is correct (YAML syntax sensitive).
 
 **Q: Frame rate is unstable in FAS mode?**
 
-  * Check that `fps_gears` in `rules.yaml` includes the target frame rate.
-  * Increasing `fps_margin` provides more headroom and reduces boundary fluctuations.
-  * Check the FAS heartbeat entries in the logs (output every 30 frames) to confirm the scheduling state is normal.
-  * If the frequency is being overridden by thermal throttling, a "freq mismatch" message will appear in the logs — this is normal verification and recovery behavior.
-  * Try configuring dedicated parameters for the game in `per_app_profiles`.
+- Check that `fps_gears` in `rules.yaml` includes the target frame rate.
+- Increasing `fps_margin` provides more headroom and reduces boundary fluctuations.
+- Check the FAS heartbeat entries in the logs (output every 30 frames) to confirm the scheduling state is normal.
+- If the frequency is being overridden by thermal throttling, a "freq mismatch" message will appear in the logs — this is normal verification and recovery behavior.
+- Try configuring dedicated parameters for the game in `per_app_profiles`.
 
 **Q: CPU utilization data seems inaccurate?**
 
-  * The eBPF CPU probe requires kernel support for `tracepoint/sched/sched_switch`.
-  * Userspace read cycle is 200ms, with real-time state compensation to improve accuracy.
-  * Check the cpu_monitor initialization info in the logs to confirm the online core list is correct.
+- The eBPF CPU probe requires kernel support for `tracepoint/sched/sched_switch`.
+- Userspace read cycle is 200ms, with real-time state compensation to improve accuracy.
+- Check the cpu_monitor initialization info in the logs to confirm the online core list is correct.
 
 ## 📊 Project Statistics
 
@@ -554,11 +556,11 @@ Attached to `libgui.so`'s `Surface::queueBuffer` function (uprobe), triggered on
 
 ## 📮 Contact Us
 
-  * **GitHub Issues** — [For project issues and suggestions](https://github.com/imacte/yumi/issues)
-  * **QQ Group** — 1036909137
-  * **Telegram** — [Join TG Channel](https://t.me/+gp4adLJAsXYzMjc1)
+- **GitHub Issues** — [For project issues and suggestions](https://github.com/imacte/yumi/issues)
+- **QQ Group** — 1036909137
+- **Telegram** — [Join TG Channel](https://t.me/+gp4adLJAsXYzMjc1)
 
------
+---
 
 <div align="center">
 

@@ -31,6 +31,9 @@ logd/
 .trae/documents/fas-decoupled-plan.md
 .trae/documents/fas-enable-plan.md
 .trae/documents/fas-remaining-waves-plan.md
+.trae/specs/stabilize-thread-affinity/checklist.md
+.trae/specs/stabilize-thread-affinity/spec.md
+.trae/specs/stabilize-thread-affinity/tasks.md
 
 # reference
 AppOptR

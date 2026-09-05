@@ -20,9 +20,15 @@
 /// 分层：
 /// - cgroup 层：boost（performance/fast/特调）下收窄 top-app/foreground cpuset
 ///   到大核+超大核、后台分组压小核；可选 uclamp.min/max；normal/doze 恢复快照。
-/// - 线程层（单核 sched_setaffinity）：
-///   * 前台（fg_pid 由 app_detect 提供）：关键线程 → prime，普通 → big。
+/// - 线程层：
+///   * 前台（fg_pid 由 app_detect 提供）：关键线程（主线程/RenderThread 等）
+///     核组绑定——boost 下 top-app/foreground cpuset 已收窄为 prime∪big，内核
+///     在组内自调度，cpuset 不可用时写一次组掩码兜底；普通线程单核钉定，
+///     优先 big、钉满溢出 prime。
 ///   * 后台忙线程动态 promote 到 big（避免全压小核时的能效灾难），回落 demote。
+///   * 单核过载重钉带两道闸：分数滞回（OVERLOAD_MARGIN）+ 反跳回冷却
+///     （RETURN_COOLDOWN）。此前只有时间防抖，重负载线程会以 8s 节拍在
+///     prime↔big 或两颗大核间乒乓，每次迁移 cache/TLB 全冷，表现为周期性卡顿。
 ///
 /// 开销控制（相对逐线程每轮全读 stat 约省 >50% 文件 I/O）：
 /// - 前台：每轮 1 次 read_dir 前台 task 目录；仅**新增**线程读 1 次 stat 判定
@@ -38,6 +44,8 @@
 ///
 /// 选核：score = 逐核 util(最近 SystemLoadUpdate) + 本核钉线程数×0.2，取核池 ∩
 /// 在线核中的最低分核（离线核 util 恒 0，钉到离线核会冻结，必须排除）。
+/// 关键线程不走 score 选核——组绑定交给内核调度；score 只服务单核钉定的
+/// 普通线程与后台 promoted 线程。
 ///
 /// 黑名单：affinity_blacklist.txt 编译嵌入 + 空 cmdline/`/` 开头内置兜底；
 /// 线程 comm 命中不迁移；后台 promote 前读一次进程 cmdline 校验并缓存。
@@ -73,6 +81,13 @@ const DEVL_ROW_EVERY_ROUNDS: u64 = 4;
 /// 线程迁移最小间隔（promote/demote 流程）：过于频繁的迁移带来 cache
 /// 冷却与调度抖动，负载窗口本身已做两窗/3 连防抖，这里只挡边界抖动
 const MIN_MIGRATE_INTERVAL: Duration = Duration::from_secs(4);
+/// 重钉分数滞回：目标核 score 需比 home 核低至少该值才值得迁移。
+/// 没有滞回时，0.70 阈值边缘的 util 快照噪声就能驱动无收益搬动——
+/// 两个核互相「看起来略好一点」正是两核乒乓的直接来源
+const OVERLOAD_MARGIN: f32 = 0.15;
+/// 反跳回冷却：迁离某核后该时长内禁止迁回，打破 A→B→A 振荡。
+/// 乒乓周期与 REPIN_DEBOUNCE 同拍（8s），取两倍时长足以错开节奏
+const RETURN_COOLDOWN: Duration = Duration::from_secs(16);
 /// 过载重钉防抖：重钉打断线程本地性（cache/TLB 冷却）比 promote 更明显，
 /// 拉长间隔减少迁移次数；首次分配分散到位后应极少触发
 const REPIN_DEBOUNCE: Duration = Duration::from_secs(8);
@@ -161,6 +176,23 @@ pub(crate) fn set_tid_affinity(tid: i32, cpu_ids: &[usize]) -> bool {
     for &c in cpu_ids {
         if c < max_cpu {
             unsafe { libc::CPU_SET(c, &mut mask) };
+        }
+    }
+    // AppOptR 式短路：当前掩码与期望一致时跳过 sched_setaffinity，重复钉定
+    // 变为一次无副作用的读（周期 rebalance 与 core_ctl 复用点都会高频命中）
+    // SAFETY: curr 为 zeroed 的合法 cpu_set_t，sched_getaffinity 仅写入该缓冲；
+    // 两个 cpu_set_t 按整块内存逐字节比较，不依赖内部字段布局
+    unsafe {
+        let mut curr: libc::cpu_set_t = std::mem::zeroed();
+        if libc::sched_getaffinity(tid, std::mem::size_of::<libc::cpu_set_t>(), &mut curr) == 0 {
+            let size = std::mem::size_of::<libc::cpu_set_t>();
+            let curr_bytes =
+                std::slice::from_raw_parts(&curr as *const libc::cpu_set_t as *const u8, size);
+            let mask_bytes =
+                std::slice::from_raw_parts(&mask as *const libc::cpu_set_t as *const u8, size);
+            if curr_bytes == mask_bytes {
+                return true;
+            }
         }
     }
     let ret =
@@ -289,6 +321,13 @@ struct ThreadState {
     last_move: Instant,
     /// 最近一次被看到时刻（失联清理）
     last_seen: Instant,
+    /// boost 下已写入 prime∪big 组掩码（cpuset 不可用时的关键线程兜底，
+    /// 不占单核钉定计数，恢复时直接回全核掩码）
+    group_pinned: bool,
+    /// 最近一次迁离的核心（反跳回冷却用）；-1 = 无迁离记录
+    prev_home: i16,
+    /// 迁离时刻（配合 RETURN_COOLDOWN）
+    prev_home_at: Instant,
 }
 
 pub struct AffinityManager {
@@ -466,10 +505,17 @@ impl AffinityManager {
             })
     }
 
-    /// 主池优先选核：main 内存在未钉核心时只在 main 内选（保证关键线程
-    /// 优先落超大核 / 普通线程优先落大核）；main 全部已钉才把 overflow 中
-    /// 未钉核并入候选按 score 竞争——主核挤满后负载自然溢出到次级核
-    /// （普通线程在大核挤满时启用超大核，关键线程在超大核挤满时回落大核）。
+    /// 核心打分（与 pick_core 同口径）：util + 钉核数×权重。
+    /// 过载重钉的滞回校验用它对比 home 核与候选核
+    fn core_score(&self, core: usize) -> f32 {
+        self.core_utils.get(core).copied().unwrap_or(0.0)
+            + self.pinned_of(core) as f32 * PINNED_WEIGHT
+    }
+
+    /// 主池优先选核（普通线程专用）：main（big 池）内存在未钉核心时只在
+    /// main 内选；main 全部已钉才把 overflow（prime 池）中未钉核并入候选
+    /// 按 score 竞争——大核挤满后负载自然溢出到超大核。关键线程已改核组
+    /// 绑定，不再走本函数的单核选择。
     fn pick_core_pref(&self, main: &[usize], overflow: &[usize]) -> Option<usize> {
         let main_free = main.iter().any(|&c| self.pinned_of(c) == 0);
         if main_free {
@@ -515,6 +561,11 @@ impl AffinityManager {
         }
         self.add_pinned(core, 1);
         if let Some(st) = self.threads.get_mut(&tid) {
+            if prev_home >= 0 {
+                // 记录迁离核与时刻，供重钉校验的反跳回冷却禁回
+                st.prev_home = prev_home;
+                st.prev_home_at = Instant::now();
+            }
             st.home = core as i16;
             st.last_move = Instant::now();
         }
@@ -556,6 +607,40 @@ impl AffinityManager {
             .is_ok()
     }
 
+    /// 关键线程组掩码兜底的还原：恢复全核掩码并清 group_pinned。
+    /// 不触碰单核钉定计数（组绑定从未占用）。线程未做组绑定时为无操作
+    fn restore_group_mask(&mut self, tid: i32, pid: i32, pkg: &str) {
+        let pinned = self
+            .threads
+            .get(&tid)
+            .map(|st| st.group_pinned)
+            .unwrap_or(false);
+        if !pinned {
+            return;
+        }
+        let max_cpu = {
+            let ranges = crate::common::chiri_core_ranges();
+            ranges.prime.end.max(ranges.big.end)
+        };
+        let all: Vec<usize> = (0..max_cpu).collect();
+        if set_tid_affinity(tid, &all) {
+            if let Some(st) = self.threads.get_mut(&tid) {
+                st.group_pinned = false;
+            }
+            crate::logger::devimp_aff(
+                "restore",
+                pid,
+                pkg,
+                tid,
+                "-",
+                "-",
+                "full",
+                "-",
+                "fg_group_reset",
+            );
+        }
+    }
+
     /// 清理线程：迁回原组 + 恢复全核 + 移除状态
     fn cleanup_thread(&mut self, tid: i32) {
         let (moved, orig, home, pid) = match self.threads.get(&tid) {
@@ -567,6 +652,9 @@ impl AffinityManager {
         }
         if home >= 0 {
             self.unpin_core(tid, home, pid, "-");
+        } else {
+            // 组掩码兜底的关键线程在此恢复全核（内部无绑定时为无操作）
+            self.restore_group_mask(tid, pid, "-");
         }
         self.threads.remove(&tid);
     }
@@ -650,6 +738,9 @@ impl AffinityManager {
                                 last_sample: now,
                                 last_move: now - MIN_MIGRATE_INTERVAL,
                                 last_seen: now,
+                                group_pinned: false,
+                                prev_home: -1,
+                                prev_home_at: now,
                             });
                             // tid 归属变化（PID 复用）视作新线程
                             if st.pid != fg_pid {
@@ -658,7 +749,15 @@ impl AffinityManager {
                                 st.home = -1;
                                 st.promoted = false;
                                 st.moved_group = false;
+                                st.group_pinned = false;
+                                st.prev_home = -1;
                                 st.last_move = now - MIN_MIGRATE_INTERVAL;
+                                // ticks 基准一并作废：否则下方「fresh 或 last_ticks==0
+                                // 才重采样」不成立，is_key 沿用旧身份（后台建档恒为
+                                // false），该线程转前台后会误走普通单核路径
+                                st.last_ticks = 0;
+                                st.last_busy = None;
+                                st.low_streak = 0;
                             }
                             st.last_seen = now;
                             // 新增线程才读 stat（判关键线程 / 建档 ticks + comm 缓存）
@@ -670,57 +769,99 @@ impl AffinityManager {
                                     st.last_sample = now;
                                 }
                             }
-                            let (home, is_key) = (st.home, st.is_key);
-                            // 合法范围 = 全部性能核（含溢出落点：普通线程可溢出
-                            // prime、关键线程可溢出 big），避免溢出核被误判非法
-                            let core_ok = home >= 0
-                                && (home as usize) < max_cpu
-                                && self.online.get(home as usize).copied().unwrap_or(false)
-                                && perf_pool.contains(&(home as usize));
+                            let (home, is_key, group_pinned) =
+                                (st.home, st.is_key, st.group_pinned);
                             if pin_fg {
-                                if !core_ok {
-                                    // 关键线程（主线程/RenderThread/UnityMain 等）优先
-                                    // 绑超大核；普通线程优先大核，大核钉满后溢出超大核
-                                    let pick = if is_key {
-                                        self.pick_core_pref(&prime_pool, &big_pool)
-                                    } else {
-                                        self.pick_core_pref(&big_pool, &prime_pool)
-                                    };
-                                    if let Some(core) = pick {
-                                        self.pin_core(tid, core, home, fg_pid, &pkg, "fg_pin");
-                                    }
-                                } else if now.duration_since(st.last_move) >= REPIN_DEBOUNCE
-                                    && self.core_utils.get(home as usize).copied().unwrap_or(0.0)
-                                        > CORE_OVERLOAD_UTIL
-                                {
-                                    // home 核过载（util > 70%）：重钉到低占用核分散
-                                    // 负载压制峰值频率，同样走主池/溢出选择。仅当
-                                    // 目标核本身不过载才迁——所有候选核都过载时静止
-                                    // （整体高载交给 CLG 上限/温控处理），避免无收益
-                                    // 搬动与乒乓
-                                    let pick = if is_key {
-                                        self.pick_core_pref(&prime_pool, &big_pool)
-                                    } else {
-                                        self.pick_core_pref(&big_pool, &prime_pool)
-                                    };
-                                    if let Some(core) = pick {
-                                        if core != home as usize
-                                            && self.core_utils.get(core).copied().unwrap_or(0.0)
-                                                <= CORE_OVERLOAD_UTIL
-                                        {
-                                            self.pin_core(
-                                                tid,
-                                                core,
-                                                home,
-                                                fg_pid,
-                                                &pkg,
-                                                "home_overload",
+                                if is_key {
+                                    // 关键线程核组绑定（AppOptR 式）：不钉单核。
+                                    // boost 下 top-app/foreground cpuset 已收窄为
+                                    // prime∪big，内核在组内自调度——重负载主线程
+                                    // 不会被过载重钉挤到单颗大核，也不存在
+                                    // prime↔big 迁移。cpuset 不可用时写一次组掩码
+                                    // 兜底（getaffinity 短路去重，不占钉核计数）
+                                    if !group_pinned && !self.sys.cpuset_top_app_exist {
+                                        let perf = perf_pool.clone();
+                                        if set_tid_affinity(tid, &perf) {
+                                            if let Some(st) = self.threads.get_mut(&tid) {
+                                                st.group_pinned = true;
+                                            }
+                                            crate::logger::devimp_aff(
+                                                "pin", fg_pid, &pkg, tid, "-", "-", "group", "-",
+                                                "fg_group",
                                             );
+                                        }
+                                    }
+                                } else {
+                                    // 合法范围 = 全部性能核（含溢出落点：普通线程
+                                    // 可溢出 prime），避免溢出核被误判非法
+                                    let core_ok = home >= 0
+                                        && (home as usize) < max_cpu
+                                        && self.online.get(home as usize).copied().unwrap_or(false)
+                                        && perf_pool.contains(&(home as usize));
+                                    if !core_ok {
+                                        // 普通线程优先大核，大核钉满后溢出超大核
+                                        if let Some(core) =
+                                            self.pick_core_pref(&big_pool, &prime_pool)
+                                        {
+                                            self.pin_core(tid, core, home, fg_pid, &pkg, "fg_pin");
+                                        }
+                                    } else if now.duration_since(st.last_move) >= REPIN_DEBOUNCE
+                                        && self
+                                            .core_utils
+                                            .get(home as usize)
+                                            .copied()
+                                            .unwrap_or(0.0)
+                                            > CORE_OVERLOAD_UTIL
+                                    {
+                                        // home 核过载（util > 70%）：重钉到低占用核
+                                        // 分散负载压制峰值频率。目标核必须同时通过
+                                        // 三道校验：不过载、分数显著更低（滞回）、
+                                        // 不在反跳回冷却内（刚迁离的核禁回）——否则
+                                        // 静止，防止边缘 util 噪声驱动 A↔B 乒乓
+                                        if let Some(core) =
+                                            self.pick_core_pref(&big_pool, &prime_pool)
+                                        {
+                                            let (left_home, left_at) = self
+                                                .threads
+                                                .get(&tid)
+                                                .map(|st| (st.prev_home, st.prev_home_at))
+                                                .unwrap_or((-1, now));
+                                            let home_score = self.core_score(home as usize);
+                                            let cand_score = self.core_score(core);
+                                            let banned = left_home == core as i16
+                                                && now.duration_since(left_at) < RETURN_COOLDOWN;
+                                            if core != home as usize
+                                                && self.core_utils.get(core).copied().unwrap_or(0.0)
+                                                    <= CORE_OVERLOAD_UTIL
+                                                && cand_score <= home_score - OVERLOAD_MARGIN
+                                                && !banned
+                                            {
+                                                self.pin_core(
+                                                    tid,
+                                                    core,
+                                                    home,
+                                                    fg_pid,
+                                                    &pkg,
+                                                    "home_overload",
+                                                );
+                                            } else {
+                                                crate::logger::devimp_event(
+                                                    "overload_hold",
+                                                    &pkg,
+                                                    &format!(
+                                                        "tid={} home={} cand={} score_home={:.2} score_cand={:.2}",
+                                                        tid, home, core, home_score, cand_score
+                                                    ),
+                                                );
+                                            }
                                         }
                                     }
                                 }
                             } else if home >= 0 {
                                 self.unpin_core(tid, home, fg_pid, &pkg);
+                            } else if group_pinned {
+                                // 退出 boost 后组掩码兜底的关键线程恢复全核
+                                self.restore_group_mask(tid, fg_pid, &pkg);
                             }
                         }
                         // 已消失线程：立即清理释放钉核计数
@@ -794,12 +935,34 @@ impl AffinityManager {
                                     > CORE_OVERLOAD_UTIL
                             {
                                 if let Some(core) = self.pick_core(&big_pool) {
-                                    // 与前台同口径：目标核不过载才迁，全核过载静止
+                                    // 与前台同口径的三道校验：目标核不过载、分数
+                                    // 显著更低（OVERLOAD_MARGIN 滞回）、不在反跳回
+                                    // 冷却内。全不满足则静止，防止 promoted 线程
+                                    // 在大核间乒乓
+                                    let (left_home, left_at) = match self.threads.get(&tid) {
+                                        Some(st) => (st.prev_home, st.prev_home_at),
+                                        None => continue,
+                                    };
+                                    let home_score = self.core_score(home as usize);
+                                    let cand_score = self.core_score(core);
+                                    let banned = left_home == core as i16
+                                        && now.duration_since(left_at) < RETURN_COOLDOWN;
                                     if core != home as usize
                                         && self.core_utils.get(core).copied().unwrap_or(0.0)
                                             <= CORE_OVERLOAD_UTIL
+                                        && cand_score <= home_score - OVERLOAD_MARGIN
+                                        && !banned
                                     {
                                         self.pin_core(tid, core, home, 0, "-", "bg_overload");
+                                    } else {
+                                        crate::logger::devimp_event(
+                                            "overload_hold",
+                                            "-",
+                                            &format!(
+                                                "tid={} home={} cand={} score_home={:.2} score_cand={:.2}",
+                                                tid, home, core, home_score, cand_score
+                                            ),
+                                        );
                                     }
                                 }
                             }
@@ -888,6 +1051,9 @@ impl AffinityManager {
                                         last_sample: now,
                                         last_move: now - MIN_MIGRATE_INTERVAL,
                                         last_seen: now,
+                                        group_pinned: false,
+                                        prev_home: -1,
+                                        prev_home_at: now,
                                     },
                                 );
                                 continue;
