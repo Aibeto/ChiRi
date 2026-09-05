@@ -22,7 +22,13 @@ log() { echo "$(date): $*"; echo "$(date): $*" >> "$LOG_FILE"; }
 
 # 1. 终止旧看门狗与主进程（确保不残留重复实例，消除竞态）
 log "stopping old watchdog and daemon..."
-[ -f "$PID_FILE" ] && kill "$(cat "$PID_FILE" 2>/dev/null)" 2>/dev/null
+# 空文件/读取失败/内容损坏时不执行 kill：kill "" 无意义，kill 0 会向
+# 整个进程组发信号（可能终止本脚本），非纯数字内容一律跳过
+pid=$(cat "$PID_FILE" 2>/dev/null)
+case "$pid" in
+  ''|0|*[!0-9]*) ;;
+  *) kill "$pid" 2>/dev/null ;;
+esac
 killall -9 yumi > /dev/null 2>&1
 rm -f "$PID_FILE"
 sleep 1

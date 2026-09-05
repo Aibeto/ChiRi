@@ -38,7 +38,13 @@ mkdir -p "$LOG_DIR"
 #    形成双 daemon 实例，devimp/status/daemon 日志各写两份。先按 pid 文件终止
 #    旧看门狗再清 daemon。
 if [ -f "$LOG_DIR/watchdog.pid" ]; then
-  kill "$(cat "$LOG_DIR/watchdog.pid" 2>/dev/null)" 2>/dev/null
+  # 空文件/读取失败/内容损坏时不执行 kill：kill "" 无意义，kill 0 会向
+  # 整个进程组发信号（可能终止本脚本），非纯数字内容一律跳过
+  pid=$(cat "$LOG_DIR/watchdog.pid" 2>/dev/null)
+  case "$pid" in
+    ''|0|*[!0-9]*) ;;
+    *) kill "$pid" 2>/dev/null ;;
+  esac
   rm -f "$LOG_DIR/watchdog.pid"
 fi
 killall -9 yumi > /dev/null 2>&1
