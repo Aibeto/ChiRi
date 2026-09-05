@@ -448,19 +448,18 @@ pub fn set_devimp_mode(mode: &str) {
 
 /// 同步前台包名并按需切换 devimp 文件（scheduler_ipc 每秒调用，内部去重）。
 ///
-/// - 原始包名存入 DEVIMP_FG_PKG，供所有行类型自动填充 package 列；
-/// - 包名与当前一致：无操作；
+/// - 包名与当前一致（对比写入器归属的包名段）：仅更新 DEVIMP_FG_PKG；
 /// - 包名变化：关闭当前文件，下次写入以「新包名 + 当前毫秒时间戳」开新文件
 ///   （同应用诊断数据聚合在同一文件，切换应用即分文件）；
 /// - **空包名（无包名特殊场景，如启动初期尚未检测到前台应用）不触发切换**，
-///   继续写当前文件；包名从空变非空 / 非空变化才会开新文件。
+///   继续写当前文件；包名从空变非空 / 非空变化才会开新文件；
+/// - 顺序敏感：先切文件（WRITER）后更新 DEVIMP_FG_PKG——FG_PKG 是行
+///   package 列数据源，晚于文件切换更新可保证切换边界处
+///   「行的 package 列」与「所在文件」永不错位（详见函数体注释）。
 pub fn set_devimp_package(pkg: &str) {
     let p = pkg.trim();
     if p.is_empty() {
         return;
-    }
-    if let Ok(mut g) = DEVIMP_FG_PKG.lock() {
-        *g = p.to_string();
     }
     // 包名 → 文件名安全段：只保留字母数字与 . _ -（Android 包名合法字符），
     // 异常字符替换丢弃，超长截断，全被过滤时退化为 nopkg
@@ -474,8 +473,9 @@ pub fn set_devimp_package(pkg: &str) {
     } else {
         seg.as_str()
     };
-    // WRITER 临界区内只做 writer 自身状态修改（文件 IO 与无锁操作），
-    // 不获取任何其他锁——锁序约定见 DEVIMP_WRITER 定义处
+    // ① 先切换文件（对比写入器当前归属的包名段）。WRITER 临界区内只做
+    // writer 自身状态修改（文件 IO 与无锁操作），不获取任何其他锁——
+    // 锁序约定见 DEVIMP_WRITER 定义处
     let pkg_switched = {
         let mut w = DEVIMP_WRITER.lock().unwrap_or_else(|p| p.into_inner());
         if w.pkg_seg == seg {
@@ -491,6 +491,14 @@ pub fn set_devimp_package(pkg: &str) {
     // tick 节流状态清零在 WRITER 锁释放后执行（新文件首 tick 即记录，不留心跳空窗）
     if pkg_switched {
         devimp_tick_state_clear();
+    }
+    // ② 最后更新 DEVIMP_FG_PKG（各行的 package 列数据源，DevRow::new 读取）。
+    // 顺序敏感：写线程构造行读 FG_PKG 与写行拿 WRITER 之间无原子性——
+    // 若先更新 FG_PKG 再切文件，切换边界处写线程会读到新包名却写进旧文件，
+    // 产生 1~2 行归属错位；先切文件后更新 FG_PKG 则任何时刻
+    // 「行的 package 列」与「所在文件」一致（旧行旧文件 / 新行新文件）。
+    if let Ok(mut g) = DEVIMP_FG_PKG.lock() {
+        *g = p.to_string();
     }
 }
 
