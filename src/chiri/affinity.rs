@@ -251,12 +251,15 @@ fn self_cpuset_group() -> Option<String> {
     None
 }
 
+/// cpuset 组的 tasks 节点路径。`group_path` 来自 /proc/self/cgroup（内核
+/// 输出带前导斜杠，如 "/top-app"，根组为 "/"），但两侧都裁掉斜杠再显式
+/// 拼接，对有无前导斜杠的两种内核约定都生成正确路径。
 fn cpuset_tasks_path(group_path: &str) -> String {
-    let p = group_path.trim_end_matches('/');
+    let p = group_path.trim_matches('/');
     if p.is_empty() {
         "/dev/cpuset/tasks".to_string()
     } else {
-        format!("/dev/cpuset{p}/tasks")
+        format!("/dev/cpuset/{p}/tasks")
     }
 }
 
