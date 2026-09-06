@@ -275,7 +275,7 @@ WebUI 侧：
 
 - cpuidle governor 默认启用 menu：8550/8475/8998 的 `config.yaml` 将 `CpuIdleScalingGovernor` 置 true、`CpuIdle.current_governor` 置 "menu"（menu 按预期空闲时长选最深 C 状态，降低空闲功耗），内核无 menu 时写入失败静默跳过、无副作用。
 
-- 屏幕状态自愈校验：uevent 可能漏报/误报（开机早期背光未就绪、长时间息屏后唤醒、netlink 缓冲溢出），导致 `screen_state_arc` 锁死在错误状态——亮屏仍为 false 时 scenemode 计时器被误触发、且无 ScreenStateChange(true) 无法退出。`screen_detect.rs::verify_screen_state` 由 app_detect 主循环每轮调用，直接读 `/sys/class/backlight` 的 `bl_power==0`（回退 `actual_brightness>0`，与 uevent 分支同口径）校正 arc，无背光节点则静默跳过。
+- 屏幕状态自愈校验：uevent 可能漏报/误报（开机早期背光未就绪、长时间息屏后唤醒、netlink 缓冲溢出），导致 `screen_state_arc` 锁死在错误状态——亮屏仍为 false 时 scenemode 计时器被误触发（实测：亮屏用微信/QQ 全程被判息屏，大核 4-7 离线 + UI 挤小核，psiCpu 80% 卡爆）。`screen_detect.rs::verify_screen_state` 由 app_detect 主循环每轮调用，读 `/sys/class/backlight` 校正 arc。**判据必须三分支**：`bl_power==0` → 亮（FB 权威亮屏信号）；`bl_power!=0` → **不可信**（部分 DRM 面板驱动息屏写 FB_BLANK 后亮屏不清零，节点长期停留非 0——把它当权威灭屏信号会把状态反向钉死），以 `actual_brightness>0` 为准（Android 息屏时把亮度写 0）；bl 不可读回退亮度（原行为）。勿改回「bl_power==0 即亮、非 0 即灭」的两分支。缓存背光节点连续 8 次全不可读时丢弃缓存重扫（设备可能被移除/更换）。
 
 - 亮屏事件双源直推：`monitor_screen_state_uevent` 收到 power（early_suspend/late_resume）或 backlight KOBJ_CHANGE 且状态确实变化时**直接 send `DaemonEvent::ScreenStateChange`**（纯推送，scenemode 下感知延迟从最坏 ~1.1s+ 降到 ~100ms），不再依赖 app_detect 息屏轮询（1s）转发；app_detect 的 verify+轮询转发保留为 uevent 漏报时的自愈兜底。双源可能对同一次屏幕切换各发一次事件，两套调度器的 ScreenStateChange 分支开头都有 `screen_on == is_screen_on` 去重守卫（状态未变只打点）——新增屏幕事件生产点时必须维持该守卫。
 
@@ -326,7 +326,7 @@ WebUI 侧：
 
 - **Boost**：把各 cluster 的 core_ctl `min_cpus` 抬到全组常在线（防厂商热插拔与 ChiRi 调频打架），退出恢复快照；只动 min_cpus 不动 max_cpus/busy 阈值。
 
-- **Scenemode 离线核（息屏深度省电）**：`CoreCtl.scenemode_offline` 门控（8550/8475 true，8998 内核 4.4 默认 false）。进入 scenemode 时先解除 boost（min_cpus 抬着会让厂商 core_ctl 重新拉起被下线的核——两者互斥由 `apply_affinity_and_corectl` 保证），下线目标由 `scenemode_targets()` 计算：**小核全开**（保证 ≥3 个常驻待命核响应电源键等 PMIC 事件；不足 3 个从大核按编号从小到大补足），**大核簇 + prime 整簇下线**消除空转漏电流；逐核写 online=0 回读验证，失败跳过（warn）。**守护进程自身全部线程钉到 1 个专用小核**（编号最大的 little——CPU0 承担最多中断家务），后台任务堵塞不了调度服务；退出 scenemode 解除自钉。维持期每 2s 纠偏（重新下线被外部拉起的核）；退出按快照恢复 online（带回读+重试）。scenemode 下无其它 ChiRi 钉核线程，与离线无冲突。
+- **Scenemode 离线核（息屏深度省电）**：`CoreCtl.scenemode_offline` 门控（8550/8475 true，8998 内核 4.4 默认 false）。进入 scenemode 时先解除 boost（min_cpus 抬着会让厂商 core_ctl 重新拉起被下线的核——两者互斥由 `apply_affinity_and_corectl` 保证），下线目标由 `scenemode_targets()` 计算：**小核全开**（保证 ≥3 个常驻待命核响应电源键等 PMIC 事件；不足 3 个从大核按编号从小到大补足），**大核簇 + prime 整簇下线**消除空转漏电流；逐核写 online=0 回读验证，失败跳过（warn），已在 offlined 中的核防重复登记。**守护进程自身全部线程钉到 1 个专用小核**（编号最大的 little——CPU0 承担最多中断家务），后台任务堵塞不了调度服务；退出 scenemode 解除自钉。维持期每 2s 纠偏（重新下线被外部拉起的核）。**退出恢复 `restore_online` 失败的核必须保留在 offlined 中由 STATE_NONE 分支每 2s 重试**——此前失败即 clear、状态机回 NONE 再无重试路径，写回被内核拒绝的核永久离线（实测亮屏后大核 4-7 不上线）；全部恢复后才解除自钉，重新下线前先把残留核拉回在线（否则 online=0 被跳过记录、核永远失去恢复登记）。
 
 - **scenemode 饱和退出**：little 簇 max_util 持续 10s ≥ 70%（`SCENEMODE_SAT_UTIL/SECS`，util 是忙时占比与频率无关，饱和即真饱和）→ 视为后台负载压不死小核：一次性退回 powersave 的 CLG 配置 + 立即恢复全部在线核 + 解除自钉，并进入 **300s 冷却**（`SCENEMODE_COOLDOWN`，期间 scenemode 入口被门控不得重进，防反复拉锯）；冷却结束后息屏条件仍满足则自然重进。
 

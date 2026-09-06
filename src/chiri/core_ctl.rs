@@ -178,6 +178,8 @@ impl CoreCtlManager {
     /// - `scenemode`：下线 CPU1..max 只留引导核（息屏深度省电）。
     /// 两者互斥；切换时先退出旧状态（恢复快照）再进入新状态。
     /// scenemode 维持期每次调用都会纠偏（重新下线被外部拉起的核）。
+    /// STATE_NONE 下若仍有恢复失败的核残留，周期性重试恢复
+    /// （restore_online 失败不 clear，见其注释——防核永久离线）。
     pub fn set_power_state(&mut self, boost: bool, scenemode: bool) {
         let target = if boost {
             STATE_BOOST
@@ -190,6 +192,9 @@ impl CoreCtlManager {
             if target == STATE_SCENEMODE {
                 // 维持期纠偏：厂商热插拔守护进程可能把核悄悄拉回来
                 self.reassert_offline();
+            } else if target == STATE_NONE && !self.offlined.is_empty() {
+                // 亮屏恢复路径：上次 restore 有核写回失败，2s 后重试
+                self.restore_online();
             }
             return;
         }
@@ -199,6 +204,12 @@ impl CoreCtlManager {
             STATE_BOOST => self.restore_min_cpus(),
             STATE_SCENEMODE => self.restore_online(),
             _ => {}
+        }
+        // 残留核兜底：进入新状态前先把上次恢复失败的核拉回在线——
+        // 否则重新进入 scenemode 时 offline_cores 读到 online=0 会跳过记录，
+        // 这些核永远失去恢复登记
+        if !self.offlined.is_empty() {
+            self.restore_online();
         }
 
         // 进入目标状态
@@ -238,6 +249,10 @@ impl CoreCtlManager {
     /// 随后把守护进程自身全部线程钉到专用小核，避免后台任务堵塞调度服务。
     fn offline_cores(&mut self) {
         for cpu in scenemode_targets() {
+            // 防重复：上轮恢复失败的残留核（已在 offlined 中）跳过重复登记
+            if self.offlined.iter().any(|(c, _)| *c == cpu) {
+                continue;
+            }
             let path = format!("/sys/devices/system/cpu/cpu{}/online", cpu);
             let orig = fs::read_to_string(&path)
                 .ok()
@@ -334,10 +349,16 @@ impl CoreCtlManager {
         }
     }
 
-    /// 恢复全部被下线的核：按快照值写回 online，带回读 + 一次重试
-    /// （亮屏后核必须回来，失败必须闹响）。
+    /// 恢复被下线的核：按快照值写回 online，带回读 + 一次重试。
+    /// **恢复失败的核保留在 offlined 中**（此前 clear 掉后状态机回 NONE 再无
+    /// 重试路径，写回被内核拒绝/异步热插拔未完成的核会永久离线——实测亮屏后
+    /// 大核 4-7 一直不上线）。残留核由 set_power_state 的 STATE_NONE 分支在
+    /// 每 2s 周期调用中重试，直到全部恢复。
     fn restore_online(&mut self) {
-        for (cpu, orig) in &self.offlined {
+        let offlined = std::mem::take(&mut self.offlined);
+        let total = offlined.len();
+        let mut failed = Vec::new();
+        for (cpu, orig) in offlined {
             let path = format!("/sys/devices/system/cpu/cpu{}/online", cpu);
             let write_back = |p: &str, v: &str| {
                 crate::utils::try_write_file(p, v).is_ok()
@@ -346,25 +367,42 @@ impl CoreCtlManager {
                         .map(|s| s.trim() == v)
                         .unwrap_or(false)
             };
-            if !write_back(&path, orig) && !write_back(&path, orig) {
-                warn!(
+            if !write_back(&path, &orig) && !write_back(&path, &orig) {
+                // 周期重试期间每次尝试都会经过这里，降为 debug 防刷屏；
+                // 失败汇总由下方 restore-pending 打点
+                debug!(
                     "{}",
                     t_with_args("corectl-write-failed", &fluent_args!("path" => path))
                 );
+                failed.push((cpu, orig));
             }
         }
-        if !self.offlined.is_empty() {
+        let recovered = total - failed.len();
+        if recovered > 0 {
             info!(
                 "{}",
                 t_with_args(
                     "corectl-scenemode-off",
+                    &fluent_args!("count" => recovered.to_string())
+                )
+            );
+        }
+        // 失败项保留，等待下个周期重试；成功项自然丢弃
+        self.offlined = failed;
+        if !self.offlined.is_empty() {
+            warn!(
+                "{}",
+                t_with_args(
+                    "corectl-restore-pending",
                     &fluent_args!("count" => self.offlined.len().to_string())
                 )
             );
         }
-        self.offlined.clear();
-        // 解除专用核钉定（守护进程线程恢复全核）
-        self.unpin_self();
+        // 全部恢复后才解除专用核钉定（守护进程线程恢复全核）；
+        // 有残留时保持钉定——守护线程仍应避开离线核池
+        if self.offlined.is_empty() {
+            self.unpin_self();
+        }
     }
 
     /// 恢复各 cluster 的 min_cpus 快照（boost 退出）。

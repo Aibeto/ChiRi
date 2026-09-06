@@ -232,6 +232,7 @@ corectl-boost-on = [CoreCtl] boost: { $count } 个 cluster 的 min_cpus 已抬�
 corectl-boost-off = [CoreCtl] 已恢复 core_ctl min_cpus 快照
 corectl-scenemode-on = [CoreCtl] scenemode 离线核：已下线 { $count } 个核心（小核全开，大核/prime 断电）
 corectl-scenemode-off = [CoreCtl] 已恢复 { $count } 个被下线的核心
+corectl-restore-pending = [CoreCtl] { $count } 个核心恢复上线失败，将每 2 秒重试
 corectl-self-pinned = [CoreCtl] 调度服务已钉到专用小核 cpu{ $core }
 corectl-unavailable = [CoreCtl] 未发现可用的 core_ctl 节点，接管跳过
 corectl-write-failed = [CoreCtl] core_ctl 写入失败: { $path }

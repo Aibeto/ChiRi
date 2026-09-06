@@ -22,6 +22,7 @@ use std::error::Error;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::SyncSender;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -74,6 +75,10 @@ fn update_state_if_changed(state_arc: &Arc<Mutex<bool>>, new_state: bool, source
 /// 背光设备路径缓存：`None` 表示尚未发现，每次校验重扫直到找到——
 /// 避免开机早期 /sys/class/backlight 尚未就绪时永久缓存 None 导致自愈失效。
 static BACKLIGHT_CACHE: Mutex<Option<PathBuf>> = Mutex::new(None);
+/// 缓存背光节点连续不可读计数（verify_screen_state 维护，达限丢弃缓存重扫）
+static BACKLIGHT_READ_FAILS: AtomicU32 = AtomicU32::new(0);
+/// 连续不可读丢弃阈值：verify 每轮调用（息屏期 1s / 亮屏期 1.5s+），8 次 ≈ 8~12s
+const BACKLIGHT_READ_FAIL_LIMIT: u32 = 8;
 
 /// 扫描 /sys/class/backlight，返回首个具备状态节点（bl_power 或 actual_brightness）的背光设备路径
 fn backlight_dev_path() -> Option<PathBuf> {
@@ -94,15 +99,29 @@ fn backlight_dev_path() -> Option<PathBuf> {
     cache.clone()
 }
 
-/// 读取背光设备的屏幕开关状态：`bl_power == 0` 视为亮屏，读取失败回退 `actual_brightness > 0`。
-/// 与 uevent 处理分支同一判定口径，避免两套来源互相打架。
+/// 读取背光设备的屏幕开关状态。
+///
+/// 判定口径（实测案例：部分 DRM 面板驱动的 bl_power 在息屏路径写 FB_BLANK
+/// 后，亮屏路径不清零——节点长期停留非 0，把它当权威"灭屏"信号会让
+/// verify 自愈反向把状态钉死在 false：亮屏使用微信/QQ 全程被判息屏，
+/// scenemode 下线大核 + UI 挤小核，卡到不可用）：
+/// - `bl_power == 0` → 亮（FB 明确未 blank，权威亮屏信号）；
+/// - `bl_power != 0` → 不可信（可能是上述陈旧值），以 `actual_brightness`
+///   为准：Android 息屏时会把背光亮度写 0，>0 即面板在发光；
+/// - `bl_power` 不可读 → 回退 `actual_brightness > 0`（原行为）；
+/// - 全部不可读 → None（调用方静默跳过）。
 fn read_backlight_state(dev: &Path) -> Option<bool> {
     let bl_power = dev.join("bl_power");
     let actual = dev.join("actual_brightness");
-    crate::utils::read_i32_from_file(&bl_power.to_string_lossy())
-        .map(|v| v == 0)
-        .or_else(|_| crate::utils::read_i32_from_file(&actual.to_string_lossy()).map(|v| v > 0))
-        .ok()
+    let bl = crate::utils::read_i32_from_file(&bl_power.to_string_lossy()).ok();
+    let act = crate::utils::read_i32_from_file(&actual.to_string_lossy()).ok();
+    match (bl, act) {
+        (Some(0), _) => Some(true),
+        (Some(_), Some(a)) => Some(a > 0),
+        (Some(_), None) => Some(false),
+        (None, Some(a)) => Some(a > 0),
+        (None, None) => None,
+    }
 }
 
 /// 屏幕状态自愈校验：uevent 可能漏报（开机早期背光未就绪、长时间息屏后唤醒、
@@ -110,10 +129,25 @@ fn read_backlight_state(dev: &Path) -> Option<bool> {
 /// scenemode 计时器在亮屏期间被误触发、且后续亮屏因无 ScreenStateChange(true) 无法退出。
 /// 由 app_detect 主循环每轮调用一次，直接读 backlight sysfs 校正 arc；
 /// 无背光节点或读取失败时静默跳过，不干扰 uevent 主路径。
+/// 缓存节点连续 8 次全不可读（~8s，app_detect 息屏轮询周期 1s）时丢弃缓存
+/// 重扫 /sys/class/backlight：背光设备可能在运行中被移除/更换（多屏/折叠态），
+/// 死缓存会让自愈永久失效。
 pub fn verify_screen_state(state_arc: &Arc<Mutex<bool>>) {
     if let Some(dev) = backlight_dev_path() {
-        if let Some(state) = read_backlight_state(&dev) {
-            update_state_if_changed(state_arc, state, "verify");
+        match read_backlight_state(&dev) {
+            Some(state) => {
+                BACKLIGHT_READ_FAILS.store(0, Ordering::Relaxed);
+                update_state_if_changed(state_arc, state, "verify");
+            }
+            None => {
+                let fails = BACKLIGHT_READ_FAILS.fetch_add(1, Ordering::Relaxed) + 1;
+                if fails >= BACKLIGHT_READ_FAIL_LIMIT {
+                    if let Ok(mut cache) = BACKLIGHT_CACHE.lock() {
+                        *cache = None;
+                    }
+                    BACKLIGHT_READ_FAILS.store(0, Ordering::Relaxed);
+                }
+            }
         }
     }
 }

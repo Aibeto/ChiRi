@@ -233,6 +233,7 @@ corectl-boost-on = [CoreCtl] boost: min_cpus raised to keep all { $count } clust
 corectl-boost-off = [CoreCtl] core_ctl min_cpus snapshot restored
 corectl-scenemode-on = [CoreCtl] scenemode core offline: { $count } cores taken offline (littles kept, big/prime powered down)
 corectl-scenemode-off = [CoreCtl] { $count } offlined cores restored online
+corectl-restore-pending = [CoreCtl] { $count } cores failed to come back online, retrying every 2s
 corectl-self-pinned = [CoreCtl] scheduler service pinned to dedicated little core cpu{ $core }
 corectl-unavailable = [CoreCtl] no usable core_ctl node found, takeover skipped
 corectl-write-failed = [CoreCtl] core_ctl write failed: { $path }
