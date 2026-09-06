@@ -163,6 +163,134 @@ fn read_cpuset_tasks(group: &str) -> Vec<i32> {
         .collect()
 }
 
+// ════════════════════════════════════════════════════════════════
+//  专用核独占（scenemode）：把一颗小核完全留给调度服务
+// ════════════════════════════════════════════════════════════════
+//
+// 仅 sched_setaffinity 自钉是不排他的——其他进程仍可被调度到该核。
+// 真正独占 = 把该核从全部业务 cpuset 组（top-app/foreground/background/
+// system-background/restricted）的 cpus 中移除：组内任务从此无法落到该核，
+// 新进程继承父组掩码同样被排除。调度服务自身线程则移入 cpuset 根组（根组
+// 含全部在线核，sched_setaffinity 的钉定不会被组掩码二次过滤）。
+// 覆盖范围说明：Android 应用/框架任务全部落在上述业务组内，根组仅 init/
+// magiskd 等常驻守护进程（空闲驻留，无周期性负载）——排除是实践意义上的
+// 完全独占。
+
+/// scenemode 期间被独占核排除的业务 cpuset 组（与 apply 的组口径一致）
+const RESERVED_EXCLUDE_GROUPS: [&str; 5] = [
+    "top-app",
+    "foreground",
+    "background",
+    "system-background",
+    "restricted",
+];
+
+/// 解析 cpuset cpus 值（"0-3,5" → [0,1,2,3,5]）；防御性限制 b < 1024
+fn parse_cpu_list(s: &str) -> Vec<usize> {
+    let mut out = Vec::new();
+    for part in s.split(',') {
+        let part = part.trim();
+        if let Some((a, b)) = part.split_once('-') {
+            if let (Ok(a), Ok(b)) = (a.trim().parse::<usize>(), b.trim().parse::<usize>()) {
+                if a <= b && b < 1024 {
+                    out.extend(a..=b);
+                }
+            }
+        } else if let Ok(a) = part.parse::<usize>() {
+            out.push(a);
+        }
+    }
+    out
+}
+
+/// 把 `core` 从全部业务 cpuset 组的 cpus 中移除（其他进程不可再调度到该核）。
+/// 被修改组的 (组名, 原始 cpus) 追加进 `snapshot`（已在快照中的组不重复记录，
+/// 防止框架重写 top-app 后的中间值覆盖真实原始值）；周期重入用于纠偏——
+/// 框架 CpusetManager 可能把保留核加回 top-app，每 2s 重写一次。
+pub(crate) fn exclude_core_from_cpusets(core: usize, snapshot: &mut Vec<(String, String)>) {
+    for group in RESERVED_EXCLUDE_GROUPS {
+        let Some(cur) = read_cpuset_cpus(group) else {
+            continue;
+        };
+        let mut set = parse_cpu_list(&cur);
+        if !set.contains(&core) {
+            continue;
+        }
+        set.retain(|&c| c != core);
+        let new = format_cpu_list(set);
+        if new == cur {
+            continue;
+        }
+        write_cpuset_cpus(group, &new);
+        if !snapshot.iter().any(|(g, _)| g == group) {
+            snapshot.push((group.to_string(), cur));
+        }
+    }
+}
+
+/// 恢复 exclude_core_from_cpusets 快照（退出 scenemode 时把保留核还给业务组）
+pub(crate) fn restore_excluded_cpusets(snapshot: Vec<(String, String)>) {
+    for (group, cpus) in snapshot {
+        write_cpuset_cpus(&group, &cpus);
+    }
+}
+
+/// 自身所在 cpuset 组的相对路径（"/"=根组；None = 无 cpuset 层级/读取失败）
+fn self_cpuset_group() -> Option<String> {
+    let text = std::fs::read_to_string("/proc/self/cgroup").ok()?;
+    for line in text.lines() {
+        // v1 格式：hierarchy-ID:controller-list:cgroup-path
+        let mut parts = line.splitn(3, ':');
+        let _hier = parts.next()?;
+        let ctrls = parts.next()?;
+        let path = parts.next()?;
+        if ctrls.split(',').any(|c| c.trim() == "cpuset") {
+            return Some(path.trim().to_string());
+        }
+    }
+    None
+}
+
+fn cpuset_tasks_path(group_path: &str) -> String {
+    let p = group_path.trim_end_matches('/');
+    if p.is_empty() {
+        "/dev/cpuset/tasks".to_string()
+    } else {
+        format!("/dev/cpuset{p}/tasks")
+    }
+}
+
+fn self_tids() -> Vec<i32> {
+    let mut out = Vec::new();
+    if let Ok(rd) = std::fs::read_dir("/proc/self/task") {
+        for e in rd.flatten() {
+            if let Some(t) = e.file_name().to_str().and_then(|s| s.parse::<i32>().ok()) {
+                out.push(t);
+            }
+        }
+    }
+    out
+}
+
+/// 把守护进程自身全部线程移入 cpuset 根组（根组含全部在线核，专用核钉定
+/// 才不会被原组掩码二次过滤）。返回原组相对路径供退出恢复；None = 无法
+/// 读取原组（此时不移动，独占退化为「尽力而为」）。
+pub(crate) fn move_self_to_cpuset_root() -> Option<String> {
+    let orig = self_cpuset_group()?;
+    for tid in self_tids() {
+        let _ = std::fs::write("/dev/cpuset/tasks", tid.to_string());
+    }
+    Some(orig)
+}
+
+/// 把守护进程自身全部线程移回原 cpuset 组（退出 scenemode）
+pub(crate) fn move_self_to_cpuset_group(group_path: &str) {
+    let tasks = cpuset_tasks_path(group_path);
+    for tid in self_tids() {
+        let _ = std::fs::write(&tasks, tid.to_string());
+    }
+}
+
 /// 设置单个线程的 CPU 亲和掩码。
 /// 用 zeroed 的 `cpu_set_t` 分配：保证对齐与布局合法（`vec![0u8]` 起始地址对齐仅 1，
 /// 强转 `*const cpu_set_t` 是未对齐指针，依赖 libc 包装器不解引用的运气，不可靠）。

@@ -172,7 +172,7 @@ pub fn is_chiri_soc() -> bool {
 /// 返回第一个命中设备硬件标识的处理器片段。
 /// 顺序与 CHIRI_SOC_HINTS 一致。配置已编译进二进制（embedded_config_str），
 /// 匹配只看硬件标识，不再依赖磁盘目录是否存在——磁盘快照缺失/被删不影响识别。
-fn matched_soc_hint() -> Option<&'static str> {
+pub(crate) fn matched_soc_hint() -> Option<&'static str> {
     if !is_chiri_soc() {
         return None;
     }

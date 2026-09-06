@@ -203,14 +203,13 @@ pub fn monitor_screen_state_uevent(
                         }
                     } else if event.subsystem == "backlight" && event.action == ActionType::Change {
                         thread::sleep(Duration::from_millis(100));
-                        let dev = event.devpath.display();
-                        let bl_power = format!("/sys{}/bl_power", dev);
-                        let actual = format!("/sys{}/actual_brightness", dev);
-
-                        let new_state = crate::utils::read_i32_from_file(&bl_power)
-                            .map(|v| v == 0)
-                            .or_else(|_| crate::utils::read_i32_from_file(&actual).map(|v| v > 0))
-                            .ok();
+                        // 与 verify 自愈同口径（read_backlight_state）：bl_power==0 → 亮；
+                        // 非 0（含亮屏路径不清零的陈旧值）以 actual_brightness 为准，
+                        // 不可读返回 None。此前行内旧口径把陈旧 bl_power 非 0 当权威
+                        // 灭屏信号，亮屏期间每次背光 uevent 误报 OFF、~1s 后才被 verify
+                        // 拉回，纠正竞态失败时调度器滞留息屏态、误触发 scenemode。
+                        let dev = std::path::PathBuf::from(format!("/sys{}", event.devpath.display()));
+                        let new_state = read_backlight_state(&dev);
 
                         if let Some(state) = new_state {
                             debug!(
@@ -218,7 +217,7 @@ pub fn monitor_screen_state_uevent(
                                 t_with_args(
                                     "screen-uevent-backlight",
                                     &fluent_args!(
-                                        "dev" => dev.to_string(),
+                                        "dev" => dev.display().to_string(),
                                         "state" => state.to_string()
                                     )
                                 )
@@ -233,7 +232,7 @@ pub fn monitor_screen_state_uevent(
                                 t_with_args(
                                     "screen-uevent-backlight-unreadable",
                                     &fluent_args!(
-                                        "dev" => dev.to_string()
+                                        "dev" => dev.display().to_string()
                                     )
                                 )
                             );

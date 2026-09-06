@@ -21,9 +21,11 @@
 /// - **Boost**（performance/fast/特调）：各 cluster 的 core_ctl `min_cpus` 抬到
 ///   全组常在线，防止厂商热插拔把大核下线、与 ChiRi 升降频决策打架；
 /// - **Scenemode 离线**（息屏 5 分钟后的深度省电）：解除 boost 后直接写
-///   `/sys/devices/system/cpu/cpuN/online` 下线 CPU1..max（只留 CPU0 引导核），
-///   大核簇/prime 整簇断电消除空转漏电流；逐核写后回读验证，失败的核跳过；
-///   周期重入时纠偏（厂商守护进程偷偷拉起的核会被重新下线）；
+///   `/sys/devices/system/cpu/cpuN/online`——**小核 + 大核全开常驻**（频率
+///   上限由 scenemode CLG 配置压制），仅 prime 整簇断电消除空转漏电流；
+///   另将编号最大的小核**独占**给调度服务（从业务 cpuset 组移除 + 自身线程
+///   移入根组 + 全线程自钉）；逐核写后回读验证，失败的核跳过；周期重入时
+///   纠偏（厂商守护进程偷偷拉起的核会被重新下线、框架加回保留核会被重新移除）；
 /// - **Normal**：恢复全部快照（min_cpus / online）。
 ///
 /// 为什么用 min_cpus/online 而不是逐核"按需唤醒"：唤醒大核要拉电压轨、重建
@@ -47,7 +49,7 @@ use crate::i18n::{t, t_with_args};
 const STATE_NONE: u8 = 0;
 /// 状态：boost（min_cpus 全组常在线）
 const STATE_BOOST: u8 = 1;
-/// 状态：scenemode 离线（只留 CPU0）
+/// 状态：scenemode 离线（小核+大核常驻，prime 断电，1 颗小核独占给调度服务）
 const STATE_SCENEMODE: u8 = 2;
 
 /// 单个 cluster 的 core_ctl 控制节点
@@ -72,6 +74,12 @@ pub struct CoreCtlManager {
     offlined: Vec<(u32, String)>,
     /// scenemode 下守护进程自身线程是否已钉到专用小核
     self_pinned: bool,
+    /// scenemode 独占给调度服务的小核（None = 未独占/设备无 cpuset 时降级）
+    reserved_core: Option<usize>,
+    /// 独占时被移除核的业务 cpuset 组快照（(组名, 原始 cpus)，退出恢复用）
+    reserved_cpusets: Vec<(String, String)>,
+    /// 自身线程被移入根组前的原 cpuset 组相对路径（退出恢复用）
+    self_cpuset_group: Option<String>,
 }
 
 /// 枚举守护进程自身全部线程 TID（/proc/self/task）
@@ -87,31 +95,14 @@ fn self_tids() -> Vec<i32> {
     out
 }
 
-/// scenemode 常驻在线核下限：保证待命响应（电源键等 PMIC 中断由任意在线核
-/// µs 级处理，3 个小核留足后台任务与中断余量）
-const STANDBY_CORES: usize = 3;
-
-/// 计算 scenemode 下线目标：**小核全开**；大核簇 + prime 整簇下线；
-/// 若小核数量不足 3 个，从大核簇按编号从小到大补足差额（同簇核心同质，
-/// 编号最小者即最省电的大核）。CPU0（引导核）永不下线。
+/// 计算 scenemode 下线目标：**小核 + 大核全开常驻**（频率上限由 scenemode
+/// CLG 配置统一压制），仅 prime（超大核）整簇下线。此外 scenemode 期间会
+/// 把编号最大的小核独占给调度服务（从业务 cpuset 组移除 + 自身线程移入
+/// 根组 + 自钉，见 offline_cores 与 affinity 的专用核独占助手）。
 fn scenemode_targets() -> Vec<u32> {
     let ranges = crate::common::chiri_core_ranges();
-    let little_n = ranges.little.clone().count();
-    // 常驻核：全部小核；不足 STANDBY_CORES 时从大核补足
-    let keep_big = STANDBY_CORES.saturating_sub(little_n);
-    let mut targets = Vec::new();
-    let mut kept_big = 0usize;
-    for cpu in ranges.big.clone() {
-        if kept_big < keep_big {
-            kept_big += 1;
-            continue;
-        }
-        targets.push(cpu as u32);
-    }
-    for cpu in ranges.prime.clone() {
-        targets.push(cpu as u32);
-    }
-    // 防御：引导核永不下线
+    let mut targets: Vec<u32> = ranges.prime.clone().map(|c| c as u32).collect();
+    // 防御：引导核（CPU0）无法热拔出，永不下线（prime 不含 0，双保险）
     targets.retain(|&c| c != 0);
     targets
 }
@@ -124,6 +115,9 @@ impl CoreCtlManager {
             state: STATE_NONE,
             offlined: Vec::new(),
             self_pinned: false,
+            reserved_core: None,
+            reserved_cpusets: Vec::new(),
+            self_cpuset_group: None,
         }
     }
 
@@ -175,7 +169,7 @@ impl CoreCtlManager {
 
     /// 统一状态入口（内部去重，可被 2s 周期安全调用）。
     /// - `boost`：min_cpus 抬到全组常在线（性能模式）；
-    /// - `scenemode`：下线 CPU1..max 只留引导核（息屏深度省电）。
+    /// - `scenemode`：prime 整簇下线（小核+大核常驻），独占一颗小核给调度服务。
     /// 两者互斥；切换时先退出旧状态（恢复快照）再进入新状态。
     /// scenemode 维持期每次调用都会纠偏（重新下线被外部拉起的核）。
     /// STATE_NONE 下若仍有恢复失败的核残留，周期性重试恢复
@@ -243,10 +237,13 @@ impl CoreCtlManager {
         self.state = target;
     }
 
-    /// scenemode：下线大核簇 + prime（小核全开；小核不足 3 个时按编号从小到大
-    /// 保留大核补足常驻数）。逐核写 online=0 并回读验证；写失败/内核拒绝的核
-    /// 跳过（记录 warn）。成功下线的核连同原始 online 值记入 offlined，供恢复。
-    /// 随后把守护进程自身全部线程钉到专用小核，避免后台任务堵塞调度服务。
+    /// scenemode：下线 prime（超大核）整簇——小核 + 大核全开常驻，频率上限
+    /// 由 scenemode CLG 配置统一压制。逐核写 online=0 并回读验证；写失败/
+    /// 内核拒绝的核跳过（记录 warn）。成功下线的核连同原始 online 值记入
+    /// offlined，供恢复。
+    /// 随后**独占一颗小核给调度服务**：选编号最大的小核，从全部业务 cpuset
+    /// 组移除（其他进程不可调度到该核）+ 自身线程移入根组 + 全线程自钉，
+    /// 保证后台任务堵塞不了调度服务（设备无 cpuset 时降级为仅自钉）。
     fn offline_cores(&mut self) {
         for cpu in scenemode_targets() {
             // 防重复：上轮恢复失败的残留核（已在 offlined 中）跳过重复登记
@@ -283,7 +280,18 @@ impl CoreCtlManager {
             }
             self.offlined.push((cpu, orig));
         }
-        // 专用小核：调度服务独占一颗小核，防止后台任务堵塞遥测/决策线程
+        // 独占小核：sched_setaffinity 自钉不排他，须同时把该核从业务 cpuset
+        // 组移除 + 自身线程移入根组（钉定才不会被组掩码二次过滤）
+        let ranges = crate::common::chiri_core_ranges();
+        if let Some(core) = ranges.little.clone().last() {
+            crate::chiri::affinity::exclude_core_from_cpusets(
+                core,
+                &mut self.reserved_cpusets,
+            );
+            self.self_cpuset_group = crate::chiri::affinity::move_self_to_cpuset_root();
+            self.reserved_core = Some(core);
+        }
+        // 专用小核自钉
         self.pin_self_dedicated();
         if !self.offlined.is_empty() {
             info!(
@@ -296,15 +304,15 @@ impl CoreCtlManager {
         }
     }
 
-    /// 把守护进程自身全部线程钉到专用小核（编号最大的 little 核——CPU0 承担
-    /// 最多外部中断与内核家务，编号大者更安静）。scenemode 下调度服务
-    /// （scheduler_ipc / telemetry / 触摸检测等）独占该核，免受后台任务挤占。
+    /// 把守护进程自身全部线程钉到专用小核（offline_cores 已独占的
+    /// reserved_core——该核已从业务 cpuset 组移除、自身线程已移入根组，
+    /// sched_setaffinity 由此实现真独占）。scenemode 下调度服务
+    /// （scheduler_ipc / telemetry / 触摸检测等）独占该核，后台任务堵塞不了。
     fn pin_self_dedicated(&mut self) {
         if self.self_pinned {
             return;
         }
-        let ranges = crate::common::chiri_core_ranges();
-        let Some(core) = ranges.little.clone().last() else {
+        let Some(core) = self.reserved_core else {
             return;
         };
         let mut all_ok = true;
@@ -336,8 +344,10 @@ impl CoreCtlManager {
         self.self_pinned = false;
     }
 
-    /// scenemode 维持期纠偏：已下线核若被外部重新拉起，重新写 0。
-    /// 只读 online 文件（每 2s 最多 ~7 次小读），无写发生时零开销。
+    /// scenemode 维持期纠偏：已下线核若被外部重新拉起，重新写 0；被独占的
+    /// 专用小核若被框架 CpusetManager 加回业务组（top-app 的 cpus 由框架
+    /// 动态管理），重新从组内移除。只读 online 文件 + 组 cpus（每 2s 数次
+    /// 小读），无写发生时零开销。
     fn reassert_offline(&mut self) {
         for (cpu, _) in &self.offlined {
             let path = format!("/sys/devices/system/cpu/cpu{}/online", cpu);
@@ -346,6 +356,12 @@ impl CoreCtlManager {
                     let _ = crate::utils::try_write_file(&path, "0");
                 }
             }
+        }
+        if let Some(core) = self.reserved_core {
+            crate::chiri::affinity::exclude_core_from_cpusets(
+                core,
+                &mut self.reserved_cpusets,
+            );
         }
     }
 
@@ -398,9 +414,18 @@ impl CoreCtlManager {
                 )
             );
         }
-        // 全部恢复后才解除专用核钉定（守护进程线程恢复全核）；
+        // 全部恢复后才解除专用核钉定与独占（守护进程线程恢复全核）；
         // 有残留时保持钉定——守护线程仍应避开离线核池
         if self.offlined.is_empty() {
+            // 释放独占小核：cpuset 组恢复原始值（保留核还给业务组）、自身
+            // 线程移回原组、解除全线程自钉
+            crate::chiri::affinity::restore_excluded_cpusets(std::mem::take(
+                &mut self.reserved_cpusets,
+            ));
+            if let Some(group) = self.self_cpuset_group.take() {
+                crate::chiri::affinity::move_self_to_cpuset_group(&group);
+            }
+            self.reserved_core = None;
             self.unpin_self();
         }
     }

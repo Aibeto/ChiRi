@@ -199,49 +199,119 @@ if [ "$HOT_UPDATE_AVAILABLE" = "true" ]; then
         
         # 热更新流程
         MODDIR="/data/adb/modules/chiri"
+        # **必须 export**：安装器（KSU/Magisk）环境可能已把 MODDIR 导出为
+        # staging 目录（modules_update），service.sh 的 [ -z "$MODDIR" ] 会
+        # 直接继承错位路径——看门狗从 staging 拉起 daemon、日志/pidfile/锁
+        # 全部写入 staging，KSU 清理 staging 后二进制消失、调度静默死亡。
+        # export 后子进程强制拿到 live 目录（仅局部赋值子进程不可见）。
+        export MODDIR
         
         # 1. 停止守护进程和主进程
+        # **必须先杀旧看门狗**：看门狗每 3s 把 daemon 拉回（此时还是旧二进制），
+        # 复活若落在下方文件复制窗口，cp 覆盖运行中的 yumi 会 ETXTBSY 失败且
+        # 被 2>/dev/null 吞掉——模块目录残留旧版本，热更新后手动重启调度仍是
+        # 旧版，须重启一次（KSU 应用 modules_update）才被覆盖固化
         ui_print "$MSG_STOPPING_DAEMON"
+        PID_FILE="$MODDIR/logs/watchdog.pid"
+        if [ -f "$PID_FILE" ]; then
+            pid=$(cat "$PID_FILE" 2>/dev/null)
+            case "$pid" in
+                ''|0|*[!0-9]*) ;;
+                *) kill "$pid" 2>/dev/null ;;
+            esac
+            rm -f "$PID_FILE"
+        fi
         if [ -x "/system/bin/killall" ]; then
-            /system/bin/killall yumi 2>/dev/null
+            /system/bin/killall -9 yumi 2>/dev/null
         elif [ -n "$BUSYBOX" ]; then
-            $BUSYBOX killall yumi 2>/dev/null
+            $BUSYBOX killall -9 yumi 2>/dev/null
         fi
         sleep 1
-        
+
         ui_print "$MSG_STOPPING_MAIN"
         if [ -x "/system/bin/killall" ]; then
-            /system/bin/killall yumi 2>/dev/null
+            /system/bin/killall -9 yumi 2>/dev/null
         elif [ -n "$BUSYBOX" ]; then
-            $BUSYBOX killall yumi 2>/dev/null
+            $BUSYBOX killall -9 yumi 2>/dev/null
         fi
         sleep 1
-        
+
+        # 轮询确认 daemon 已真正退出（最多 ~5s）：卡在不可中断 IO（D 状态）的
+        # 进程对 SIGKILL 也要等 IO 返回，未死透时 cp 覆盖二进制会 ETXTBSY
+        YUMI_ALIVE=true
+        n=0
+        while [ $n -lt 5 ]; do
+            if [ -x "/system/bin/pidof" ]; then
+                DAEMON_PID=$(/system/bin/pidof yumi 2>/dev/null)
+            elif [ -n "$BUSYBOX" ]; then
+                DAEMON_PID=$($BUSYBOX pgrep -x yumi 2>/dev/null)
+            else
+                DAEMON_PID=""
+            fi
+            if [ -z "$DAEMON_PID" ]; then
+                YUMI_ALIVE=false
+                break
+            fi
+            sleep 1
+            n=$((n + 1))
+        done
+
         # 2. 复制模块文件到目标目录
         ui_print "$MSG_COPYING_FILES"
-        # 备份用户配置文件
+        # 备份用户配置文件（注意：rules.yaml 在模块根，不在 config/ 子目录）
         if [ -f "$MODDIR/config/config.yaml" ]; then
             cp "$MODDIR/config/config.yaml" "$MODDIR/config/config.yaml.bak"
         fi
-        if [ -f "$MODDIR/config/rules.yaml" ]; then
-            cp "$MODDIR/config/rules.yaml" "$MODDIR/config/rules.yaml.bak"
+        if [ -f "$MODDIR/rules.yaml" ]; then
+            cp "$MODDIR/rules.yaml" "$MODDIR/rules.yaml.bak"
         fi
-        
+
         # 复制新文件
         cp -r "$MODPATH"/* "$MODDIR/" 2>/dev/null
-        
+
+        # 二进制单独复制并校验：daemon 未完全退出（YUMI_ALIVE）或内核仍持有
+        # 文本页时 cp 会 ETXTBSY 失败——静默失败会残留旧版本，热更新后调度
+        # 跑旧版。失败时恢复配置备份并重启旧版服务保持调度连续，明确告知
+        # 用户当前为旧版。
+        # 注意：热更新路径**必须以 exit 1 结束**（成功与失败皆然）——exit 0
+        # 会让 KSU 把模块归为「待更新」，Action/WebUI 被禁用直到重启。
+        UPDATE_OK=true
+        if [ "$YUMI_ALIVE" = "true" ] || ! cp "$MODPATH/core/bin/yumi" "$MODDIR/core/bin/yumi" 2>/dev/null; then
+            UPDATE_OK=false
+        fi
+        # 关键文件存在性抽查：上面的 cp -r 把错误吞进 /dev/null，ENOSPC/IO 错误
+        # 会留下半新半旧模块且用户无感知（成功提示只看 daemon 是否存活）。
+        # service.sh/module.prop/allowHotUpdate/rules.yaml 任一缺失即判失败，
+        # 走与二进制相同的回滚分支。
+        for key_file in service.sh module.prop allowHotUpdate rules.yaml; do
+            [ -f "$MODDIR/$key_file" ] || UPDATE_OK=false
+        done
+        if [ "$UPDATE_OK" = "false" ]; then
+            if [ -f "$MODDIR/config/config.yaml.bak" ]; then
+                mv "$MODDIR/config/config.yaml.bak" "$MODDIR/config/config.yaml"
+            fi
+            if [ -f "$MODDIR/rules.yaml.bak" ]; then
+                mv "$MODDIR/rules.yaml.bak" "$MODDIR/rules.yaml"
+            fi
+            chmod 755 "$MODDIR/core/bin/yumi" 2>/dev/null
+            ui_print "ERROR: hot update copy failed! Old version kept & restarting."
+            ui_print "错误：热更新文件复制失败！正在重启旧版本以保持调度。"
+            ui_print "当前仍为旧版本——请重新刷入模块或重试热更新完成升级。"
+            ui_print "Old version is running — re-flash or retry the hot update to upgrade."
+        fi
+
         # 恢复用户配置文件
         if [ -f "$MODDIR/config/config.yaml.bak" ]; then
             mv "$MODDIR/config/config.yaml.bak" "$MODDIR/config/config.yaml"
         fi
-        if [ -f "$MODDIR/config/rules.yaml.bak" ]; then
-            mv "$MODDIR/config/rules.yaml.bak" "$MODDIR/config/rules.yaml"
+        if [ -f "$MODDIR/rules.yaml.bak" ]; then
+            mv "$MODDIR/rules.yaml.bak" "$MODDIR/rules.yaml"
         fi
-        
-        # 设置权限
+
+        # 设置权限（注意二进制在 core/bin/yumi，模块根下并无 yumi 文件）
         chmod 755 "$MODDIR/service.sh" 2>/dev/null
         chmod 755 "$MODDIR/action.sh" 2>/dev/null
-        chmod 755 "$MODDIR/yumi" 2>/dev/null
+        chmod 755 "$MODDIR/core/bin/yumi" 2>/dev/null
         
         # 3. 重启调度服务
         # 使用setsid启动service.sh，确保进程脱离安装环境存活

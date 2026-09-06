@@ -368,6 +368,8 @@ impl CoreGroupWorker {
 
     /// 决策入口：每次 SystemLoadUpdate 触发，只计算目标性能比，不写 sysfs。
     /// 同时记录 devimp tick 行所需摘要（over/under 计数、目标性能、决策标签）。
+    /// 决策标签四种：up / down_wait / down / hold。hold 表示降频落点与当前频点
+    /// 相同（ceiling/floor 钳制稳态），不计 debounce、不写频。
     fn on_load_update(&mut self, core_utils: &[f32]) {
         let raw_util = self.cluster.max_util(core_utils);
         self.dev_raw_util = raw_util;
@@ -440,19 +442,30 @@ impl CoreGroupWorker {
             }
         } else {
             self.cluster.up_wait = 0;
-            self.cluster.down_wait += 1;
-            // 极低负载立即降频（跳过 down_wait 确认期），否则连续满 down_rate_limit_ticks
-            if self.cluster.down_wait >= self.cfg.down_rate_limit_ticks
-                || util < self.cfg.down_fast_threshold
-            {
-                self.dev_decision = "down";
-                // 直接降上限（能效优先）：不做平滑渐变，一步到位写目标档。
-                // 降 ceiling 只收窄 schedutil 可用区间，不会把实际频率抬上去，
-                // 无需读取 scaling_cur_freq 做钳制
-                let target_freq = self.cluster.find_nearest_freq(target_perf);
-                self.cluster.current_perf = self.cluster.ratio_of_freq(target_freq);
+            // 先算降频落点：与当前频点相同（ceiling/floor 钳制稳态，如 powersave
+            // little ceiling 0.60 卡住时 util=1.00、tgt 略低于 current 但落点同一档
+            // OPP）则写频无效果——不计数、不写频，decision 标 hold。此前该稳态
+            // 每 tick 标 down 且 deb_down 无限增长，devimp 出现「满载却 decision=down」
+            // 的矛盾记录。真实降频路径（落点不同）行为不变；flush 每 tick 仍会
+            // 重写 ceiling 防篡改，稳态跳过决策写频无副作用。
+            let target_freq = self.cluster.find_nearest_freq(target_perf);
+            if target_freq == self.cluster.current_freq {
+                self.cluster.down_wait = 0;
+                self.dev_decision = "hold";
             } else {
-                self.dev_decision = "down_wait";
+                self.cluster.down_wait += 1;
+                // 极低负载立即降频（跳过 down_wait 确认期），否则连续满 down_rate_limit_ticks
+                if self.cluster.down_wait >= self.cfg.down_rate_limit_ticks
+                    || util < self.cfg.down_fast_threshold
+                {
+                    self.dev_decision = "down";
+                    // 直接降上限（能效优先）：不做平滑渐变，一步到位写目标档。
+                    // 降 ceiling 只收窄 schedutil 可用区间，不会把实际频率抬上去，
+                    // 无需读取 scaling_cur_freq 做钳制
+                    self.cluster.current_perf = self.cluster.ratio_of_freq(target_freq);
+                } else {
+                    self.dev_decision = "down_wait";
+                }
             }
         }
     }

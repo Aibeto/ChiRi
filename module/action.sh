@@ -67,13 +67,20 @@ WATCHDOG_CMD="sh -c '
   exit 0
 ' sh \"$PID_FILE\" \"$DAEMON_PATH\" \"$STOP_FLAG\" > /dev/null 2>&1"
 
-# 启动看门狗，优先使用 setsid 脱离父进程组
+# 启动看门狗。两个分支都必须「后台化 + 脱离父进程组」：
+# - setsid 直接前台执行会阻塞本脚本（看门狗 while 循环在 daemon 存活期间
+#   永不退出——此前 action 卡在 stopped 之后、"daemon restarted." 永远
+#   打不出来的根因），必须 & 放后台；
+# - nohup 分支同样 & 放后台，但仅 nohup 不够脱离会话，配合 setsid 可用时
+#   优先 setsid（setsid 不可用时 nohup + & 已足够被 init 收养）。
 if [ -n "$SETSID_CMD" ]; then
-  $SETSID_CMD sh -c "$WATCHDOG_CMD"
+  $SETSID_CMD sh -c "$WATCHDOG_CMD" &
 else
-  # fallback: 使用 nohup（兼容性更好，但可能无法完全脱离进程组）
+  # fallback: nohup 后台运行（兼容性更好）
   nohup sh -c "$WATCHDOG_CMD" > /dev/null 2>&1 &
 fi
+# 立即与后台作业脱钩：防止某些 shell 环境在脚本退出时向作业发 SIGHUP
+disown 2>/dev/null || true
 
 # 4. 打印执行结果
 log "daemon restarted."

@@ -55,7 +55,7 @@ export default {
   search_apps: 'Search app name or package',
   not_configured: 'Not configured',
   special_tuned: 'Tuned',
-  desc_special_tuned: 'Built-in tuned profile',
+  desc_special_tuned: 'Built-in tuned profile (tier-less load-following)',
   rescan: 'Rescan',
   scanning: 'Scanning...',
   rescan_done: 'Scan complete',

@@ -55,7 +55,7 @@ export default {
   search_apps: '搜索应用名或包名',
   not_configured: '未配置',
   special_tuned: '特调',
-  desc_special_tuned: '内置特调模式',
+  desc_special_tuned: '内置特调模式（无档位负载直拉）',
   rescan: '重新扫描',
   scanning: '扫描中...',
   rescan_done: '扫描完成',

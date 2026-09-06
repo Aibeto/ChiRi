@@ -221,11 +221,22 @@ fn main() -> Result<()> {
     // cpu_monitor 据此在 120ms 与 40ms 采样间隔间切换
     let ak_active = Arc::new(AtomicBool::new(false));
 
+    // FAS 前台激活共享标志：FasManager 激活/去激活时置位，fps_monitor 据此
+    // 门控 eBPF 探针——FAS 未激活时不建 tokio runtime、不加载 eBPF、不挂
+    // uprobe（此前 daemon 启动即对前台应用挂 queueBuffer uprobe，非 FAS
+    // 会话每帧白付一次探针开销）。由 main.rs 创建，monitor 与 chiri 各持克隆。
+    let fas_active = Arc::new(AtomicBool::new(false));
+
     // 6. 按 SoC 启动对应的调度器（两套互斥，同一事件通道只被其中一个消费）
     let start_result = if chiri_active {
         log::info!("{}", t("main-chiri-scheduler-selected"));
         let cfg = chiri::config::Config::load(config_path.to_str().unwrap()).unwrap_or_default();
-        chiri::start_scheduler_thread(rx, Arc::new(RwLock::new(cfg)), ak_active.clone())
+        chiri::start_scheduler_thread(
+            rx,
+            Arc::new(RwLock::new(cfg)),
+            ak_active.clone(),
+            fas_active.clone(),
+        )
     } else {
         let cfg = Config::load(config_path.to_str().unwrap()).unwrap_or_default();
         scheduler::start_scheduler_thread(rx, Arc::new(RwLock::new(cfg)))
@@ -248,7 +259,7 @@ fn main() -> Result<()> {
     let monitor_thread = thread::Builder::new()
         .name("monitor_core".to_string())
         .spawn(move || {
-            if let Err(e) = monitor::start_monitor(tx, ak_active, sample_ms_normal) {
+            if let Err(e) = monitor::start_monitor(tx, ak_active, sample_ms_normal, fas_active) {
                 error!(
                     "{}",
                     t_with_args(

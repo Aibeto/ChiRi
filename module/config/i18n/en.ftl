@@ -78,6 +78,8 @@ fps-monitor-pid-switching = [FPS Monitor] Switching target PID: { $pid }
 fps-monitor-pid-switched = [FPS Monitor] Switched to target PID: { $pid }
 fps-monitor-pid-switch-failed = [FPS Monitor] PID switch failed: { $error }
 fps-monitor-started = [FPS Monitor] eBPF FPS monitor started (per-PID uprobe mode)
+fps-monitor-passive = [FPS Monitor] FAS not active, probe standing by (no uprobe attached, zero overhead)
+fps-monitor-detached = [FPS Monitor] FAS deactivated, probe detached (back to zero-overhead standby)
 fps-monitor-symbol-short-miss = [FPS Monitor] short symbol attach failed, trying long symbol...
 fps-monitor-attach-symbol = [FPS Monitor] attached with symbol: { $lib } (pid={ $pid })
 fps-monitor-frame-summary = [FPS Monitor] frame summary | pid={ $pid } window={ $window } latest={ $latest_ms }ms avg={ $avg_ms }ms
@@ -140,15 +142,13 @@ clg-thermal-no-battery = [CLG] Thermal guard: battery temp node not found, CPU-o
 clg-min-write-failed = [CLG] P{ $pid } failed to write scaling_min_freq={ $khz }MHz, idle floor may stay high
 
 # --- AKMode (Arknights special tuning) ---
-akmode-init = [AKMode] Arknights special tuning take over | tier={ $mode }
-akmode-activated = [AKMode] Arknights special tuning activated (schedutil + fixed tier max limit)
+akmode-init = [AKMode] Arknights special tuning take over (tier-less load-following)
+akmode-activated = [AKMode] Arknights special tuning activated (schedutil + dynamic max, instant up / debounced down)
 akmode-no-clusters = [AKMode] Arknights special tuning: no valid clusters found, staying inactive
 akmode-cluster-skipped = [AKMode] P{ $pid } skipped (reason: { $reason })
 akmode-deactivated = [AKMode] Arknights special tuning deactivated
-akmode-config-reloaded = [AKMode] special config hot-reloaded | tier={ $mode }
-akmode-tick-log = [AKMode] tier={ $mode } up={ $up } down={ $down } busy/idle: L={ $l_over }/{ $l_under } B={ $b_over }/{ $b_under } P={ $p_over }/{ $p_under }
-akmode-max-set = [AKMode] P{ $pid } ({ $name }) tier={ $mode } max={ $max_khz }MHz
-akmode-max-skipped = [AKMode] P{ $pid } ({ $name }) tier={ $mode } actual={ $cur_khz }MHz below set max={ $max_khz }MHz, skipping max raise (schedutil headroom)
+akmode-config-reloaded = [AKMode] special config hot-reloaded
+akmode-tick-log = [AKMode] { $state }
 akmode-watchdog-release = [AKMode] WATCHDOG: no load events for { $secs }s, eBPF source failed. Releasing Arknights special tuning and restoring original governor/min/max.
 
 # --- Touch (touch boost) ---
@@ -231,7 +231,7 @@ affinity-released = [Affinity] takeover released, system affinity config restore
 # --- CoreCtl (core_ctl online control) ---
 corectl-boost-on = [CoreCtl] boost: min_cpus raised to keep all { $count } clusters fully online
 corectl-boost-off = [CoreCtl] core_ctl min_cpus snapshot restored
-corectl-scenemode-on = [CoreCtl] scenemode core offline: { $count } cores taken offline (littles kept, big/prime powered down)
+corectl-scenemode-on = [CoreCtl] scenemode core offline: { $count } cores taken offline (little+big kept at low freq, prime powered down, one little core reserved for scheduler)
 corectl-scenemode-off = [CoreCtl] { $count } offlined cores restored online
 corectl-restore-pending = [CoreCtl] { $count } cores failed to come back online, retrying every 2s
 corectl-self-pinned = [CoreCtl] scheduler service pinned to dedicated little core cpu{ $core }

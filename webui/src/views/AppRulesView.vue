@@ -17,8 +17,8 @@ const selectedPkg = ref('');
 // 扫描状态：扫描期间禁用按钮，防止多线程同时扫描（getInstalledApps 重复触发）
 const isScanning = ref(false);
 
-// 动作单：标准四档 + 删除规则。特调应用不再提供专属模式选项（内置特调只读标注，
-// 档位切换与普通应用一致，统一走 rules.yaml 的 app_modes / global_mode）。
+// 动作单：标准四档 + 删除规则。特调应用不再提供专属模式选项（内置特调只读标注）。
+// 注意：特调（akmode）为无档位负载直拉，app_modes / global_mode 不影响特调应用。
 const actions = computed(() => {
   return [
     { name: t('mode_powersave'), subname: t('desc_powersave'), color: '#4CAF50', modeKey: 'powersave' },

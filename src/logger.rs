@@ -399,12 +399,15 @@ fn format_now() -> String {
 //
 // 供离线分析改善调度的按核诊断数据，与 status.csv 分离：
 // - 独立目录 `devimp/`（模块根，与 logs/ 平级），**启动时随 logs/ 一起归档**到
-//   logd/devimp_<毫秒时间戳>.zip（子线程异步打包），归档后新建空目录接住
+//   logd/devimp_<MMDD-HHmmss>.zip（子线程异步打包），归档后新建空目录接住
 //   本进程写入；
-// - **按前台包名分组**：文件名 `devimp_<包名>_<unix 毫秒时间戳>.log`，首次
-//   写入惰性创建（整轮未开启 DEV 则不产生文件）；scheduler_ipc 每秒经
-//   set_devimp_package 同步前台包名，包名变化即关闭当前文件、下次写入以
-//   新包名 + 当前时间戳开新文件（同应用的分析数据聚合在同文件）；
+// - **按前台包名分组**：文件名 `devimp_<包名>_<MMDD-HHmmss>.log`（本地时间，
+//   人眼可辨），首次写入惰性创建（整轮未开启 DEV 则不产生文件）；scheduler_ipc
+//   每秒经 set_devimp_package 同步前台包名，包名变化即关闭当前文件、下次写入
+//   以新包名 + 当前时间戳开新文件（同应用的分析数据聚合在同文件）；同秒重开
+//   以 -N 后缀去重；
+// - **文件头元信息**：新文件在 CSV 表头后写 `#` 注释行——模块名/版本、SoC、
+//   机型、Android 版本、内核版本，方便多设备/多版本日志离线辨别；
 // - 无包名场景（启动初期尚未检测到前台应用）不触发切文件：继续写当前
 //   文件；尚无任何包名时文件名包名段为 `nopkg`（避免空段产生 `devimp__`）；
 // - 单文件软上限 128MB：触顶自动换新时间戳文件继续写（修复旧版触顶后
@@ -658,22 +661,114 @@ static DEVIMP_WRITER: Mutex<DevimpWriter> = Mutex::new(DevimpWriter {
     since_check: 0,
 });
 
-/// 生成新文件名：`devimp_<包名段>_<当前毫秒时间戳>.log`（包名段空 → nopkg）。
-/// 时间戳在每次开新文件时取当前时刻，同一包名触顶续写也会得到新文件名。
-fn devimp_new_name(pkg_seg: &str) -> String {
-    let ms = std::time::SystemTime::now()
+/// 本地时间文件名时间戳：`MMDD-HHmmss`（人眼可辨，如 0906-163045）。
+/// 经 libc::localtime_r 取设备本地时区（bionic 在 TZ 未设置时读
+/// persist.sys.timezone）；localtime_r 失败回退 epoch 秒的十六进制。
+fn filename_ts() -> String {
+    let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis())
+        .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    let ok = unsafe { libc::localtime_r(&secs, &mut tm) };
+    if ok.is_null() {
+        return format!("t{secs:x}");
+    }
+    format!(
+        "{:02}{:02}-{:02}{:02}{:02}",
+        tm.tm_mon + 1,
+        tm.tm_mday,
+        tm.tm_hour,
+        tm.tm_min,
+        tm.tm_sec
+    )
+}
+
+/// 生成新文件名：`devimp_<包名段>_<MMDD-HHmmss>.log`（包名段空 → nopkg）。
+/// 时间戳在每次开新文件时取当前本地时刻，同一包名触顶续写也会得到新文件名。
+/// 同秒内重开（极端：包名快速抖动）由 devimp_open 的存在性检测补 -N 后缀去重。
+fn devimp_new_name(pkg_seg: &str) -> String {
     if pkg_seg.is_empty() {
-        format!("devimp_nopkg_{ms}.log")
+        format!("devimp_nopkg_{}.log", filename_ts())
     } else {
-        format!("devimp_{pkg_seg}_{ms}.log")
+        format!("devimp_{pkg_seg}_{}.log", filename_ts())
     }
 }
 
-/// 打开（或重建）诊断日志：create+append；空文件补表头。
-/// `cur_name` 为空则按当前包名段 + 当前时间戳确定新文件名并记入写入器。
+/// devimp 文件头元信息（`#` 注释行，CSV 解析跳过）：处理器型号、系统版本、
+/// 模块版本等，方便多设备/多版本日志离线比对。进程内只收集一次。
+fn devimp_meta() -> &'static String {
+    static META: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    META.get_or_init(|| {
+        let root = common::get_module_root();
+        // module.prop：name / version / versionCode
+        let (mut m_name, mut m_ver, mut m_code) = (
+            String::from("-"),
+            String::from("-"),
+            String::from("-"),
+        );
+        if let Ok(text) = fs::read_to_string(root.join("module.prop")) {
+            for line in text.lines() {
+                if let Some(v) = line.strip_prefix("name=") {
+                    m_name = v.trim().to_string();
+                } else if let Some(v) = line.strip_prefix("version=") {
+                    m_ver = v.trim().to_string();
+                } else if let Some(v) = line.strip_prefix("versionCode=") {
+                    m_code = v.trim().to_string();
+                }
+            }
+        }
+        // /system/build.prop：机型 / 平台 / Android 版本
+        let (mut model, mut board, mut release, mut sdk) = (
+            String::from("-"),
+            String::from("-"),
+            String::from("-"),
+            String::from("-"),
+        );
+        if let Ok(text) = fs::read_to_string("/system/build.prop") {
+            for line in text.lines() {
+                if let Some(v) = line.strip_prefix("ro.product.model=") {
+                    model = v.trim().to_string();
+                } else if let Some(v) = line.strip_prefix("ro.board.platform=") {
+                    board = v.trim().to_string();
+                } else if let Some(v) = line.strip_prefix("ro.build.version.release=") {
+                    release = v.trim().to_string();
+                } else if let Some(v) = line.strip_prefix("ro.build.version.sdk=") {
+                    sdk = v.trim().to_string();
+                }
+            }
+        }
+        let soc = common::matched_soc_hint().unwrap_or("-");
+        let kernel = fs::read_to_string("/proc/sys/kernel/osrelease")
+            .map(|s| s.trim().to_string())
+            .unwrap_or_else(|_| "-".to_string());
+        format!(
+            "# module={m_name} {m_ver} (versionCode {m_code})\n\
+             # soc={soc} board={board} model={model}\n\
+             # android={release} (sdk {sdk}) kernel={kernel}\n\
+             # ts-column=UTC format_now\n"
+        )
+    })
+}
+
+/// devimp 文件头（CSV 表头 + `#` 元信息注释行）的**内存预拼接缓存**：
+/// 进程内只收集/拼接一次，每个新文件创建时直接一次 `write_all` 整块写入。
+fn devimp_file_head() -> &'static [u8] {
+    static HEAD: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+    HEAD.get_or_init(|| {
+        let mut head = Vec::with_capacity(DEVIMP_HEADER.len() + devimp_meta().len());
+        head.extend_from_slice(DEVIMP_HEADER.as_bytes());
+        head.push(b'\n');
+        head.extend_from_slice(devimp_meta().as_bytes());
+        head
+    })
+}
+
+/// 打开（或重建）诊断日志：create+append；空文件整块写入内存缓存的文件头
+/// （CSV 表头 + `#` 元信息注释行——处理器/系统/模块版本等，方便离线辨别
+/// 日志来源，拼接结果进程内复用）。
+/// `cur_name` 为空则按当前包名段 + 当前本地时间戳确定新文件名并记入写入器；
+/// MMDD-HHmmss 秒级精度存在同秒重开的理论碰撞（包名快速抖动），以 -N 后缀去重。
 /// 返回 None 表示打开失败（调用方下次写入时再试）。
 fn devimp_open(w: &mut DevimpWriter) -> Option<fs::File> {
     let dir = common::get_module_root().join(DEVIMP_DIR_REL);
@@ -681,9 +776,23 @@ fn devimp_open(w: &mut DevimpWriter) -> Option<fs::File> {
     let name = match w.cur_name.clone() {
         Some(n) => n,
         None => {
-            let n = devimp_new_name(&w.pkg_seg);
-            w.cur_name = Some(n.clone());
-            n
+            let base = devimp_new_name(&w.pkg_seg);
+            let stem = base.strip_suffix(".log").unwrap_or(&base);
+            let mut name = base.clone();
+            for n in 1..100u32 {
+                let candidate = if n == 1 {
+                    base.clone()
+                } else {
+                    format!("{stem}-{n}.log")
+                };
+                if !dir.join(&candidate).exists() {
+                    name = candidate;
+                    break;
+                }
+                name = candidate;
+            }
+            w.cur_name = Some(name.clone());
+            name
         }
     };
     let mut f = fs::OpenOptions::new()
@@ -692,8 +801,7 @@ fn devimp_open(w: &mut DevimpWriter) -> Option<fs::File> {
         .open(dir.join(&name))
         .ok()?;
     if f.metadata().map(|m| m.len()).unwrap_or(1) == 0 {
-        let _ = f.write_all(DEVIMP_HEADER.as_bytes());
-        let _ = f.write_all(b"\n");
+        let _ = f.write_all(devimp_file_head());
     }
     Some(f)
 }
@@ -1042,10 +1150,9 @@ const LOGD_DEVIMP_TARGET_BYTES: u64 = 96 * 1024 * 1024;
 /// 启动归档入口。返回 (logs 归档 zip 名, devimp 归档 zip 名)（logger::init 后供
 /// main info 打点）；未归档（首次安装 / 空目录 / rename 失败）对应项为 None。
 pub fn archive_on_startup(root: &Path) -> (Option<String>, Option<String>) {
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
+    // 归档命名用本地时间 MMDD-HHmmss（人眼可辨）；同秒内两次启动会重名，
+    // 但看门狗重拉间隔 3s、正常重启远大于 1s，不做去重
+    let ts = filename_ts();
 
     // ── logs/：rename → 新建 logs/ → 复制回 watchdog.pid ──
     let mut logs_tmp: Option<PathBuf> = None;

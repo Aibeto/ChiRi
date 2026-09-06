@@ -17,7 +17,7 @@
 
 use log::error;
 use std::error::Error;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::SyncSender;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -36,10 +36,13 @@ use crate::i18n::{t, t_with_args};
 // 启动函数
 /// `ak_active` 为特调（akmode）激活共享标志：cpu_monitor 据此在常规与 40ms 采样间切换。
 /// `sample_ms_normal` 为常规采样间隔（由 main.rs 按 SoC 传入：ChiRi 160ms / Yumi 200ms）。
+/// `fas_active` 为 FAS 前台激活共享标志：fps_monitor 据此门控 eBPF 探针加载与
+/// uprobe 挂载（FAS 未激活前线程零开销待机，反偷跑）。
 pub fn start_monitor(
     tx: SyncSender<DaemonEvent>,
     ak_active: Arc<AtomicBool>,
     sample_ms_normal: u64,
+    fas_active: Arc<AtomicBool>,
 ) -> Result<(), Box<dyn Error>> {
     log::debug!("{}", t("monitor-starting"));
 
@@ -158,6 +161,9 @@ pub fn start_monitor(
     //    FAS 帧事件源：FPS 帧监控仅服务于 FAS 调频，仅 ChiRi 且 FAS 配置可用时启动
     //    （FpsManager 空 uprobe attach + RingBuf 轮询对 Yumi 设备是纯开销），
     //    Yumi 设备零开销。PID 来源复用上方 pid_watcher 的共享广播（rx_pid_cpu clone）。
+    //    反偷跑门控：FasManager 激活 FAS 前线程以 1s 周期空转等待
+    //    fas_active 置位——tokio runtime / eBPF 加载 / uprobe 挂载全部推迟到
+    //    首个 FAS 应用进前台时才发生；非 FAS 会话（桌面/普通应用）全程零开销。
     if crate::common::is_chiri_soc() && crate::common::fas_available() {
         log::debug!("{}", t("monitor-thread-start-fps"));
         let tx_fps = tx.clone();
@@ -165,9 +171,15 @@ pub fn start_monitor(
         thread::Builder::new()
             .name("fps_monitor_ebpf".to_string())
             .spawn(move || {
+                // 激活前待机：1s 轮询共享标志（纳秒级原子读），不建 runtime 不加载 eBPF
+                while !fas_active.load(Ordering::Acquire) {
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                }
                 if let Ok(rt) = tokio::runtime::Runtime::new() {
                     rt.block_on(async {
-                        if let Err(e) = fps_monitor::start_fps_loop(tx_fps, rx_pid_fps).await {
+                        if let Err(e) =
+                            fps_monitor::start_fps_loop(tx_fps, rx_pid_fps, fas_active).await
+                        {
                             error!(
                                 "{}",
                                 t_with_args(

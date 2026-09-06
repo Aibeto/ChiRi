@@ -53,8 +53,8 @@ const EVENT_POLL_MS: Duration = Duration::from_millis(1000);
 const THERMAL_CHECK_INTERVAL: Duration = Duration::from_secs(2);
 /// 遥测 CSV 落盘间隔：1s 一次（功耗统计精度 1s；telemetry 线程 1s 刷新共享原子量）。
 const TELEMETRY_LOG_INTERVAL: Duration = Duration::from_secs(1);
-/// scenemode 饱和退出：little 簇 max_util 持续高于该值视为顶满性能上限
-/// （util 是忙时占比，与频率无关——后台负载压不住小核时即饱和）
+/// scenemode 饱和退出：**常驻簇（小核 + 大核）** max_util 持续高于该值视为
+/// 顶满性能上限（util 是忙时占比，与频率无关——后台负载压不住常驻核时即饱和）
 const SCENEMODE_SAT_UTIL: f32 = 0.70;
 /// 饱和持续判定时长：连续满足才退出，防止瞬时突发误触发
 const SCENEMODE_SAT_SECS: Duration = Duration::from_secs(10);
@@ -331,11 +331,14 @@ fn fas_affinity_hook(
 /// - `scheduler_ipc` 线程：消费 `DaemonEvent` 状态机，驱动 CLG 接管/释放/配置切换
 ///
 /// 参数 `rx` 为 Monitor 层与调度层间的有界事件通道，`shared_config` 为全局共享配置，
-/// `ak_active` 为特调激活共享标志（Monitor 层据此切换采样间隔）。
+/// `ak_active` 为特调激活共享标志（Monitor 层据此切换采样间隔），
+/// `fas_active` 为 FAS 前台激活共享标志（FasManager 置位，Monitor 层 fps_monitor
+/// 据此门控 eBPF 探针加载与 uprobe 挂载——反偷跑）。
 pub fn start_scheduler_thread(
     rx: mpsc::Receiver<DaemonEvent>,
     shared_config: Arc<RwLock<Config>>,
     ak_active: Arc<AtomicBool>,
+    fas_active: Arc<AtomicBool>,
 ) -> Result<()> {
     let root = common::get_module_root();
     // 配置路径：8550 等 Chiri 目标 SoC 使用处理器子目录 config/{soc}/config.yaml，热重载跟随该文件
@@ -487,7 +490,7 @@ pub fn start_scheduler_thread(
             // FAS 实例管理器：温度源独立探测（与下方 thermal 的 temp_sensor_path 分开，语义不同；
             // 无传感器传 None，FAS 内部限温默认关闭不影响其他功能）
             let fas_temp_path = crate::utils::find_cpu_temp_path().ok().map(std::path::PathBuf::from);
-            let mut fas_mgr = fas_manager::FasManager::new(fas_temp_path);
+            let mut fas_mgr = fas_manager::FasManager::new(fas_temp_path, fas_active.clone());
 
             // CPU 亲和与线程迁移控制器 + core_ctl 核心在线接管（ChiRi 专属）
             let mut affinity_mgr = affinity::AffinityManager::new(sys_path_exist.clone());
@@ -512,11 +515,14 @@ pub fn start_scheduler_thread(
             const FAS_COOLDOWN: Duration = Duration::from_secs(300);
             let mut fas_cooldown_until: Option<Instant> = None;
 
-            // scenemode 饱和退出冷却：little 簇 util 持续顶满上限退回 powersave 后，
-            // 300s 内不得重新进入 scenemode（防止与后台负载反复拉锯）
+            // scenemode 饱和退出冷却：常驻簇（大核簇）util 持续顶满上限退回
+            // powersave 后，300s 内不得重新进入 scenemode（防止与后台负载反复拉锯）
             let mut scenemode_cooldown_until: Option<Instant> = None;
-            // scenemode 饱和计时起点（little 簇 max_util 连续超阈值的窗口起点）
+            // scenemode 饱和计时起点（常驻大核簇 max_util 连续超阈值的窗口起点）
             let mut scenemode_sat_since: Option<Instant> = None;
+
+            // scenemode 负载门槛打点去重：持续被拒期间只记一条 scene_hold
+            let mut scene_hold_logged = false;
 
             // 热保护：启动时探测一次温度传感器（CPU + 电池），缺失的参考静默降级；
             // 事件循环内每 2s 采样，按 config.thermal 阈值计算压制上限下发给 CLG
@@ -543,21 +549,6 @@ pub fn start_scheduler_thread(
                     cfg.enabled = false;
                     cfg
                 })
-            };
-
-            // 特调起始档从 rules.yaml 识别：明日方舟 app_modes > global_mode，
-            // 换算成四档（powersave=1..fast=4），配了普通模式就按对应档起步
-            let get_ak_initial_tier = || -> u32 {
-                let rules = crate::utils::read_config::<crate::monitor::config::RulesConfig, _>(
-                    crate::monitor::config::get_rules_path(),
-                )
-                .unwrap_or_default();
-                let mode = rules
-                    .app_modes
-                    .get("com.hypergryph.arknights")
-                    .cloned()
-                    .unwrap_or(rules.global_mode);
-                crate::chiri::config::mode_to_tier(&mode)
             };
 
             // 启动时初始化
@@ -635,11 +626,10 @@ pub fn start_scheduler_thread(
                         )
                     );
                     if crate::common::is_special_mode(&current_mode) {
-                        // 特调运行中：按新配置重载 akmode（档位仍由 rules.yaml 决定）
+                        // 特调运行中：按新配置重载 akmode
                         if ak_governor.is_active() {
                             let ak_cfg = config_lock.get_akmode().clone();
-                            let initial_tier = get_ak_initial_tier();
-                            ak_governor.reload_config(&ak_cfg, initial_tier);
+                            ak_governor.reload_config(&ak_cfg);
                         }
                     } else if current_mode == "fast" {
                         // fast_lock 不读 yaml 调参，仅需确保 CLG 未意外持有
@@ -1103,6 +1093,7 @@ pub fn start_scheduler_thread(
                             // 亮屏：清空息屏计时与 scenemode 状态（恢复逻辑在下方重放原模式）
                             screen_off_at = None;
                             scene_mode_active = false;
+                            scene_hold_logged = false;
                             let config_lock = config_clone.read().unwrap();
                             
                             if crate::common::is_special_mode(&current_mode) {
@@ -1115,8 +1106,7 @@ pub fn start_scheduler_thread(
                                 if !ak_governor.is_active() && !in_cooldown {
                                     cpu_governor.release();
                                     let ak_cfg = config_lock.get_akmode().clone();
-                                    let initial_tier = get_ak_initial_tier();
-                                    if !ak_governor.init_policies(&ak_cfg, initial_tier) {
+                                    if !ak_governor.init_policies(&ak_cfg) {
                                         // init 失败（配置缺失/硬件不支持）：冷却 5 分钟，CLG 接管
                                         akmode_cooldown_until = Some(Instant::now() + AKMODE_COOLDOWN);
                                         log::warn!("{}", t_with_args(
@@ -1292,15 +1282,13 @@ pub fn start_scheduler_thread(
                                     let config_lock = config_clone.read().unwrap();
                                     if crate::common::is_special_mode(&mode) {
                                         // 进入特调模式：停止 CLG，改由 akmode 独立接管。
-                                        // 起始档从 rules.yaml 的生效模式识别（档位与全局统一）。
                                         // 冷却期内跳过特调，直接走 CLG。
                                         let in_cooldown = akmode_cooldown_until
                                             .map_or(false, |until| Instant::now() < until);
                                         if !in_cooldown {
                                             cpu_governor.release();
                                             let ak_cfg = config_lock.get_akmode().clone();
-                                            let initial_tier = get_ak_initial_tier();
-                                            if !ak_governor.init_policies(&ak_cfg, initial_tier) {
+                                            if !ak_governor.init_policies(&ak_cfg) {
                                                 // init 失败：冷却 5 分钟，CLG 接管
                                                 akmode_cooldown_until = Some(Instant::now() + AKMODE_COOLDOWN);
                                                 log::warn!("{}", t_with_args(
@@ -1388,7 +1376,7 @@ pub fn start_scheduler_thread(
                         }
                         // 负载投喂优先级链：FAS 活跃时优先投喂（前台最重线程 util + 逐核 util）；
                         // 否则特调（akmode）白名单应用前台时投喂 akmode 做动态限频
-                        // （档位固定不切换，max 随负载在 [最低档, 生效档] 间变化）；
+                        // （无档位负载直拉：max 随组内负载在 [最低档, 硬件最高] 间连续变化）；
                         // 否则若 CLG 处于活动状态（日常模式或息屏 Doze），投喂 CLG。
                         if fas_mgr.is_active() {
                             fas_mgr.on_load_update(foreground_max_util, &core_utils);
@@ -1423,49 +1411,76 @@ pub fn start_scheduler_thread(
                                     if screen_off_at
                                         .map_or(false, |off| off.elapsed().as_secs() >= delay)
                                     {
-                                        if scene_cfg.enabled {
-                                            if cpu_governor.is_active() {
-                                                cpu_governor.reload_config(&scene_cfg);
-                                            } else {
-                                                cpu_governor.init_policies(&scene_cfg);
+                                        // 负载门槛：与饱和退出共用 SCENEMODE_SAT_UTIL——常驻簇
+                                        // 仍被后台负载顶满时进入 scenemode 必然 ~10s 后饱和退出，
+                                        // 形成整夜「进→退→300s 冷却」拉锯。跳过本次（不动
+                                        // screen_off_at，后续 tick 持续复评），负载回落后自动进入。
+                                        let ranges = crate::common::chiri_core_ranges();
+                                        let standby_max = ranges
+                                            .little
+                                            .clone()
+                                            .chain(ranges.big.clone())
+                                            .filter_map(|c| last_core_utils.get(c).copied())
+                                            .fold(0.0_f32, f32::max);
+                                        if standby_max >= SCENEMODE_SAT_UTIL {
+                                            if !scene_hold_logged {
+                                                scene_hold_logged = true;
+                                                crate::logger::devimp_event(
+                                                    "scene_hold",
+                                                    "-",
+                                                    &format!("util={:.0}", standby_max * 100.0),
+                                                );
                                             }
                                         } else {
-                                            cpu_governor.release();
-                                        }
-                                        log::info!("{}", t("scheduler-scene-mode-enter"));
-                                        scene_mode_active = true;
-                                        // 立即应用 scenemode 离线核（不等 2s 周期块）：
-                                        // 小核全开 + 大核/prime 下线 + 专用小核自钉
-                                        {
-                                            let cfg = config_clone.read().unwrap();
-                                            apply_affinity_and_corectl(
-                                                &mut affinity_mgr,
-                                                &mut corectl_mgr,
-                                                &cfg,
-                                                &current_mode,
-                                                is_screen_on,
-                                                crate::monitor::app_detect::get_current_pid(),
-                                                &last_core_utils,
-                                                scene_mode_active,
-                                            );
+                                            scene_hold_logged = false;
+                                            if scene_cfg.enabled {
+                                                if cpu_governor.is_active() {
+                                                    cpu_governor.reload_config(&scene_cfg);
+                                                } else {
+                                                    cpu_governor.init_policies(&scene_cfg);
+                                                }
+                                            } else {
+                                                cpu_governor.release();
+                                            }
+                                            log::info!("{}", t("scheduler-scene-mode-enter"));
+                                            scene_mode_active = true;
+                                            // 立即应用 scenemode 离线核（不等 2s 周期块）：
+                                            // 小核+大核常驻低频（频率上限由 scenemode
+                                            // CLG 配置压制）+ prime 下线 + 专用小核独占
+                                            // 自钉（cpuset 排除其他进程）
+                                            {
+                                                let cfg = config_clone.read().unwrap();
+                                                apply_affinity_and_corectl(
+                                                    &mut affinity_mgr,
+                                                    &mut corectl_mgr,
+                                                    &cfg,
+                                                    &current_mode,
+                                                    is_screen_on,
+                                                    crate::monitor::app_detect::get_current_pid(),
+                                                    &last_core_utils,
+                                                    scene_mode_active,
+                                                );
+                                            }
                                         }
                                     }
                                 }
                             }
                         }
 
-                        // scenemode 饱和退出：little 簇 max_util 持续顶满性能上限
-                        // → 退回 powersave（恢复全部在线核）+ 300s 冷却不得重进，
-                        // 防止后台负载压不死小核时反复拉锯。util 是忙时占比（与
-                        // 频率无关），饱和即真饱和，与 perf_ceil 数值无耦合。
+                        // scenemode 饱和退出：**常驻簇（小核 + 大核）** max_util
+                        // 持续顶满性能上限 → 退回 powersave（恢复全部在线核）+
+                        // 300s 冷却不得重进，防止后台负载压不死常驻核时反复
+                        // 拉锯。util 是忙时占比（与频率无关），饱和即真饱和，
+                        // 与 perf_ceil 数值无耦合。
                         if scene_mode_active && !is_screen_on {
                             let ranges = crate::common::chiri_core_ranges();
-                            let little_max = ranges
+                            let standby_max = ranges
                                 .little
                                 .clone()
+                                .chain(ranges.big.clone())
                                 .filter_map(|c| last_core_utils.get(c).copied())
                                 .fold(0.0_f32, f32::max);
-                            if little_max >= SCENEMODE_SAT_UTIL {
+                            if standby_max >= SCENEMODE_SAT_UTIL {
                                 let sustained = match scenemode_sat_since {
                                     Some(since) => since.elapsed() >= SCENEMODE_SAT_SECS,
                                     None => {
@@ -1476,6 +1491,7 @@ pub fn start_scheduler_thread(
                                 if sustained {
                                     scenemode_sat_since = None;
                                     scene_mode_active = false;
+                                    scene_hold_logged = false;
                                     scenemode_cooldown_until =
                                         Some(Instant::now() + SCENEMODE_COOLDOWN);
                                     let current_mode = mode_clone.lock().unwrap().clone();
@@ -1504,7 +1520,7 @@ pub fn start_scheduler_thread(
                                         "{}",
                                         t_with_args(
                                             "scheduler-scene-mode-saturation",
-                                            &fluent_args!("util" => format!("{:.0}", little_max * 100.0))
+                                            &fluent_args!("util" => format!("{:.0}", standby_max * 100.0))
                                         )
                                     );
                                     crate::logger::devimp_event(
@@ -1543,16 +1559,15 @@ pub fn start_scheduler_thread(
                         if is_screen_on { // 息屏时不要用新配置覆盖 Doze
                             let config_lock = config_clone.read().unwrap();
                             if crate::common::is_special_mode(&current_mode) {
-                                // 特调模式：按 rules.yaml 重新换算档位并重载 akmode 配置
+                                // 特调模式：重载 akmode 配置
                                 let ak_cfg = config_lock.get_akmode().clone();
-                                let initial_tier = get_ak_initial_tier();
                                 if ak_governor.is_active() {
-                                    ak_governor.reload_config(&ak_cfg, initial_tier);
+                                    ak_governor.reload_config(&ak_cfg);
                                 } else {
                                     let in_cooldown = akmode_cooldown_until
                                         .map_or(false, |until| Instant::now() < until);
                                     if !in_cooldown {
-                                        if !ak_governor.init_policies(&ak_cfg, initial_tier) {
+                                        if !ak_governor.init_policies(&ak_cfg) {
                                             akmode_cooldown_until = Some(Instant::now() + AKMODE_COOLDOWN);
                                             log::warn!("{}", t_with_args(
                                                 "scheduler-akmode-cooldown",

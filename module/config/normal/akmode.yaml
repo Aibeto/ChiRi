@@ -1,74 +1,12 @@
+# ── 明日方舟特调（akmode）配置 ─────────────────────────────
+# 编译期嵌入二进制（src/common.rs include_str!），磁盘副本不加载。
+# 字段说明见 akmode-example.yaml；未写字段取代码默认值。
+#
+# 无档位连续控制：每个负载 tick（40ms）按核心组实时负载直接计算
+# scaling_max_freq 目标上限，升频立即执行、降频 hysteresis + down_hold_ms
+# 防抖。替代原四档方案（少数线程高占用负载下 max 单边下探）。
 akmode:
-  after_change_duration_ms: 799
-
-  powersave:
-    wait_ms: 325
-    little:
-      up_core_count: 2
-      up_util_percent: 90
-      down_core_count: 2
-      down_util_percent: 60
-    big:
-      up_core_count: 3
-      up_util_percent: 90
-      down_core_count: 2
-      down_util_percent: 60
-    prime:
-      up_core_count: 1
-      up_util_percent: 90
-      down_core_count: 1
-      down_util_percent: 60
-
-  balance:
-    wait_ms: 80
-    little:
-      up_core_count: 2
-      up_util_percent: 80
-      down_core_count: 2
-      down_util_percent: 60
-    big:
-      up_core_count: 3
-      up_util_percent: 60
-      down_core_count: 2
-      down_util_percent: 60
-    prime:
-      up_core_count: 1
-      up_util_percent: 80
-      down_core_count: 1
-      down_util_percent: 60
-
-  performance:
-    wait_ms: 60
-    little:
-      up_core_count: 2
-      up_util_percent: 60
-      down_core_count: 2
-      down_util_percent: 60
-    big:
-      up_core_count: 3
-      up_util_percent: 60
-      down_core_count: 2
-      down_util_percent: 60
-    prime:
-      up_core_count: 1
-      up_util_percent: 60
-      down_core_count: 1
-      down_util_percent: 60
-
-  fast:
-    wait_ms: 40
-    little:
-      up_core_count: 1
-      up_util_percent: 60
-      down_core_count: 3
-      down_util_percent: 30
-    big:
-      up_core_count: 3
-      up_util_percent: 60
-      down_core_count: 2
-      down_util_percent: 30
-    prime:
-      up_core_count: 1
-      up_util_percent: 60
-      down_core_count: 1
-      down_util_percent: 30
+  headroom: 1.15
+  perf_floor: 0.0
+  hysteresis: 0.03
+  down_hold_ms: 100

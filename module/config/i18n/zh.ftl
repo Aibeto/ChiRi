@@ -77,6 +77,8 @@ fps-monitor-pid-switching = [FPS Monitor] 正在切换目标 PID: { $pid }
 fps-monitor-pid-switched = [FPS Monitor] 已切换到目标 PID: { $pid }
 fps-monitor-pid-switch-failed = [FPS Monitor] PID 切换失败: { $error }
 fps-monitor-started = [FPS Monitor] eBPF FPS 监控启动成功（per-PID uprobe 模式）
+fps-monitor-passive = [FPS Monitor] FAS 未激活，探针待机（不挂载 uprobe，零开销）
+fps-monitor-detached = [FPS Monitor] FAS 已去激活，探针摘除（回到零开销待机）
 fps-monitor-symbol-short-miss = [FPS Monitor] 短签名符号 attach 失败，尝试长签名符号...
 fps-monitor-attach-symbol = [FPS Monitor] 使用符号 attach: { $lib } (pid={ $pid })
 fps-monitor-frame-summary = [FPS Monitor] 帧摘要 | pid={ $pid } 窗口={ $window } 最新={ $latest_ms }ms 平均={ $avg_ms }ms
@@ -139,15 +141,13 @@ clg-thermal-no-battery = [CLG] 热保护: 未找到电池温度节点，仅按 C
 clg-min-write-failed = [CLG] P{ $pid } 写入 scaling_min_freq={ $khz }MHz 失败，空闲频率地板可能偏高
 
 # --- AKMode（明日方舟特调） ---
-akmode-init = [AKMode] 明日方舟特调接管 | 档位={ $mode }
-akmode-activated = [AKMode] 明日方舟特调已激活（schedutil + 档位限频，不自动切档）
+akmode-init = [AKMode] 明日方舟特调接管（无档位负载直拉）
+akmode-activated = [AKMode] 明日方舟特调已激活（schedutil + 动态 max，升频即时/降频防抖）
 akmode-no-clusters = [AKMode] 明日方舟特调: 未找到有效集群，保持未激活状态
 akmode-cluster-skipped = [AKMode] P{ $pid } 跳过接管 (原因: { $reason })
 akmode-deactivated = [AKMode] 明日方舟特调已停用
-akmode-config-reloaded = [AKMode] 特调配置已热重载 | 档位={ $mode }
-akmode-tick-log = [AKMode] 档位={ $mode } 升频={ $up } 降频={ $down } 忙/闲: 小核={ $l_over }/{ $l_under } 大核={ $b_over }/{ $b_under } 超大核={ $p_over }/{ $p_under }
-akmode-max-set = [AKMode] P{ $pid } ({ $name }) 档位={ $mode } max={ $max_khz }MHz
-akmode-max-skipped = [AKMode] P{ $pid } ({ $name }) 档位={ $mode } 实际频率={ $cur_khz }MHz 未达设定 max={ $max_khz }MHz，跳过升频（schedutil 余量）
+akmode-config-reloaded = [AKMode] 特调配置已热重载
+akmode-tick-log = [AKMode] { $state }
 akmode-watchdog-release = [AKMode] 看门狗: 已 { $secs } 秒未收到负载事件，eBPF 负载源疑似失效，已释放明日方舟特调控制权并恢复原 governor/min/max
 
 # --- Touch（触摸升频） ---
@@ -230,7 +230,7 @@ affinity-released = [Affinity] 已释放接管，恢复系统原始亲和配置
 # --- CoreCtl（core_ctl 核心在线接管）---
 corectl-boost-on = [CoreCtl] boost: { $count } 个 cluster 的 min_cpus 已抬到全组常在线
 corectl-boost-off = [CoreCtl] 已恢复 core_ctl min_cpus 快照
-corectl-scenemode-on = [CoreCtl] scenemode 离线核：已下线 { $count } 个核心（小核全开，大核/prime 断电）
+corectl-scenemode-on = [CoreCtl] scenemode 离线核：已下线 { $count } 个核心（小核+大核常驻低频，prime 断电，专用小核独占给调度服务）
 corectl-scenemode-off = [CoreCtl] 已恢复 { $count } 个被下线的核心
 corectl-restore-pending = [CoreCtl] { $count } 个核心恢复上线失败，将每 2 秒重试
 corectl-self-pinned = [CoreCtl] 调度服务已钉到专用小核 cpu{ $core }

@@ -20,6 +20,8 @@ use std::mem::size_of;
 use std::num::NonZeroU32;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::ptr;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{SyncSender, TrySendError};
 use std::time::Duration;
 
@@ -139,7 +141,9 @@ impl FpsManager {
         })
     }
 
-    /// 切换到新 PID：detach 旧 PID + attach 新 PID
+    /// 切换到新 PID：detach 旧 PID + attach 新 PID。
+    /// `new_pid == 0` 为「纯 detach」语义：只摘除探针并复位状态，用于 FAS
+    /// 去激活时回到零开销待机（detach 后 has_active_probe()==false）。
     fn switch_pid(&mut self, new_pid: u32) -> Result<(), anyhow::Error> {
         if new_pid == self.current_pid {
             return Ok(());
@@ -152,13 +156,22 @@ impl FpsManager {
                     self.bpf.program_mut("handle_frame").unwrap().try_into()?;
                 let _ = program.detach(link_id);
             }
+            // 旧 PID 的帧状态一并清理（PID 不会复用到同一次 attach 生命周期内）
+            self.states.remove(&self.current_pid);
+        }
+
+        // new_pid == 0：纯 detach（FAS 去激活待机），不 attach
+        if new_pid == 0 {
+            self.current_pid = 0;
+            debug!("{}", t("fps-monitor-detached"));
+            return Ok(());
         }
 
         // attach 新 PID
         let pid_i32 = new_pid as i32;
-        // 防御：PID 为 0（进程已退出/尚未检测到前台应用）时跳过 attach，
-        // 避免 NonZeroU32::new(0).expect() panic 导致帧监控线程静默死亡。
-        let Some(scope) = NonZeroU32::new(new_pid).map(UProbeScope::OneProcess) else {
+        let scope = NonZeroU32::new(new_pid).map(UProbeScope::OneProcess);
+        let Some(scope) = scope else {
+            // 防御：非法 PID（理论上不会到这——调用方已过滤 0），不 panic
             warn!(
                 "{}",
                 t_with_args(
@@ -252,19 +265,22 @@ impl FpsManager {
 
 pub async fn start_fps_loop(
     tx: SyncSender<DaemonEvent>,
-    mut rx_pid: watch::Receiver<u32>,
+    rx_pid: watch::Receiver<u32>,
+    fas_active: Arc<AtomicBool>,
 ) -> Result<(), anyhow::Error> {
     info!("{}", t("fps-monitor-init"));
 
-    // 初始 pid：共享 watch 通道的当前值（pid_watcher 创建通道时已写入）
-    let initial_pid = *rx_pid.borrow();
-
     // 订阅 pid_watcher 的共享前台 PID 广播（原 500ms 自轮询已删除）：
-    // FpsManager 由下方 fps_probe 线程独占，这里仅把变化值桥接给该线程做 switch_pid。
+    // FpsManager 由下方 fps_probe 线程独占，这里把变化值桥接给该线程做
+    // switch_pid；watch 接收端克隆一份随闭包进入线程，供 FAS 激活门控
+    // 补挂时读取当前前台 PID（桥接任务只转发变化值，激活瞬间的最新值
+    // 需从 watch 直接借）。
     let (pid_tx, pid_rx) = std::sync::mpsc::channel::<u32>();
+    let rx_pid_bridge = rx_pid.clone();
     tokio::spawn(async move {
-        while rx_pid.changed().await.is_ok() {
-            let pid = *rx_pid.borrow();
+        let mut rx = rx_pid_bridge;
+        while rx.changed().await.is_ok() {
+            let pid = *rx.borrow();
             if pid > 0 {
                 let _ = pid_tx.send(pid);
             }
@@ -289,20 +305,12 @@ pub async fn start_fps_loop(
                 }
             };
 
-            // 初始 attach（共享 watch 通道当前值，pid_watcher 创建通道时已写入）
-            if initial_pid > 0 {
-                if let Err(e) = manager.switch_pid(initial_pid) {
-                    warn!(
-                        "{}",
-                        t_with_args(
-                            "fps-monitor-attach-failed-initial",
-                            &fluent_args!("error" => e.to_string())
-                        )
-                    );
-                }
-            } else {
-                info!("{}", t("fps-monitor-init-no-pid"));
-            }
+            // 反偷跑：FAS 未激活时**不挂任何 uprobe**（eBPF 程序已加载但无
+            // attach 点即零执行）。此前 daemon 启动即对前台应用 attach——桌面/
+            // 普通应用的每帧 queueBuffer 都要过一次探针，而 FrameUpdate 在
+            // 调度侧被 is_active() 直接丢弃，纯白烧。首个 FAS 应用激活后由
+            // PID 广播驱动 switch_pid 正常挂载。
+            info!("{}", t("fps-monitor-passive"));
 
             // mio 轮询（只创建一次；创建失败则本线程无法工作，告警退出交由看门狗自愈）
             let mut poll = match Poll::new() {
@@ -325,10 +333,9 @@ pub async fn start_fps_loop(
             // 事件通道拥塞丢弃的帧样本数（仅计数，EMA 平滑可容忍少量丢失）
             let mut dropped_frames: u64 = 0;
 
-            // 注册 RingBuf fd（只注册一次，不会变）。fd 与 attach 无关（探针 attach 前后
-            // fd 不变），必须无条件注册：daemon 启动早于首次前台检测，initial_pid 恒为 0、
-            // attach 稍后才发生——若按 has_active_probe() 门控，此路径下永远不注册，
-            // 帧处理将退化为 100ms 超时轮询、事件驱动唤醒失效。
+            // 注册 RingBuf fd（只注册一次，不会变）。fd 与 attach 无关（探针
+            // attach/detach 前后 fd 不变），无条件注册最简单——未注册仅丢失
+            // 事件驱动唤醒，poll 超时兜底仍可处理帧（代价是无谓的 500ms 轮询）。
             let fd = manager.ring_fd;
             let mut source = SourceFd(&fd);
             if let Err(e) =
@@ -346,6 +353,36 @@ pub async fn start_fps_loop(
             }
 
             loop {
+                // ── FAS 激活门控（反偷跑核心）──
+                // fas_active=false：不做任何 PID 消费/帧投喂，仅 500ms 周期
+                // 检查标志；若上一会话的 uprobe 仍挂着，先 detach 回到零开销
+                // 待机。置位后补挂当前前台 PID——桥接任务只转发 PID **变化**，
+                // FAS 应用在激活前已在前台（无后续变化事件）时必须从 watch
+                // 直接借当前值，否则首个会话永远挂不上探针。
+                let fas_on = fas_active.load(Ordering::Acquire);
+                if !fas_on {
+                    if manager.has_active_probe() {
+                        // 纯 detach：摘除探针 + 复位状态（has_active_probe → false）
+                        let _ = manager.switch_pid(0);
+                    }
+                    std::thread::sleep(Duration::from_millis(500));
+                    continue;
+                }
+                if !manager.has_active_probe() {
+                    let cur = *rx_pid.borrow();
+                    if cur > 0 {
+                        if let Err(e) = manager.switch_pid(cur) {
+                            warn!(
+                                "{}",
+                                t_with_args(
+                                    "fps-monitor-pid-switch-failed",
+                                    &fluent_args!("error" => e.to_string())
+                                )
+                            );
+                        }
+                    }
+                }
+
                 // ── PID 变化（tokio 订阅任务桥接的共享前台 PID 广播）──
                 while let Ok(new_pid) = pid_rx.try_recv() {
                     // 无需重新注册 Poll——RingBuf fd 不变

@@ -367,186 +367,71 @@ pub struct FunctionToggles {
     pub io_optimization: bool,
 }
 
-/// 单个核心组（little/big/prime）的升降频参数，组内独立配置。
-/// 核心数 yaml 里直接写整数（如 2 = 组内达到 2 个核心命中阈值即触发），
-/// 0 = 组内任一核心命中即触发，写大值如 64 = 关闭该方向判定。
-#[derive(Debug, Deserialize, Clone)]
-pub struct SpecialTunedGroup {
-    /// 升频核心数：组内达到这个数量的核心占用率 > up_util_percent 才考虑升 max
-    #[serde(default = "d_ak_up_core_count")]
-    pub up_core_count: u32,
-    /// 升频占用率阈值（%）
-    #[serde(default = "d_ak_up_util_threshold")]
-    pub up_util_percent: f32,
-    /// 降频核心数：组内达到这个数量的核心占用率 < down_util_percent 才降 max
-    #[serde(default = "d_ak_down_core_count")]
-    pub down_core_count: u32,
-    /// 降频占用率阈值（%）
-    #[serde(default = "d_ak_down_util_threshold")]
-    pub down_util_percent: f32,
-}
-
-/// 单个档位的配置：按核心组（little/big/prime）的升降频参数 + 本档防抖等待。
-/// 核心组区间按命中 SoC 区分（common::chiri_core_ranges：8550 0-2/3-6/7、
-/// 8475 0-3/4-6/7、8998 0-3/4-7 无 prime），与 affected_cpus 的 CPU ID 对照判定。
-/// 档位由 rules.yaml 生效模式决定，特调期间固定应用、不自动切换档位。
-#[derive(Debug, Deserialize, Clone)]
-pub struct SpecialTunedTier {
-    /// 升降频防抖等待（ms）：升降条件成立到真正升降 max 之间的等待
-    #[serde(default = "d_ak_wait_ms")]
-    pub wait_ms: u64,
-    /// 小核组升降频参数
-    #[serde(default)]
-    pub little: SpecialTunedGroup,
-    /// 大核组升降频参数
-    #[serde(default)]
-    pub big: SpecialTunedGroup,
-    /// 超大核组升降频参数（无超大核的 SoC 该组不生效）
-    #[serde(default)]
-    pub prime: SpecialTunedGroup,
-}
-
 /// 明日方舟特调（akmode）配置，跟 CLG 完全没关系。
-/// 档位由 rules.yaml 生效模式决定（powersave/balance/performance/fast），特调期间固定；
-/// 档位差异仅在升降频策略参数，所有档位的 max 上限/下限均为硬件上下限。
-/// 机制：激活时统一内核调速器为 schedutil、min 压到硬件最低、max 为硬件最高；
-/// 之后用本档策略参数按负载升降 max（内核频率表逐档移动，可升到硬件最高、降到硬件最低）——
-/// 通过动态限制 scaling_max_freq 让 schedutil 在 [硬件最低, 动态max] 内自由调频。
+/// **无档位**：不做模式分档，按各核心组实时负载直接移动 scaling_max_freq 上限
+/// （FAS 式连续控制，替代原四档 core-count 阈值——后者在「少数线程高占用」负载
+/// （如明日方舟资源校验）下升频条件永远凑不齐、降频条件持续满足，max 单边下探）。
+/// 机制：激活时统一内核调速器为 schedutil、min 压到硬件最低；之后每个负载 tick
+/// 计算目标上限比例 = clamp(组内最大核心占用率 × headroom, perf_floor, 1.0)：
+///   升：目标 > 当前上限 + hysteresis → 立即上调（schedutil 在新上限内自由取频）；
+///   降：目标 < 当前上限 − hysteresis 且持续 down_hold_ms → 上限收到目标档位。
 #[derive(Debug, Deserialize, Clone)]
 pub struct SpecialTunedConfig {
-    /// 升降频后防抖等待临时减半的持续时间（ms）：发生一次升降频后，后续 wait_ms
-    /// 在此时长内按一半执行；超过此时长恢复原 wait_ms。
-    #[serde(default = "d_ak_after_change_duration_ms")]
-    pub after_change_duration_ms: u64,
-    /// 档 1（最低频）：powersave
-    #[serde(default)]
-    pub powersave: SpecialTunedTier,
-    /// 档 2：balance
-    #[serde(default)]
-    pub balance: SpecialTunedTier,
-    /// 档 3：performance
-    #[serde(default)]
-    pub performance: SpecialTunedTier,
-    /// 档 4（最高频）：fast
-    #[serde(default)]
-    pub fast: SpecialTunedTier,
+    /// 负载放大系数：目标上限 = 组内最大核心占用率 × headroom，留出升频余量
+    #[serde(default = "d_ak_headroom")]
+    pub headroom: f32,
+    /// 目标上限比例下限（0 = 空闲组上限可收到硬件最低频）
+    #[serde(default = "d_ak_perf_floor")]
+    pub perf_floor: f32,
+    /// 变更死区（比例）：目标与当前上限差值不超过该值时不写，防写抖动
+    #[serde(default = "d_ak_hysteresis")]
+    pub hysteresis: f32,
+    /// 降频保持（ms）：目标持续低于当前上限该时长才真正下调，防负载抖动来回改写
+    #[serde(default = "d_ak_down_hold_ms")]
+    pub down_hold_ms: u64,
 }
 
 // SpecialTunedConfig 缺省值：akmode.yaml 没写的字段回退到这里
-fn d_ak_up_core_count() -> u32 {
-    2
+fn d_ak_headroom() -> f32 {
+    1.15
 }
-fn d_ak_up_util_threshold() -> f32 {
-    80.0
+fn d_ak_perf_floor() -> f32 {
+    0.0
 }
-fn d_ak_down_core_count() -> u32 {
-    2
+fn d_ak_hysteresis() -> f32 {
+    0.03
 }
-fn d_ak_down_util_threshold() -> f32 {
-    60.0
-}
-fn d_ak_wait_ms() -> u64 {
-    300
-}
-fn d_ak_after_change_duration_ms() -> u64 {
-    3000
-}
-
-impl Default for SpecialTunedGroup {
-    fn default() -> Self {
-        Self {
-            up_core_count: d_ak_up_core_count(),
-            up_util_percent: d_ak_up_util_threshold(),
-            down_core_count: d_ak_down_core_count(),
-            down_util_percent: d_ak_down_util_threshold(),
-        }
-    }
-}
-
-impl Default for SpecialTunedTier {
-    fn default() -> Self {
-        Self {
-            wait_ms: d_ak_wait_ms(),
-            little: SpecialTunedGroup::default(),
-            big: SpecialTunedGroup::default(),
-            prime: SpecialTunedGroup::default(),
-        }
-    }
+fn d_ak_down_hold_ms() -> u64 {
+    100
 }
 
 impl Default for SpecialTunedConfig {
     fn default() -> Self {
         Self {
-            after_change_duration_ms: d_ak_after_change_duration_ms(),
-            powersave: SpecialTunedTier::default(),
-            balance: SpecialTunedTier::default(),
-            performance: SpecialTunedTier::default(),
-            fast: SpecialTunedTier::default(),
+            headroom: d_ak_headroom(),
+            perf_floor: d_ak_perf_floor(),
+            hysteresis: d_ak_hysteresis(),
+            down_hold_ms: d_ak_down_hold_ms(),
         }
-    }
-}
-
-impl SpecialTunedGroup {
-    /// 把 yaml 里写的百分比（>1 视为百分比）转成 0..1 比例并 clamp。
-    /// 写 50 还是 0.5 都认，前者按 50% 处理。
-    fn normalize_pct(v: &mut f32, dft: f32) {
-        if !v.is_finite() {
-            *v = dft;
-        }
-        if *v > 1.0 {
-            *v /= 100.0;
-        }
-        *v = v.clamp(0.0, 1.0);
-    }
-
-    /// 校验单个核心组：核心数限制在合理范围，占用率阈值转 0..1。
-    fn normalize(&mut self) {
-        self.up_core_count = self.up_core_count.min(64);
-        self.down_core_count = self.down_core_count.min(64);
-        Self::normalize_pct(&mut self.up_util_percent, d_ak_up_util_threshold());
-        Self::normalize_pct(&mut self.down_util_percent, d_ak_down_util_threshold());
-    }
-}
-
-impl SpecialTunedTier {
-    /// 校验单个档位：逐核心组 normalize
-    fn normalize(&mut self) {
-        self.little.normalize();
-        self.big.normalize();
-        self.prime.normalize();
     }
 }
 
 impl SpecialTunedConfig {
-    /// 校验配置：逐档 normalize；升降频加速持续时间限制在合理范围（上限 60s 防误配）
+    /// 校验配置：参数钳制在合理范围，非有限值回退默认
     pub fn normalize(&mut self) {
-        self.after_change_duration_ms = self.after_change_duration_ms.min(60_000);
-        self.powersave.normalize();
-        self.balance.normalize();
-        self.performance.normalize();
-        self.fast.normalize();
-    }
-
-    /// 取档位的配置（内部档位 1..4：powersave=1 balance=2 performance=3 fast=4）
-    pub fn tier(&self, tier: u32) -> &SpecialTunedTier {
-        match tier {
-            1 => &self.powersave,
-            2 => &self.balance,
-            3 => &self.performance,
-            _ => &self.fast,
+        if !self.headroom.is_finite() {
+            self.headroom = d_ak_headroom();
         }
-    }
-}
-
-/// 模式名 → 特调档位（1..4）。未知模式或特调自身回退 balance（档 2）。
-/// 特调的档位就是全局那套模式档位，起始档从 rules.yaml 的生效模式识别。
-pub fn mode_to_tier(mode: &str) -> u32 {
-    match mode {
-        "powersave" => 1,
-        "balance" => 2,
-        "performance" => 3,
-        "fast" => 4,
-        _ => 2,
+        self.headroom = self.headroom.clamp(1.0, 2.0);
+        if !self.perf_floor.is_finite() {
+            self.perf_floor = d_ak_perf_floor();
+        }
+        self.perf_floor = self.perf_floor.clamp(0.0, 0.5);
+        if !self.hysteresis.is_finite() {
+            self.hysteresis = d_ak_hysteresis();
+        }
+        self.hysteresis = self.hysteresis.clamp(0.0, 0.2);
+        self.down_hold_ms = self.down_hold_ms.min(5_000);
     }
 }
 
@@ -759,9 +644,11 @@ pub struct CoreCtlConfig {
     /// 总开关：false 时不写任何 core_ctl 节点
     #[serde(default = "crate::utils::default_true")]
     pub enabled: bool,
-    /// scenemode 离线核（息屏深度省电）：进入 scenemode 后直接写 sysfs 下线
-    /// CPU1..max（只留 CPU0 引导核），大核簇/prime 整簇断电消除空转漏电流；
-    /// 亮屏/退出 scenemode 按快照恢复。逐核回读验证，内核拒绝的核自动跳过。
+    /// scenemode 离线核（息屏深度省电）：进入 scenemode 后仅 prime（超大核）
+    /// 整簇断电消除空转漏电流，小核 + 大核全开常驻（频率上限由 scenemode CLG
+    /// 配置压制）；编号最大的小核独占给调度服务（从业务 cpuset 组移除 + 自身
+    /// 线程移入根组 + 自钉）。亮屏/退出 scenemode 按快照恢复。逐核回读验证，
+    /// 内核拒绝的核自动跳过。
     /// 按机型配置：8550/8475 开，8998（4.4 老内核热插拔质量未知）默认关。
     /// 注意：与 boost 互斥——scenemode 下 boost 被抑制，防止厂商 core_ctl
     /// 按 min_cpus 把下线的核又拉回来。
@@ -775,16 +662,6 @@ impl Default for CoreCtlConfig {
             enabled: true,
             scenemode_offline: true,
         }
-    }
-}
-
-/// 特调档位（1..4）→ 模式名，日志展示用
-pub fn tier_to_mode(tier: u32) -> &'static str {
-    match tier {
-        1 => "powersave",
-        2 => "balance",
-        3 => "performance",
-        _ => "fast",
     }
 }
 

@@ -20,6 +20,8 @@
 //! - C6 事件路由：on_frame/on_load_update/温度刷新只作用于活跃实例。
 
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use log::info;
@@ -45,17 +47,22 @@ pub struct FasManager {
     last_temp: f64,
     last_temp_read: Instant,
     temp_path: Option<PathBuf>,
+    /// FAS 前台激活共享标志（monitor 层 fps_monitor 消费）：activate 置位、
+    /// deactivate 清零——fps_monitor 据此推迟/摘除 eBPF uprobe（反偷跑门控）
+    fas_active_flag: Arc<AtomicBool>,
 }
 
 impl FasManager {
-    /// temp_path：FAS 专用 CPU 温度源（毫摄氏度），None = 无传感器（内部限温默认关闭，不影响其余功能）
-    pub fn new(temp_path: Option<PathBuf>) -> Self {
+    /// temp_path：FAS 专用 CPU 温度源（毫摄氏度），None = 无传感器（内部限温默认关闭，不影响其余功能）。
+    /// fas_active_flag 由 main.rs 创建、monitor 与 chiri 两层共享。
+    pub fn new(temp_path: Option<PathBuf>, fas_active_flag: Arc<AtomicBool>) -> Self {
         Self {
             instances: Vec::new(),
             active_pkg: None,
             last_temp: 0.0,
             last_temp_read: Instant::now(),
             temp_path,
+            fas_active_flag,
         }
     }
 
@@ -98,6 +105,7 @@ impl FasManager {
                 inst.last_fg = Instant::now();
                 inst.controller.set_game(pid, pkg);
             }
+            self.fas_active_flag.store(true, Ordering::Release);
             return true;
         }
 
@@ -111,6 +119,7 @@ impl FasManager {
                 .set_temp_threshold(rules.core_temp_threshold);
             inst.controller.apply_freqs();
             self.active_pkg = Some(pkg.to_string());
+            self.fas_active_flag.store(true, Ordering::Release);
             // fas→fas 切换与首次激活区分打点
             match switch_from.as_deref() {
                 Some(old) => info!(
@@ -147,6 +156,7 @@ impl FasManager {
             last_fg: Instant::now(),
         });
         self.active_pkg = Some(pkg.to_string());
+        self.fas_active_flag.store(true, Ordering::Release);
         info!(
             "{}",
             t_with_args(
@@ -161,12 +171,15 @@ impl FasManager {
         true
     }
 
-    /// C2：去激活当前活跃实例（reset_all_freqs + clear_game）。无活跃实例时为无操作。
+    /// C2：去激活当前活跃实例（reset_all_freqs + clear_game），并清零
+    /// fas_active 共享标志（fps_monitor 摘除 uprobe 回到零开销待机）。
+    /// 无活跃实例时为无操作。
     /// info 打点 scheduler-fas-deactivate（pkg）+ devimp event("fas", pkg, "deactivate")。
     pub fn deactivate_active(&mut self) {
         let Some(pkg) = self.active_pkg.take() else {
             return;
         };
+        self.fas_active_flag.store(false, Ordering::Release);
         if let Some(inst) = self.instances.iter_mut().find(|i| i.package == pkg) {
             // 先恢复频率再清状态：调用方随后 init 其他 governor（CLG/akmode/fast）时，
             // 对方才能快照到真实的系统状态

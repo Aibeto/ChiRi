@@ -92,13 +92,19 @@ WATCHDOG_CMD="sh -c '
   exit 0
 ' sh \"$LOG_DIR/watchdog.pid\" \"$DAEMON_PATH\" \"$MODDIR/.uninstalling\" > /dev/null 2>&1"
 
-# 启动看门狗，优先使用 setsid 脱离父进程组
+# 启动看门狗。两个分支都必须「后台化 + 脱离父进程组」：
+# - setsid 直接前台执行会阻塞本脚本（看门狗 while 循环在 daemon 存活期间
+#   永不退出——service.sh 会一直挂到 daemon 退出才返回，magiskd 启动会话
+#   被拖死），必须 & 放后台；
+# - nohup 分支同样 & 放后台（setsid 不可用时 nohup + & 已足够被 init 收养）。
 if [ -n "$SETSID_CMD" ]; then
-  $SETSID_CMD sh -c "$WATCHDOG_CMD"
+  $SETSID_CMD sh -c "$WATCHDOG_CMD" &
 else
-  # fallback: 使用 nohup（兼容性更好，但可能无法完全脱离进程组）
+  # fallback: nohup 后台运行（兼容性更好）
   nohup sh -c "$WATCHDOG_CMD" > /dev/null 2>&1 &
 fi
+# 立即与后台作业脱钩：防止脚本退出时向作业发 SIGHUP
+disown 2>/dev/null || true
 
 # 方式 B: 调试模式（启动失败时用这个排查，输出到 logs/boot_error.log）
 # nohup sh -c 'PIDFILE="$1"; DAEMON="$2"; FLAG="$3"; echo $$ > "$PIDFILE"; while :; do [ -f "$FLAG" ] && break; [ -f "$DAEMON" ] || break; "$DAEMON"; sleep 3; done; rm -f "$PIDFILE"; exit 0' sh "$LOG_DIR/watchdog.pid" "$DAEMON_PATH" "$MODDIR/.uninstalling" > "$LOG_DIR/boot_error.log" 2>&1 &
