@@ -308,22 +308,36 @@ fn apply_affinity_and_corectl(
     scenemode_offline: bool,
 ) {
     // scenemode 下抑制 boost：min_cpus 抬着会让厂商 core_ctl 重新拉起被下线的核
-    let boost = is_boost_mode(mode) && !scenemode_offline;
+    // fas 模式亮屏按 boost 处理：FAS 只负责调频，线程摆放沿用 boost 布局
+    // （top-app/foreground 收窄 prime∪big + 前台钉核 + core_ctl 保大核）。
+    // 此前 fas 不入 boost，游戏关键线程可自由落小核，而后台忙线程仍被
+    // promote 上大核抢资源——8475 实测 prime 空转 45%、大核 90% 排队、
+    // 整场 FAS 会话无一条前台 pin 行。息屏时 FAS 已释放、CLG doze 接管，
+    // 布局回退 normal（与 akmode 息屏保持 boost 不同——akmode 息屏仍在接管调频）。
+    // 语义声明：boost 只看 mode 与屏幕状态、不查 FAS 引擎是否活跃——初始化
+    // 失败冷却期（最长 FAS_COOLDOWN=300s）与亮屏后重激活间隙（≤1s）内，
+    // mode 仍为 fas，boost 布局照常生效（调频为 CLG balance）。这是有意的：
+    // mode=="fas" 时前台必为白名单游戏，摆放对游戏非负收益，且 gating
+    // is_active 会引入激活边界的布局抖动
+    let boost = (is_boost_mode(mode) || (mode == "fas" && screen_on)) && !scenemode_offline;
     affinity.apply(screen_on, fg_pid, &config.affinity, boost, core_utils);
     let offline_on = scenemode_offline && config.core_ctl.scenemode_offline;
     corectl.set_power_state(config.core_ctl.enabled && boost, offline_on);
 }
 
-/// FAS 线程亲和预留接入点（当前无操作）。
-/// 预留：FAS 模式下前台关键线程钉核/大核亲和扩展时在此实现；
-/// 激活(true)/去激活(false)时由事件循环调用，后续扩展无需再改接线。
+/// FAS 亲和接入点：FAS 激活/去激活时调整线程摆放相关状态。
+/// 当前职责：激活期放开 top-app uclamp.max（boost 进入时按机型配置写入的
+/// 85 会钳制 EAS 对重线程的 capacity 视图、抑制 prime 放置，与 FAS 让
+/// prime 承接负载的目标相悖；FAS 激活期锁频绕过 schedutil，85 对调频
+/// 无效，故激活期写 100、去激活还原）。后续 FAS 线程钉核扩展也在此实现。
 fn fas_affinity_hook(
     affinity_mgr: &mut affinity::AffinityManager,
     corectl_mgr: &mut core_ctl::CoreCtlManager,
     active: bool,
     fg_pid: i32,
 ) {
-    let _ = (affinity_mgr, corectl_mgr, active, fg_pid);
+    let _ = (corectl_mgr, fg_pid);
+    affinity_mgr.set_fas_uclamp_override(active);
 }
 
 /// 启动 Chiri 调度线程组（由 main.rs 调用）：

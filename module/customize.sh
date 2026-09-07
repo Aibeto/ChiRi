@@ -43,24 +43,24 @@ MSG_HOT_UPDATE_HINT="(The installer will now report a failure on purpose: this p
 
 if echo "$CURRENT_LOCALE" | $BUSYBOX grep -qi "zh"; then
   LANG_CODE="zh"
-  MSG_WELCOME="欢迎使用 ChiRi 调度！（Based on Yumi Scheduler）"
+  MSG_WELCOME="欢迎使用 ChiRi 调度！"
   MSG_SELECT_MODE="请选择安装模式："
-  MSG_VOLUME_UP="[音量上键] 完整安装（需要重启设备）"
-  MSG_VOLUME_DOWN="[音量下键] 热更新"
-  MSG_SELECTED_UP="已选择：完整安装"
-  MSG_SELECTED_DOWN="已选择：热更新"
+  MSG_VOLUME_UP="[音量上键] 完整安装（重启生效）"
+  MSG_VOLUME_DOWN="[音量下键] 热更新（实验性）"
+  MSG_SELECTED_UP="已选择：完整安装（重启生效）"
+  MSG_SELECTED_DOWN="已选择：热更新（实验性）"
   MSG_HOT_UPDATE_START="开始热更新流程..."
   MSG_STOPPING_DAEMON="正在停止守护进程..."
   MSG_STOPPING_MAIN="正在停止主进程..."
   MSG_COPYING_FILES="正在复制模块文件..."
   MSG_RESTARTING_SERVICE="正在重启服务..."
-  MSG_HOT_UPDATE_DONE="热更新完成！"
+  MSG_HOT_UPDATE_DONE="MISSION ACCOMPLISHED"
   MSG_FULL_INSTALL="继续完整安装流程..."
   MSG_HOT_UPDATE_UNAVAILABLE="热更新不可用，回退到完整安装..."
   MSG_RESTARTING_SCHEDULER="正在重启调度..."
   MSG_VERIFY_SERVICE="正在确认调度服务启动..."
   MSG_SERVICE_FAIL="守护进程未能启动！请重启设备以完成更新。"
-  MSG_HOT_UPDATE_HINT="（安装器随后显示“安装失败”为预期行为：防止管理器把热更新识别为模块更新而提示重启、隐藏 WebUI 与 Action。）"
+  MSG_HOT_UPDATE_HINT="（安装器随后将显示“安装失败”，为正常现象，实际上已完成更新）"
 fi
 
 # --- 欢迎信息 ---

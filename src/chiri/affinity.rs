@@ -101,6 +101,8 @@ const CORE_OVERLOAD_UTIL: f32 = 0.70;
 const PINNED_WEIGHT: f32 = 0.4;
 const PROMOTE_UTIL_PCT: f32 = 25.0;
 const LITTLE_HIGH_WATER: f32 = 0.70;
+/// balance 模式关键线程组绑定的解除水位（迟滞下沿，防乒乓）
+const KEY_BIND_RELEASE_WATER: f32 = 0.50;
 const LITTLE_PROMOTE_UTIL_PCT: f32 = 10.0;
 const BIG_HIGH_WATER: f32 = 0.90;
 const DEMOTE_UTIL_PCT: f32 = 5.0;
@@ -483,6 +485,13 @@ pub struct AffinityManager {
     /// 前台进程 cmdline 缓存（每轮 rebalance 刷新一次，aff/place 行共用，
     /// 避免每次钉核重读 /proc/<pid>/cmdline）
     fg_cmdline: String,
+    /// balance（非 boost）little 高水位的迟滞锁存：>HIGH_WATER 激活、
+    /// <RELEASE_WATER 解除，防阈值边缘绑定/恢复乒乓
+    key_bind_active: bool,
+    /// FAS 激活前的 top-app uclamp.max 值快照（None = 未接管）。
+    /// 激活期写 100 消除 boost 配置值（85）对 EAS prime 放置的钳制偏置，
+    /// 去激活时还原；boost 退出链（restore_uclamp_max）负责最终归位
+    fas_uclamp_prev: Option<String>,
 }
 
 impl AffinityManager {
@@ -506,6 +515,8 @@ impl AffinityManager {
             last_boost: false,
             self_pid: std::process::id(),
             fg_cmdline: String::new(),
+            key_bind_active: false,
+            fas_uclamp_prev: None,
         }
     }
 
@@ -796,7 +807,7 @@ impl AffinityManager {
         let now = Instant::now();
         self.tick = self.tick.wrapping_add(1);
         let t = self.tick;
-        let ranges = crate::common::chiri_core_ranges();
+        let mut ranges = crate::common::chiri_core_ranges();
         let max_cpu = ranges.prime.end.max(ranges.big.end);
         let prime_pool: Vec<usize> = if ranges.prime.is_empty() {
             ranges.big.clone().collect()
@@ -839,6 +850,27 @@ impl AffinityManager {
             let fg_ok =
                 !fg_cmdline.is_empty() && !crate::common::is_affinity_blacklisted(&fg_cmdline);
             let pin_fg = fg_ok && boost && screen_on;
+
+            // balance（非 boost）轻量前台保护：little 高水位时把关键线程
+            // （主线程/RenderThread 等白名单）组绑定到性能核 big∪prime。
+            // 8550 balance 实测：后台压小核 + EAS 把前台任务也堆在小核，
+            // little p50=88~99% 排队而 prime p50=0% 空转、大核半闲——现有
+            // 后台 promote 只救后台组线程，前台关键线程无人救援。迟滞：
+            // >HIGH_WATER 激活、<RELEASE_WATER 解除；boost/息屏强制解除
+            // （boost 有完整布局接管，息屏无前台交互无绑定意义）
+            let little_max = ranges
+                .little
+                .by_ref()
+                .filter_map(|c| self.core_utils.get(c).copied())
+                .fold(0.0_f32, f32::max);
+            if !screen_on || boost {
+                self.key_bind_active = false;
+            } else if little_max > LITTLE_HIGH_WATER {
+                self.key_bind_active = true;
+            } else if little_max < KEY_BIND_RELEASE_WATER {
+                self.key_bind_active = false;
+            }
+            let key_pressure = fg_ok && !boost && screen_on && self.key_bind_active;
 
             if fg_ok {
                 let task_dir = format!("/proc/{fg_pid}/task");
@@ -945,13 +977,14 @@ impl AffinityManager {
                                             > CORE_OVERLOAD_UTIL
                                     {
                                         // home 核过载（util > 70%）：重钉到低占用核
-                                        // 分散负载压制峰值频率。目标核必须同时通过
-                                        // 三道校验：不过载、分数显著更低（滞回）、
-                                        // 不在反跳回冷却内（刚迁离的核禁回）——否则
-                                        // 静止，防止边缘 util 噪声驱动 A↔B 乒乓
-                                        if let Some(core) =
-                                            self.pick_core_pref(&big_pool, &prime_pool)
-                                        {
+                                        // 分散负载压制峰值频率。候选 = 全性能池
+                                        // （big∪prime）最低分核——旧口径「big 存在未钉
+                                        // 核只看 big + 目标核 util≤70% 硬门槛」在大核
+                                        // 普遍过载时必然落空（8475 实测大核 86-90% 排队、
+                                        // prime 却空转 45%），改为双滞回：分数差
+                                        // ≥ OVERLOAD_MARGIN 且目标负载严格更低；
+                                        // 反跳回冷却（刚迁离的核禁回）继续防乒乓
+                                        if let Some(core) = self.pick_core(&perf_pool) {
                                             let (left_home, left_at) = self
                                                 .threads
                                                 .get(&tid)
@@ -962,9 +995,13 @@ impl AffinityManager {
                                             let banned = left_home == core as i16
                                                 && now.duration_since(left_at) < RETURN_COOLDOWN;
                                             if core != home as usize
-                                                && self.core_utils.get(core).copied().unwrap_or(0.0)
-                                                    <= CORE_OVERLOAD_UTIL
                                                 && cand_score <= home_score - OVERLOAD_MARGIN
+                                                && self.core_utils.get(core).copied().unwrap_or(0.0)
+                                                    < self
+                                                        .core_utils
+                                                        .get(home as usize)
+                                                        .copied()
+                                                        .unwrap_or(0.0)
                                                 && !banned
                                             {
                                                 self.pin_core(
@@ -975,7 +1012,9 @@ impl AffinityManager {
                                                     &pkg,
                                                     "home_overload",
                                                 );
-                                            } else {
+                                            } else if core != home as usize {
+                                                // cand==home（全员饱和无更优核）不打点，
+                                                // 防止每轮对每个过载线程重复刷 hold 行
                                                 crate::logger::devimp_event(
                                                     "overload_hold",
                                                     &pkg,
@@ -991,8 +1030,33 @@ impl AffinityManager {
                             } else if home >= 0 {
                                 self.unpin_core(tid, home, fg_pid, &pkg);
                             } else if group_pinned {
-                                // 退出 boost 后组掩码兜底的关键线程恢复全核
-                                self.restore_group_mask(tid, fg_pid, &pkg);
+                                // 组掩码兜底恢复：boost 退出，或 balance 压力
+                                // 解除/息屏（key_pressure 活跃时保持绑定）
+                                if !key_pressure {
+                                    self.restore_group_mask(tid, fg_pid, &pkg);
+                                }
+                            } else if key_pressure && is_key {
+                                // little 高水位的 balance 模式：关键线程组绑定
+                                // 到 big∪prime（与 boost 的 fg_group 同款机制、
+                                // 不同触发条件）。不钉单核、不占钉核计数，
+                                // EAS 在性能核组内继续自调度省电摆放
+                                let perf = perf_pool.clone();
+                                if set_tid_affinity(tid, &perf) {
+                                    if let Some(st) = self.threads.get_mut(&tid) {
+                                        st.group_pinned = true;
+                                    }
+                                    crate::logger::devimp_aff(
+                                        "pin",
+                                        fg_pid,
+                                        &pkg,
+                                        tid,
+                                        "-",
+                                        "-",
+                                        "group",
+                                        "-",
+                                        "normal_press",
+                                    );
+                                }
                             }
                         }
                         // 已消失线程：立即清理释放钉核计数
@@ -1065,11 +1129,12 @@ impl AffinityManager {
                                 && self.core_utils.get(home as usize).copied().unwrap_or(0.0)
                                     > CORE_OVERLOAD_UTIL
                             {
-                                if let Some(core) = self.pick_core(&big_pool) {
-                                    // 与前台同口径的三道校验：目标核不过载、分数
-                                    // 显著更低（OVERLOAD_MARGIN 滞回）、不在反跳回
-                                    // 冷却内。全不满足则静止，防止 promoted 线程
-                                    // 在大核间乒乓
+                                // 与前台同口径：候选 = 全性能池（big∪prime）最低分
+                                // 核 + 双滞回（分数差 ≥ OVERLOAD_MARGIN 且目标负载
+                                // 严格更低）+ 反跳回冷却。旧「big 池内选核 + 目标核
+                                // util≤70% 硬门槛」在大核普遍过载时只会原地静止，
+                                // 空闲的 prime 永远进不了候选
+                                if let Some(core) = self.pick_core(&perf_pool) {
                                     let (left_home, left_at) = match self.threads.get(&tid) {
                                         Some(st) => (st.prev_home, st.prev_home_at),
                                         None => continue,
@@ -1079,13 +1144,18 @@ impl AffinityManager {
                                     let banned = left_home == core as i16
                                         && now.duration_since(left_at) < RETURN_COOLDOWN;
                                     if core != home as usize
-                                        && self.core_utils.get(core).copied().unwrap_or(0.0)
-                                            <= CORE_OVERLOAD_UTIL
                                         && cand_score <= home_score - OVERLOAD_MARGIN
+                                        && self.core_utils.get(core).copied().unwrap_or(0.0)
+                                            < self
+                                                .core_utils
+                                                .get(home as usize)
+                                                .copied()
+                                                .unwrap_or(0.0)
                                         && !banned
                                     {
                                         self.pin_core(tid, core, home, 0, "-", "bg_overload");
-                                    } else {
+                                    } else if core != home as usize {
+                                        // cand==home 不打点（同前台口径）
                                         crate::logger::devimp_event(
                                             "overload_hold",
                                             "-",
@@ -1124,12 +1194,12 @@ impl AffinityManager {
                 if !bg.is_empty() {
                     let little_max = ranges
                         .little
-                        .clone()
+                        .by_ref()
                         .filter_map(|c| self.core_utils.get(c).copied())
                         .fold(0.0_f32, f32::max);
                     let big_max = ranges
                         .big
-                        .clone()
+                        .by_ref()
                         .filter_map(|c| self.core_utils.get(c).copied())
                         .fold(0.0_f32, f32::max);
                     let promote_thresh = if little_max > LITTLE_HIGH_WATER {
@@ -1224,7 +1294,10 @@ impl AffinityManager {
                                 st.moved_group = moved;
                                 st.promoted = true;
                             }
-                            if let Some(core) = self.pick_core(&big_pool) {
+                            // 选核与前台普通线程同口径：big 有未钉核只看 big，
+                            // big 钉满才溢出 prime——游戏场景 big 是关键线程主场，
+                            // 后台忙线程不应挤占；但全钉满时进 prime 好过排队
+                            if let Some(core) = self.pick_core_pref(&big_pool, &prime_pool) {
                                 self.pin_core(*tid, core, -1, 0, "-", "bg_busy");
                             }
                             debug!(
@@ -1424,6 +1497,45 @@ impl AffinityManager {
         if let Some(v) = &self.uclamp_max_snapshot {
             if !v.is_empty() {
                 let _ = crate::utils::try_write_file(UCLAMP_MAX_PATH, v);
+            }
+        }
+    }
+
+    /// FAS 激活期放开 top-app uclamp.max（fas_affinity_hook 调用）。
+    /// boost 进入时 apply_uclamp_max 已按机型配置写入（8475/8550=85），
+    /// 该钳制压低 EAS 对 top-app 重线程的 capacity 视图（85%×1024≈870
+    /// 恰在 big 容量内），抑制 prime 放置——与 FAS 让 prime 承接负载的
+    /// 目标相悖；FAS 激活期 min=max 锁频绕过 schedutil，85 对调频无效，
+    /// 仅剩放置负效应，故激活期写 100。首次激活快照当前值，去激活还原。
+    /// 时序保证：激活调用点均在 boost 进入（写 85）之后；去激活时若 boost
+    /// 已退出则跳过写入（restore_uclamp_max 链已归位到 boost 前原值，
+    /// 避免把 boost 配置值泄漏到 normal）。息屏释放路径不调本方法（无
+    /// hook(false)），由 boost 退出链兜底还原，重新激活时快照仍有效。
+    pub fn set_fas_uclamp_override(&mut self, active: bool) {
+        if active {
+            if self.uclamp_max_support == UclampSupport::Unsupported {
+                return;
+            }
+            if self.uclamp_max_support == UclampSupport::Unknown {
+                // 常规时序下 boost 进入已探测支持性；此处兜底同口径
+                // （< 5.3 无 uclamp / 节点缺失 → 永久跳过，8998 内核 4.4 走此路径）
+                let ver_ok =
+                    kernel_version().map_or(false, |(a, b, _)| a > 5 || (a == 5 && b >= 3));
+                if !ver_ok || !std::path::Path::new(UCLAMP_MAX_PATH).exists() {
+                    self.uclamp_max_support = UclampSupport::Unsupported;
+                    return;
+                }
+                self.uclamp_max_support = UclampSupport::Ok;
+            }
+            if self.fas_uclamp_prev.is_none() {
+                self.fas_uclamp_prev = std::fs::read_to_string(UCLAMP_MAX_PATH)
+                    .ok()
+                    .map(|s| s.trim().to_string());
+            }
+            let _ = crate::utils::try_write_file(UCLAMP_MAX_PATH, "100.00");
+        } else if let Some(prev) = self.fas_uclamp_prev.take() {
+            if self.applied_kind == KIND_BOOST && !prev.is_empty() {
+                let _ = crate::utils::try_write_file(UCLAMP_MAX_PATH, &prev);
             }
         }
     }

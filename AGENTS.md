@@ -227,9 +227,9 @@ WebUI 侧：
 
 - 息屏释放（原 C4 doze 已废弃删除）：`ScreenStateChange(false)` 在非特调分支统一 `ak/fast release` + （fas 活跃时）`fas_mgr.deactivate_active()` → 走 CLG doze → scenemode 全局接管；亮屏 `ScreenStateChange(true)` 的 fas 分支只把 CLG 从 doze 热切回 balance，FAS 由 app_detect（亮屏 force_refresh）的 ModeChange / 1s 兜底重新激活（activate 复用保留实例 + apply_freqs）。勿改回「息屏 enter_doze 写低频锁、亮屏 exit_doze 恢复」：锁屏前台无帧事件时 apply_freqs 恢复路径不触发（且被 freq_hold_frames 挡 2 拍），全簇锁死最低频表现为亮屏 0.2fps；息屏期间也无法进入 CLG doze/scenemode（口袋发热）。
 
-- 线程亲和预留接口：`fas_affinity_hook(affinity_mgr, corectl_mgr, active, fg_pid)` 在 chiri/mod.rs（当前无操作），FAS 激活/去激活时调用；后续做 FAS 线程钉核只实现该函数，无需再改事件循环接线。
+- 线程亲和预留接口：`fas_affinity_hook(affinity_mgr, corectl_mgr, active, fg_pid)` 在 chiri/mod.rs，FAS 激活/去激活时调用；当前职责 = FAS 激活期放开 top-app uclamp.max 为 100（快照还原；boost 进入按机型写入的 85 会钳制 EAS 对重线程的 capacity 视图、抑制 prime 放置，与 FAS 让 prime 承载负载相悖——8475 实测 prime 空转 45%；FAS 激活期 min=max 锁频绕过 schedutil，85 对调频无效仅剩放置负效应；去激活时若 boost 已退出则跳过还原，由 restore 链归位避免把 boost 值泄漏到 normal；8998 内核 4.4 走兜底探测永久跳过），后续 FAS 线程钉核扩展也在此实现，无需再改事件循环接线。
 
-- 调度能力范围（相对 CLG 的扩展仅频率维度）：per-policy min=max 锁频（PolicyController，1.5s 回读校验防内核覆写）+ 容量加权分频 + util 软封顶 + PID/Jank 帧级响应；不做 cpuset/uclamp/core_ctl。
+- 调度能力范围（相对 CLG 的扩展仅频率维度）：per-policy min=max 锁频（PolicyController，1.5s 回读校验防内核覆写）+ 容量加权分频 + util 软封顶 + PID/Jank 帧级响应；FAS 自身不做 cpuset/uclamp/core_ctl——线程摆放复用 boost 布局（fas 亮屏入 boost，见亲和章节），uclamp.max 放开经 fas_affinity_hook。
 
 ### CLG 调频语义（动态上限制）
 
@@ -293,7 +293,7 @@ WebUI 侧：
 
 - `src/chiri/affinity.rs` 的 `AffinityManager`（消费 `SysPathExist` 已探测但此前无人使用的 cpuset/cpuctl 能力位）。
 
-- boost 模式（performance/fast/特调，判定口径统一在 `chiri/mod.rs::is_boost_mode`）下：`/dev/cpuset/top-app`、`foreground` 的 `cpus` 收窄到大核+超大核（区间用 `common::chiri_core_ranges()`，不硬编码）；`background/system-background/restricted` 压到小核。
+- boost 模式（performance/fast/特调，判定口径统一在 `chiri/mod.rs::is_boost_mode`；fas 模式亮屏在 `apply_affinity_and_corectl` 调用点同样并入 boost——FAS 只管调频、线程摆放沿用 boost 布局，息屏 FAS 释放后回退 normal，与 akmode 息屏保持 boost 不同）下：`/dev/cpuset/top-app`、`foreground` 的 `cpus` 收窄到大核+超大核（区间用 `common::chiri_core_ranges()`，不硬编码）；`background/system-background/restricted` 压到小核。
 
 - 可选写 `/dev/cpuctl/top-app/cpu.uclamp.min`（配置 `Affinity.top_app_uclamp_min_pct`，默认 0 关闭——uclamp.min 会让 schedutil 独立于 CLG 抬频，避免与动态上限语义打架）。
 
@@ -301,8 +301,9 @@ WebUI 侧：
 
 - 线程层（按核心粒度放置，`pin_foreground_threads=true` 启用，每 2s 再平衡一轮、前台 PID/boost 变化立即触发）——**开销控制优先，不做逐线程每轮读 stat**：
   - 前台（fg_pid 由 app_detect 提供）：每轮 1 次 `read_dir /proc/<pid>/task`，仅对**新增**线程读一次 stat 判定关键/建档；存量线程的 home 合法性仅用缓存的逐核 util 与在线位图判断（合法范围 = prime ∪ big 全部性能核，含溢出落点）。**主池/溢出两级选核**（`pick_core_pref`）：关键线程（tid==pid 或 comm 命中 RenderThread/GLThread/GameThread/UnityMain/UnityGfxDeviceW 白名单）主池 = prime、溢出 = big（超大核全被钉才回落大核，UnityMain 等白名单线程直接绑定超大核）；普通线程主池 = big、溢出 = prime（**大核钉满后自动启用超大核**，修复"多个重负载挤单一大核而超大核闲置"）。boost + 亮屏才钉，否则恢复全核；已消失线程下一轮即清理释放钉核计数。
+  - **balance（非 boost）轻量前台保护**：8550 实测日常 balance 模式下后台压小核 + EAS 把前台任务也堆在小核，little p50=88~99% 排队而 prime p50≈0% 空转、大核半闲（后台 promote 只救后台组线程，前台关键线程无人救援）。little 高水位（`LITTLE_HIGH_WATER` 0.70，迟滞 <`KEY_BIND_RELEASE_WATER` 0.50 解除，boost/息屏强制解除）时把前台关键线程组绑定到 big∪prime（复用 `group_pinned` 状态与恢复路径，reason `normal_press`），不钉单核、不占钉核计数，普通线程仍由 EAS 省电摆放；boost 布局接管时无缝衔接（掩码一致）。
 
-  - 后台动态亲和（**不把后台全压小核**——小核过载能效灾难）：忙线程 promote 到 big、回落 demote。候选 TID 从三个后台 cpuset 的 `tasks` 文件读取（**不做 /proc 全量枚举**），每 2 轮刷新、按游标分片每轮只深扫 64 个；窗口 util = ticks 差分，**两窗防抖**（上次采样忙且本次仍忙、期间采到低负载即清标记）即 promote，不依赖采样间隔。promote 先把 TID 移入 top-app（cpuset v1 按 TID 记账）再按当前核心占用选核钉定，orig 组缓存供 demote/清理迁回。已 promote 线程每 2 轮复查：util 连续 3 次 < 5% → demote；线程仍忙（≥5%）且所在核心 util > 70%（`CORE_OVERLOAD_UTIL`）→ 换低占用 big 核（`bg_overload`，带 4s 迁移防抖）。过载重钉统一门控：**仅当目标核本身 util ≤ 70% 才迁**，选回同核/所有候选核都过载时静止（整体高载交给 CLG 上限与温控处理），杜绝边际收益微小的无谓搬动与两核间乒乓。**后台迁移仅亮屏**。
+  - 后台动态亲和（**不把后台全压小核**——小核过载能效灾难）：忙线程 promote 到 big、回落 demote。候选 TID 从三个后台 cpuset 的 `tasks` 文件读取（**不做 /proc 全量枚举**），每 2 轮刷新、按游标分片每轮只深扫 64 个；窗口 util = ticks 差分，**两窗防抖**（上次采样忙且本次仍忙、期间采到低负载即清标记）即 promote，不依赖采样间隔。promote 先把 TID 移入 top-app（cpuset v1 按 TID 记账）再按当前核心占用选核钉定（`pick_core_pref`：big 有未钉核只看 big、钉满溢出 prime，与前台普通线程同口径——游戏场景 big 是关键线程主场，后台忙线程不挤占但也不排队）。已 promote 线程每 2 轮复查：util 连续 3 次 < 5% → demote；线程仍忙（≥5%）且所在核心 util > 70%（`CORE_OVERLOAD_UTIL`）→ 换低占用核（`bg_overload`，带 4s 迁移防抖）。过载重钉统一口径（前台 `home_overload` / 后台 `bg_overload` 共用）：**候选 = 全性能池（big∪prime）最低分核 + 双滞回**（分数差 ≥ `OVERLOAD_MARGIN` 且目标核 util 严格低于 home）+ 反跳回冷却（`RETURN_COOLDOWN` 16s 禁回刚迁离核）。旧「big 池内选核 + 目标核 util ≤ 70% 硬门槛」在整体高载时必然静止——8475 实测 FAS 下大核 86-90% 排队、prime 空转 45%、26 分钟 85 次 `overload_hold`；全员过载时把负载摊向低载核（含 prime）仍有收益，乒乓由防抖+冷却兜底。**后台迁移仅亮屏**。
 
   - 在线核位图每 4 轮读一次并缓存（核热插拔不频繁）；devimp core 行每 2 轮一次。
 
