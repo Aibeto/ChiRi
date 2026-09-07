@@ -32,12 +32,12 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
+use anyhow::Result;
+use std::fs;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
-use std::fs;
-use anyhow::Result;
 
 // CLG 看门狗：SystemLoadUpdate 常规 160ms / 特调 40ms 投喂一次，超过 CLG_STALE_MAX 没收到
 // 事件就认为负载源失效（eBPF 加载失败/探针崩溃/通道断开），直接 release() 回系统调频，
@@ -204,17 +204,17 @@ pub mod akmode;
 pub mod core_ctl;
 pub mod cpu_load_governor;
 pub mod fas_manager;
-pub mod touch_detect;
 pub mod fast;
+pub mod touch_detect;
 
-use crate::i18n::{t, load_language, t_with_args};
-use crate::fluent_args; 
-use crate::utils; 
-use crate::common::DaemonEvent; 
+use crate::common;
+use crate::common::DaemonEvent;
+use crate::fluent_args;
+use crate::i18n::{load_language, t, t_with_args};
+use crate::logger;
+use crate::utils;
 use config::Config;
 use scheduler::CpuScheduler;
-use crate::logger;
-use crate::common;
 
 /// CPU 频率策略簇信息
 pub struct CpuPolicy {
@@ -265,30 +265,56 @@ fn read_boost_frequencies(pid: i32) -> Vec<u32> {
 /// 仅供 FAS 的 capacity 权重计算使用，FAS 禁用期间暂无调用，恢复时启用。
 #[allow(dead_code)]
 pub(super) fn probe_policy_capacity(policy_id: i32) -> Option<u32> {
-    let related_str = fs::read_to_string(
-        format!("/sys/devices/system/cpu/cpufreq/policy{}/related_cpus", policy_id))
-        .or_else(|_| fs::read_to_string(
-            format!("/sys/devices/system/cpu/cpufreq/policy{}/affected_cpus", policy_id)))
-        .ok()?;
+    let related_str = fs::read_to_string(format!(
+        "/sys/devices/system/cpu/cpufreq/policy{}/related_cpus",
+        policy_id
+    ))
+    .or_else(|_| {
+        fs::read_to_string(format!(
+            "/sys/devices/system/cpu/cpufreq/policy{}/affected_cpus",
+            policy_id
+        ))
+    })
+    .ok()?;
     let first_cpu: u32 = related_str.split_whitespace().next()?.parse().ok()?;
-    fs::read_to_string(format!("/sys/devices/system/cpu/cpu{}/cpu_capacity", first_cpu))
-        .ok()?.trim().parse::<u32>().ok()
+    fs::read_to_string(format!(
+        "/sys/devices/system/cpu/cpu{}/cpu_capacity",
+        first_cpu
+    ))
+    .ok()?
+    .trim()
+    .parse::<u32>()
+    .ok()
 }
 
 /// 根据 CPU capacity 自动计算每个 cluster 的权重
 /// 仅供 FAS 使用，FAS 禁用期间暂无调用，恢复时启用。
 #[allow(dead_code)]
 pub(super) fn auto_compute_capacity_weights(policies: &[CpuPolicy]) -> Option<Vec<(i32, f32)>> {
-    let caps: Vec<(i32, u32)> = policies.iter()
+    let caps: Vec<(i32, u32)> = policies
+        .iter()
         .filter(|p| p.id != -1)
         .filter_map(|p| probe_policy_capacity(p.id).map(|c| (p.id, c)))
         .collect();
-    if caps.is_empty() || caps.iter().any(|&(_, c)| c == 0) { return None; }
+    if caps.is_empty() || caps.iter().any(|&(_, c)| c == 0) {
+        return None;
+    }
     let min_cap = caps.iter().map(|&(_, c)| c).min().unwrap() as f32;
-    Some(caps.iter().map(|&(pid, cap)| {
-        let r = cap as f32 / min_cap;
-        (pid, if r <= 1.01 { 1.0 } else { 1.0 + (r - 1.0).sqrt() })
-    }).collect())
+    Some(
+        caps.iter()
+            .map(|&(pid, cap)| {
+                let r = cap as f32 / min_cap;
+                (
+                    pid,
+                    if r <= 1.01 {
+                        1.0
+                    } else {
+                        1.0 + (r - 1.0).sqrt()
+                    },
+                )
+            })
+            .collect(),
+    )
 }
 
 /// 按当前模式判定是否为 boost 类模式（亲和收窄/core_ctl 保大核的判定口径）：
@@ -393,8 +419,8 @@ pub fn start_scheduler_thread(
 
     // 启动时立即应用一次性系统调整（cpuidle / IO / 屏蔽系统自带触摸升频），
     // 避免首次配置变更前这些调整处于未生效状态（config_watcher 仅在配置变化后重放）
-    if let Err(e) = CpuScheduler::new(shared_config.clone(), sys_path_exist.clone())
-        .apply_system_tweaks()
+    if let Err(e) =
+        CpuScheduler::new(shared_config.clone(), sys_path_exist.clone()).apply_system_tweaks()
     {
         log::error!(
             "{}",
@@ -432,7 +458,13 @@ pub fn start_scheduler_thread(
                 .unwrap_or(config_dir);
             loop {
                 if let Err(e) = utils::watch_path(&watch_dir) {
-                    log::error!("{}", t_with_args("config-watch-error", &fluent_args!("error" => e.to_string())));
+                    log::error!(
+                        "{}",
+                        t_with_args(
+                            "config-watch-error",
+                            &fluent_args!("error" => e.to_string())
+                        )
+                    );
                     // 退避后再重试，避免持续错误时忙循环刷 CPU
                     thread::sleep(std::time::Duration::from_secs(2));
                     continue;
@@ -447,7 +479,9 @@ pub fn start_scheduler_thread(
                         *config_clone.write().unwrap() = new_config;
 
                         let new_lang = config_clone.read().unwrap().meta.language.clone();
-                        if old_lang != new_lang { load_language(&new_lang); }
+                        if old_lang != new_lang {
+                            load_language(&new_lang);
+                        }
 
                         log::info!("{}", t("config-reloaded-success"));
 
@@ -455,19 +489,32 @@ pub fn start_scheduler_thread(
                         // （meta 保留外部修改）。内容一致时内部跳过写入，不会成环。
                         common::sync_config_snapshot(&config_path);
 
-                        let scheduler = CpuScheduler::new(config_clone.clone(), sys_path_clone.clone());
+                        let scheduler =
+                            CpuScheduler::new(config_clone.clone(), sys_path_clone.clone());
                         if let Err(e) = scheduler.apply_system_tweaks() {
-                            log::error!("{}", t_with_args("config-apply-tweaks-failed", &fluent_args!("error" => e.to_string())));
+                            log::error!(
+                                "{}",
+                                t_with_args(
+                                    "config-apply-tweaks-failed",
+                                    &fluent_args!("error" => e.to_string())
+                                )
+                            );
                         }
 
                         // 通知 scheduler_ipc：运行中的 CLG/akmode/亲和/core_ctl 需按新配置重载
                         dirty_clone.store(true, Ordering::Release);
                     }
-                    Err(load_err) => log::error!("{}", t_with_args("config-reload-fail", &fluent_args!("error" => load_err.to_string()))),
+                    Err(load_err) => log::error!(
+                        "{}",
+                        t_with_args(
+                            "config-reload-fail",
+                            &fluent_args!("error" => load_err.to_string())
+                        )
+                    ),
                 }
             }
         })?;
-    
+
     log::info!("{}", t("main-config-watch-thread-create"));
 
     // ==========================================
@@ -574,6 +621,10 @@ pub fn start_scheduler_thread(
 
             // 启动时初始化
             {
+                // 强制上线全部核心：上次运行可能在 scenemode 中途被杀，残留的
+                // 离线核会让 cpufreq policy 目录消失，下方 CLG/fast_lock 初始化
+                // 枚举不到对应集群（该簇永久失去 worker）。必须先于任何接管
+                corectl_mgr.force_online_all();
                 let current_mode = mode_clone.lock().unwrap().clone();
                 if current_mode == "fast" {
                     fast_lock.init();
@@ -1121,7 +1172,23 @@ pub fn start_scheduler_thread(
                             scene_mode_active = false;
                             scene_hold_logged = false;
                             let config_lock = config_clone.read().unwrap();
-                            
+
+                            // 亲和/core_ctl 先恢复：若此前处于 scenemode，prime 仍离线，
+                            // 其 cpufreq policy 目录不存在——必须先恢复全部核上线，
+                            // 下方 CLG/akmode/fast_lock 的 reload/init 才能枚举到完整
+                            // policy 列表（否则 prime 永久失去 worker，上线后残留
+                            // 离线前的锁频状态、脱离调度控制）
+                            apply_affinity_and_corectl(
+                                &mut affinity_mgr,
+                                &mut corectl_mgr,
+                                &config_lock,
+                                &current_mode,
+                                true,
+                                crate::monitor::app_detect::get_current_pid(),
+                                &last_core_utils,
+                                scene_mode_active,
+                            );
+
                             if crate::common::is_special_mode(&current_mode) {
                                 // 亮屏恢复特调：akmode 息屏期间通常保持接管（息屏分支不释放）；
                                 // 但若息屏时负载事件停止触发看门狗释放过 akmode，这里必须重新接管，
@@ -1174,20 +1241,6 @@ pub fn start_scheduler_thread(
                                     else { cpu_governor.init_policies(&clg_cfg); }
                                 }
                                 else { cpu_governor.release(); }
-                            }
-                            // 亲和/core_ctl 跟随亮屏恢复：亮屏强制重迁移前台线程
-                            {
-                                let cfg = config_clone.read().unwrap();
-                                apply_affinity_and_corectl(
-                                    &mut affinity_mgr,
-                                    &mut corectl_mgr,
-                                    &cfg,
-                                    &current_mode,
-                                    true,
-                                    crate::monitor::app_detect::get_current_pid(),
-                                    &last_core_utils,
-                                    scene_mode_active,
-                                );
                             }
                             crate::logger::devimp_event("screen", "-", "on");
                         }

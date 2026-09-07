@@ -430,6 +430,47 @@ impl CoreCtlManager {
         }
     }
 
+    /// 启动时强制上线全部核心：上次运行可能在 scenemode 中途被杀，残留的
+    /// 离线核会让其 cpufreq policy 目录消失（CLG/akmode/fast_lock 启动初始化
+    /// 枚举不到该集群，永久失去 worker），且核本身永久离线。调度线程启动
+    /// 阶段在任何 governor 接管之前调用，把调度范围内的核全部写 online=1，
+    /// 同时清空 offlined 残留快照（快照对应的恢复语义已由本调用替代）。
+    pub fn force_online_all(&mut self) {
+        let ranges = crate::common::chiri_core_ranges();
+        let write_back = |path: &str| {
+            crate::utils::try_write_file(path, "1").is_ok()
+                && fs::read_to_string(path)
+                    .ok()
+                    .map(|s| s.trim() == "1")
+                    .unwrap_or(false)
+        };
+        for cpu in ranges
+            .little
+            .clone()
+            .chain(ranges.big.clone())
+            .chain(ranges.prime.clone())
+        {
+            let path = format!("/sys/devices/system/cpu/cpu{}/online", cpu);
+            // 已在线（或节点不可读——核数少于布局的机型）直接跳过
+            if fs::read_to_string(&path)
+                .ok()
+                .map(|s| s.trim() == "1")
+                .unwrap_or(true)
+            {
+                continue;
+            }
+            if !write_back(&path) && !write_back(&path) {
+                // 启动期失败打 warn：热插拔锁/厂商守护进程可能拒绝，
+                // 后续亮屏/ModeChange 路径的 restore_online 仍会按快照兜底
+                warn!(
+                    "{}",
+                    t_with_args("corectl-write-failed", &fluent_args!("path" => path))
+                );
+            }
+        }
+        self.offlined.clear();
+    }
+
     /// 恢复各 cluster 的 min_cpus 快照（boost 退出）。
     fn restore_min_cpus(&mut self) {
         for c in &self.clusters {
