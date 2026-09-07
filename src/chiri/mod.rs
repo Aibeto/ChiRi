@@ -55,11 +55,16 @@ const THERMAL_CHECK_INTERVAL: Duration = Duration::from_secs(2);
 const TELEMETRY_LOG_INTERVAL: Duration = Duration::from_secs(1);
 /// scenemode 饱和退出：**常驻簇（小核 + 大核）** max_util 持续高于该值视为
 /// 顶满性能上限（util 是忙时占比，与频率无关——后台负载压不住常驻核时即饱和）
-const SCENEMODE_SAT_UTIL: f32 = 0.70;
+const SCENEMODE_SAT_UTIL: f32 = 0.75;
 /// 饱和持续判定时长：连续满足才退出，防止瞬时突发误触发
 const SCENEMODE_SAT_SECS: Duration = Duration::from_secs(10);
 /// scenemode 冷却：饱和退出后 300s 内不得重新进入（防止与后台负载反复拉锯）
 const SCENEMODE_COOLDOWN: Duration = Duration::from_secs(300);
+/// scheduler_ipc 事件循环 panic 自愈：连续崩溃超过该次数后放弃重启（防止
+/// poisoned lock 等确定性 panic 变成打满 CPU 的重启风暴），仅保留最终清理
+const SCHEDULER_IPC_RESTART_MAX: u32 = 5;
+/// panic 重启退避：每次重启前等待，错开引发 panic 的外部状态（如负载风暴）
+const SCHEDULER_IPC_RESTART_BACKOFF: Duration = Duration::from_secs(1);
 /// 电池温度节点（Android 标准电源供给接口，毫摄氏度）。
 /// 电池温度为主参考：反映整机持续发热，变化缓慢、不随游戏瞬时负载抖动
 const BATT_TEMP_PATH: &str = "/sys/class/power_supply/battery/temp";
@@ -612,6 +617,11 @@ pub fn start_scheduler_thread(
             // 会让热保护 cap 以 ~8s 周期在 40/70/100 间震荡，高负载游戏周期性卡顿
             let mut batt_filter = TempFilter::new(-10.0, 70.0, 10.0, 1.0);
             let mut cpu_filter = TempFilter::new(5.0, 110.0, 12.0, 3.0);
+            // panic 自愈：事件循环 panic 被捕获后不退出线程，而是清理到安全态并
+            // 重新进入事件循环（退避 + 连续崩溃上限）；仅 channel 关闭才正常退出。
+            // 此前 catch_unwind 捕获后直接收尾退出，进程存活但调度永久死亡。
+            let mut ipc_restart_count: u32 = 0;
+            loop {
             let loop_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             loop {
                 // 当前模式文件自愈：每 5 秒重写一次（即便内容未变也重写），
@@ -1509,14 +1519,10 @@ pub fn start_scheduler_thread(
                                     scenemode_cooldown_until =
                                         Some(Instant::now() + SCENEMODE_COOLDOWN);
                                     let current_mode = mode_clone.lock().unwrap().clone();
-                                    // 退回 powersave：给后台负载更大余量
-                                    let ps_cfg = get_clg_cfg(&config_clone.read().unwrap(), "powersave");
-                                    if cpu_governor.is_active() {
-                                        cpu_governor.reload_config(&ps_cfg);
-                                    } else {
-                                        cpu_governor.init_policies(&ps_cfg);
-                                    }
-                                    // 立即恢复全部在线核 + 解除专用核钉定
+                                    // 立即恢复全部在线核 + 解除专用核钉定。
+                                    // 必须先于 CLG reload：prime 离线期间其 cpufreq policy
+                                    // 目录会消失，reload 枚举不到该 policy，prime 将永久
+                                    // 失去 worker（上线后残留离线前的锁频状态、脱离调度控制）
                                     {
                                         let cfg = config_clone.read().unwrap();
                                         apply_affinity_and_corectl(
@@ -1529,6 +1535,19 @@ pub fn start_scheduler_thread(
                                             &last_core_utils,
                                             scene_mode_active,
                                         );
+                                    }
+                                    // 退回 powersave：给后台负载更大余量（核已全部上线，
+                                    // 此时枚举 policy 才完整）。powersave CLG 未启用时释放，
+                                    // 与 ModeChange 路径口径一致
+                                    let ps_cfg = get_clg_cfg(&config_clone.read().unwrap(), "powersave");
+                                    if ps_cfg.enabled {
+                                        if cpu_governor.is_active() {
+                                            cpu_governor.reload_config(&ps_cfg);
+                                        } else {
+                                            cpu_governor.init_policies(&ps_cfg);
+                                        }
+                                    } else {
+                                        cpu_governor.release();
                                     }
                                     log::info!(
                                         "{}",
@@ -1641,8 +1660,62 @@ pub fn start_scheduler_thread(
                 }
             }
             }));
-            if loop_result.is_err() {
+                if loop_result.is_ok() {
+                    // channel 关闭：正常退出
+                    break;
+                }
                 log::error!("{}", t("scheduler-ipc-panic"));
+                // 清理到安全态（release 幂等；收尾本身也包 catch_unwind，
+                // release 路径再 panic 不能击穿重启循环）
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    cpu_governor.release();
+                    ak_governor.release();
+                    fast_lock.release();
+                    fas_mgr.deactivate_all();
+                    corectl_mgr.release();
+                    affinity_mgr.release();
+                }));
+                ipc_restart_count += 1;
+                if ipc_restart_count > SCHEDULER_IPC_RESTART_MAX {
+                    log::error!(
+                        "{}",
+                        t_with_args(
+                            "scheduler-ipc-restart-giveup",
+                            &fluent_args!("count" => SCHEDULER_IPC_RESTART_MAX.to_string())
+                        )
+                    );
+                    break;
+                }
+                // 重置状态机到亮屏安全态：真实屏幕状态由下一个 ScreenStateChange
+                // 事件纠正（去重比较 is_screen_on，重置后的首个事件必然被处理）
+                is_screen_on = true;
+                screen_off_at = None;
+                scene_mode_active = false;
+                scene_hold_logged = false;
+                scenemode_sat_since = None;
+                last_core_utils.clear();
+                std::thread::sleep(SCHEDULER_IPC_RESTART_BACKOFF);
+                // 按当前模式重新接管（等价亮屏恢复语义；特调/fast/fas 由后续事件重建）
+                {
+                    let current_mode = mode_clone
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .clone();
+                    if current_mode != "fas" && !crate::common::is_special_mode(&current_mode) {
+                        let config_lock = config_clone.read().unwrap();
+                        let clg_cfg = get_clg_cfg(&config_lock, &current_mode);
+                        if clg_cfg.enabled {
+                            cpu_governor.init_policies(&clg_cfg);
+                        }
+                    }
+                }
+                log::warn!(
+                    "{}",
+                    t_with_args(
+                        "scheduler-ipc-restart",
+                        &fluent_args!("count" => ipc_restart_count.to_string())
+                    )
+                );
             }
             log::warn!("{}", t("scheduler-channel-closed"));
             // 收尾：无论 channel 关闭还是 panic，都恢复 CPU 控制状态，避免频率/governor 残留
