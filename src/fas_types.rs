@@ -343,8 +343,10 @@ fn d_max_frame() -> f32 {
 fn d_cold_ms() -> u64 {
     3500
 }
+/// 写频后校验间隔（秒）：更快发现内核频率覆写（thermal cap / QoS）。
+/// 仅在写频事件后触发一次读数，非周期轮询，调小无长期开销
 fn d_verify_interval() -> u32 {
-    3
+    1
 }
 fn d_temp_thresh() -> f64 {
     0.0

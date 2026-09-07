@@ -99,6 +99,20 @@ const CORE_OVERLOAD_UTIL: f32 = 0.70;
 /// util 尚未反映其负载）时仍能把后续线程推向其他核，避免多线程挤同核
 /// 时间片轮转造成卡顿；权重过弱会让第二个重线程挤入"看似空闲"的核
 const PINNED_WEIGHT: f32 = 0.4;
+/// 单核钉定数量上限：普通线程钉核的目的是「分散」而非「圈养」。达到上限
+/// 说明 4 个性能核已被钉满，继续钉只会让后续线程在同核上排队——8475
+/// 终末地实测：~180 个前台线程 / 4 性能核、单核 30+ 钉定，psi_cpu some
+/// 平均 28%（帧线程被辅助线程排队拖住，GPU 等帧提交）。达到上限后的
+/// 线程不再单核钉定，留在 boost cpuset（top-app/foreground = big∪prime）
+/// 内由 EAS 自调度
+const MAX_PINS_PER_CORE: u32 = 3;
+/// overload_hold 打点冷却：滞回不满足时同一过载线程每轮（2s）都会重复
+/// 评估，不节流时终末地一局刷 1.1 万+ 行（约占 devimp 日志 41%）。每 tid
+/// 半分钟一条足以观测「长期滞留」，同时消除高频日志 IO
+const HOLD_LOG_COOLDOWN: Duration = Duration::from_secs(30);
+/// place 快照最小输出间隔：放置未变化时按该间隔输出一次心跳快照，
+/// 避免游戏周期性建/销线程导致签名永远变化、退化为无节流
+const PLACE_DUMP_MIN_INTERVAL: Duration = Duration::from_secs(30);
 const PROMOTE_UTIL_PCT: f32 = 25.0;
 const LITTLE_HIGH_WATER: f32 = 0.70;
 /// balance 模式关键线程组绑定的解除水位（迟滞下沿，防乒乓）
@@ -461,6 +475,8 @@ struct ThreadState {
     prev_home: i16,
     /// 迁离时刻（配合 RETURN_COOLDOWN）
     prev_home_at: Instant,
+    /// 上次 overload_hold 打点时刻（HOLD_LOG_COOLDOWN 节流）
+    last_hold_log: Instant,
 }
 
 pub struct AffinityManager {
@@ -492,6 +508,10 @@ pub struct AffinityManager {
     /// 激活期写 100 消除 boost 配置值（85）对 EAS prime 放置的钳制偏置，
     /// 去激活时还原；boost 退出链（restore_uclamp_max）负责最终归位
     fas_uclamp_prev: Option<String>,
+    /// 上次 place 快照签名（tid:home 串），配合 last_place_dump 做变更检测
+    last_place_sig: String,
+    /// 上次 place 快照输出时刻
+    last_place_dump: Instant,
 }
 
 impl AffinityManager {
@@ -517,6 +537,8 @@ impl AffinityManager {
             fg_cmdline: String::new(),
             key_bind_active: false,
             fas_uclamp_prev: None,
+            last_place_sig: String::new(),
+            last_place_dump: Instant::now() - PLACE_DUMP_MIN_INTERVAL,
         }
     }
 
@@ -658,14 +680,20 @@ impl AffinityManager {
     /// main 内选；main 全部已钉才把 overflow（prime 池）中未钉核并入候选
     /// 按 score 竞争——大核挤满后负载自然溢出到超大核。关键线程已改核组
     /// 绑定，不再走本函数的单核选择。
+    /// 选核结果受 MAX_PINS_PER_CORE 上限约束：全池钉满后返回 None，
+    /// 调用方不钉定（线程留在 boost cpuset 内 EAS 自调度）。
     fn pick_core_pref(&self, main: &[usize], overflow: &[usize]) -> Option<usize> {
-        let main_free = main.iter().any(|&c| self.pinned_of(c) == 0);
-        if main_free {
-            return self.pick_core(main);
+        let core = if main.iter().any(|&c| self.pinned_of(c) == 0) {
+            self.pick_core(main)
+        } else {
+            let mut cands: Vec<usize> = main.to_vec();
+            cands.extend(overflow.iter().copied().filter(|&c| self.pinned_of(c) == 0));
+            self.pick_core(&cands)
+        }?;
+        if self.pinned_of(core) >= MAX_PINS_PER_CORE {
+            return None;
         }
-        let mut cands: Vec<usize> = main.to_vec();
-        cands.extend(overflow.iter().copied().filter(|&c| self.pinned_of(c) == 0));
-        self.pick_core(&cands)
+        Some(core)
     }
 
     fn pinned_of(&self, core: usize) -> u32 {
@@ -904,6 +932,7 @@ impl AffinityManager {
                                 group_pinned: false,
                                 prev_home: -1,
                                 prev_home_at: now,
+                                last_hold_log: now - HOLD_LOG_COOLDOWN,
                             });
                             // tid 归属变化（PID 复用）视作新线程
                             if st.pid != fg_pid {
@@ -1014,15 +1043,27 @@ impl AffinityManager {
                                                 );
                                             } else if core != home as usize {
                                                 // cand==home（全员饱和无更优核）不打点，
-                                                // 防止每轮对每个过载线程重复刷 hold 行
-                                                crate::logger::devimp_event(
-                                                    "overload_hold",
-                                                    &pkg,
-                                                    &format!(
-                                                        "tid={} home={} cand={} score_home={:.2} score_cand={:.2}",
-                                                        tid, home, core, home_score, cand_score
-                                                    ),
-                                                );
+                                                // 防止每轮对每个过载线程重复刷 hold 行；
+                                                // 其余 hold 按 HOLD_LOG_COOLDOWN 节流
+                                                if let Some(st) = self.threads.get_mut(&tid) {
+                                                    if now.duration_since(st.last_hold_log)
+                                                        >= HOLD_LOG_COOLDOWN
+                                                    {
+                                                        st.last_hold_log = now;
+                                                        crate::logger::devimp_event(
+                                                            "overload_hold",
+                                                            &pkg,
+                                                            &format!(
+                                                                "tid={} home={} cand={} score_home={:.2} score_cand={:.2}",
+                                                                tid,
+                                                                home,
+                                                                core,
+                                                                home_score,
+                                                                cand_score
+                                                            ),
+                                                        );
+                                                    }
+                                                }
                                             }
                                         }
                                     }
@@ -1155,15 +1196,23 @@ impl AffinityManager {
                                     {
                                         self.pin_core(tid, core, home, 0, "-", "bg_overload");
                                     } else if core != home as usize {
-                                        // cand==home 不打点（同前台口径）
-                                        crate::logger::devimp_event(
-                                            "overload_hold",
-                                            "-",
-                                            &format!(
-                                                "tid={} home={} cand={} score_home={:.2} score_cand={:.2}",
-                                                tid, home, core, home_score, cand_score
-                                            ),
-                                        );
+                                        // cand==home 不打点（同前台口径）；
+                                        // 其余 hold 按 HOLD_LOG_COOLDOWN 节流
+                                        if let Some(st) = self.threads.get_mut(&tid) {
+                                            if now.duration_since(st.last_hold_log)
+                                                >= HOLD_LOG_COOLDOWN
+                                            {
+                                                st.last_hold_log = now;
+                                                crate::logger::devimp_event(
+                                                    "overload_hold",
+                                                    "-",
+                                                    &format!(
+                                                        "tid={} home={} cand={} score_home={:.2} score_cand={:.2}",
+                                                        tid, home, core, home_score, cand_score
+                                                    ),
+                                                );
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -1255,6 +1304,7 @@ impl AffinityManager {
                                         group_pinned: false,
                                         prev_home: -1,
                                         prev_home_at: now,
+                                        last_hold_log: now - HOLD_LOG_COOLDOWN,
                                     },
                                 );
                                 continue;
@@ -1336,23 +1386,44 @@ impl AffinityManager {
         // 来自缓存），core 行 = 逐核 util + 钉核计数 ——
         if t % DEVL_ROW_EVERY_ROUNDS == 0 {
             if fg_pid > 0 {
-                for (tid, st) in &self.threads {
-                    if st.pid != fg_pid {
-                        continue;
+                // place 行变更检测：签名（tid:home 序列）未变且未到心跳间隔
+                // 时跳过本轮输出。终末地等大型游戏 ~180 线程 × 每 8s 全量
+                // dump = 每秒 ~20 行的稳定写放大，且绝大多数轮次放置不变
+                let mut tids: Vec<i32> = self
+                    .threads
+                    .iter()
+                    .filter(|(_, st)| st.pid == fg_pid)
+                    .map(|(tid, _)| *tid)
+                    .collect();
+                tids.sort_unstable();
+                let mut sig = String::with_capacity(tids.len() * 12);
+                for tid in &tids {
+                    sig.push_str(&tid.to_string());
+                    sig.push(':');
+                    sig.push_str(&self.threads[tid].home.to_string());
+                    sig.push(';');
+                }
+                let changed = sig != self.last_place_sig;
+                let due = now.duration_since(self.last_place_dump) >= PLACE_DUMP_MIN_INTERVAL;
+                if changed || due {
+                    self.last_place_sig = sig;
+                    self.last_place_dump = now;
+                    for tid in &tids {
+                        let st = &self.threads[tid];
+                        let comm = if st.comm.is_empty() {
+                            "-"
+                        } else {
+                            st.comm.as_str()
+                        };
+                        crate::logger::devimp_place(
+                            fg_pid,
+                            &self.fg_cmdline,
+                            *tid,
+                            comm,
+                            st.home as i32,
+                            "-",
+                        );
                     }
-                    let comm = if st.comm.is_empty() {
-                        "-"
-                    } else {
-                        st.comm.as_str()
-                    };
-                    crate::logger::devimp_place(
-                        fg_pid,
-                        &self.fg_cmdline,
-                        *tid,
-                        comm,
-                        st.home as i32,
-                        "-",
-                    );
                 }
             }
             for cpu in 0..max_cpu {

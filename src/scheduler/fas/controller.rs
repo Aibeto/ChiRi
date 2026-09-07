@@ -16,11 +16,11 @@
  */
 
 use crate::fas_types::{FasRulesConfig, PerAppProfile};
-use std::time::Instant;
 use log::{info, warn};
+use std::time::Instant;
 
-use crate::i18n::t_with_args;
 use crate::fluent_args;
+use crate::i18n::t_with_args;
 
 use super::fps_window::FpsWindow;
 use super::pid::{PidController, fps_norm};
@@ -88,6 +88,10 @@ pub struct FasController {
     // 温度感知
     pub(super) current_temperature: f64,
     pub(super) temp_threshold: f64,
+    /// 温度护栏锁存：≥temp_threshold 进入、<temp_threshold-3℃ 退出。
+    /// PID 只看帧时间，感知不到内核 thermal 已在压频，热限频时继续抬频
+    /// 只会加剧发热形成正反馈（8475 终末地实测 84-96℃/7.7W avg）
+    pub(super) thermal_hold: bool,
 
     // [新] CPU 负载数据 — 由 SystemLoadUpdate 事件更新
     pub(super) foreground_max_util: f32,
@@ -157,6 +161,7 @@ impl FasController {
             cached_ema_budget: 17.54,
             current_temperature: 0.0,
             temp_threshold: 0.0,
+            thermal_hold: false,
             foreground_max_util: 0.0,
             core_utils: Vec::new(),
             current_package: String::new(),
@@ -183,7 +188,11 @@ impl FasController {
             self.ema_fg_util = fg_util;
         } else {
             // Rise fast (alpha=0.4), fall slow (alpha=0.15) to prevent transient lows from killing freq
-            let alpha = if fg_util > self.ema_fg_util { 0.40 } else { 0.15 };
+            let alpha = if fg_util > self.ema_fg_util {
+                0.40
+            } else {
+                0.15
+            };
             self.ema_fg_util = self.ema_fg_util * (1.0 - alpha) + fg_util * alpha;
         }
     }
@@ -221,13 +230,19 @@ impl FasController {
     }
 
     pub(super) fn next_gear(&self) -> Option<f32> {
-        self.fps_gears.iter().copied()
-            .filter(|&g| g > self.current_target_fps + 0.5).reduce(f32::min)
+        self.fps_gears
+            .iter()
+            .copied()
+            .filter(|&g| g > self.current_target_fps + 0.5)
+            .reduce(f32::min)
     }
 
     pub(super) fn prev_gear(&self) -> Option<f32> {
-        self.fps_gears.iter().copied()
-            .filter(|&g| g < self.current_target_fps - 0.5).reduce(f32::max)
+        self.fps_gears
+            .iter()
+            .copied()
+            .filter(|&g| g < self.current_target_fps - 0.5)
+            .reduce(f32::max)
     }
 
     pub(super) fn max_gear(&self) -> f32 {
@@ -255,7 +270,9 @@ impl FasController {
     ///
     /// 效果：GPU bound 场景自动放宽帧率目标，减少无效拉频
     pub(super) fn adjust_target_for_util(&mut self) {
-        if self.util_sample_timer.elapsed().as_millis() < 1000 { return; }
+        if self.util_sample_timer.elapsed().as_millis() < 1000 {
+            return;
+        }
         self.util_sample_timer = Instant::now();
 
         // jank_cooldown 期间禁止降低 target，只允许恢复
@@ -287,27 +304,45 @@ impl FasController {
         self.current_package = package.to_string();
         let profile = self.cfg.per_app_profiles.get(package).cloned();
         if let Some(ref p) = profile {
-            if let Some(m) = p.fps_margin { self.fps_margin = m; }
+            if let Some(m) = p.fps_margin {
+                self.fps_margin = m;
+            }
             if let Some(ref gears) = p.target_fps {
                 if !gears.is_empty() {
                     self.fps_gears = gears.clone();
-                    if !self.fps_gears.iter().any(|&g| (g - self.current_target_fps).abs() < 0.5) {
-                        self.current_target_fps = self.fps_gears.iter().copied()
-                            .fold(60.0_f32, f32::max);
+                    if !self
+                        .fps_gears
+                        .iter()
+                        .any(|&g| (g - self.current_target_fps).abs() < 0.5)
+                    {
+                        self.current_target_fps =
+                            self.fps_gears.iter().copied().fold(60.0_f32, f32::max);
                     }
                     self.refresh_cached_values();
                 }
             }
-            info!("{}", t_with_args("fas-set-game", &fluent_args!(
-                "pkg" => package,
-                "gears" => format!("{:?}", self.fps_gears),
-                "target" => format!("{:.0}", self.current_target_fps)
-            )));
+            info!(
+                "{}",
+                t_with_args(
+                    "fas-set-game",
+                    &fluent_args!(
+                        "pkg" => package,
+                        "gears" => format!("{:?}", self.fps_gears),
+                        "target" => format!("{:.0}", self.current_target_fps)
+                    )
+                )
+            );
         } else {
-            warn!("{}", t_with_args("fas-no-profile", &fluent_args!(
-                "pkg" => package,
-                "gears" => format!("{:?}", self.fps_gears)
-            )));
+            warn!(
+                "{}",
+                t_with_args(
+                    "fas-no-profile",
+                    &fluent_args!(
+                        "pkg" => package,
+                        "gears" => format!("{:?}", self.fps_gears)
+                    )
+                )
+            );
         }
         self.active_profile = profile;
     }
@@ -325,8 +360,12 @@ impl FasController {
         self.fps_gears = self.cfg.fps_gears.clone();
     }
 
-    pub fn set_temperature(&mut self, temp: f64) { self.current_temperature = temp; }
-    pub fn set_temp_threshold(&mut self, thresh: f64) { self.temp_threshold = thresh; }
+    pub fn set_temperature(&mut self, temp: f64) {
+        self.current_temperature = temp;
+    }
+    pub fn set_temp_threshold(&mut self, thresh: f64) {
+        self.temp_threshold = thresh;
+    }
 
     pub(super) fn reset_runtime(&mut self) {
         let floor = self.effective_perf_floor();

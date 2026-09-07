@@ -506,10 +506,12 @@ pub fn start_scheduler_thread(
             // 直接锁所有 cluster 的 min=max=硬件最高频，每 5 秒重写防止外部篡改。
             let mut fast_lock = crate::chiri::fast::FastLock::new();
 
-            // FAS 实例管理器：温度源独立探测（与下方 thermal 的 temp_sensor_path 分开，语义不同；
-            // 无传感器传 None，FAS 内部限温默认关闭不影响其他功能）
-            let fas_temp_path = crate::utils::find_cpu_temp_path().ok().map(std::path::PathBuf::from);
-            let mut fas_mgr = fas_manager::FasManager::new(fas_temp_path, fas_active.clone());
+            // FAS 实例管理器：温度源独立探测（与下方 thermal 的 temp_sensor_path 分开，语义不同）。
+            // 温度看电池不看处理器：电池温度是热安全边界，处理器长期 95℃ 属正常工作区；
+            // 无电池温度节点传 None，FAS 内部限温关闭，不影响其他功能
+            let fas_temp_source = crate::utils::find_battery_temp_path()
+                .map(|p| (std::path::PathBuf::from(p), 10.0));
+            let mut fas_mgr = fas_manager::FasManager::new(fas_temp_source, fas_active.clone());
 
             // CPU 亲和与线程迁移控制器 + core_ctl 核心在线接管（ChiRi 专属）
             let mut affinity_mgr = affinity::AffinityManager::new(sys_path_exist.clone());

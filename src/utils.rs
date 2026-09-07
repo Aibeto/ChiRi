@@ -127,6 +127,16 @@ pub fn find_cpu_temp_path() -> Result<String> {
     Err(anyhow::anyhow!("Valid CPU thermal zone not found"))
 }
 
+/// 电池温度节点（0.1℃ 精度）。FAS 温度护栏专用：电池温度是热安全边界，
+/// 处理器温度（soc_max 长期 95℃ 属正常工作区）不作为降频依据。
+/// None = 节点不存在（护栏自动失效，不影响其余功能）
+pub fn find_battery_temp_path() -> Option<&'static str> {
+    const BATT_TEMP: &str = "/sys/class/power_supply/battery/temp";
+    std::path::Path::new(BATT_TEMP)
+        .exists()
+        .then_some(BATT_TEMP)
+}
+
 // --- SysPathExist 结构体 ---
 pub struct SysPathExist {
     pub qcom_feas_exist: bool,

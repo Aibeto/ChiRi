@@ -17,12 +17,12 @@
 
 use log::{debug, info};
 
-use crate::i18n::t_with_args;
 use crate::fluent_args;
+use crate::i18n::t_with_args;
 
-use super::pid::scale_frames;
 use super::FasController;
 use super::gear_state::GearDecision;
+use super::pid::scale_frames;
 
 impl FasController {
     // ════════════════════════════════════════════════════════════
@@ -41,13 +41,20 @@ impl FasController {
         if actual_ms > self.cfg.app_switch_gap_ms {
             self.reset_runtime();
             self.perf_index = self.cfg.app_switch_resume_perf;
-            self.gear_dampen_frames = scale_frames(self.cfg.gear_dampen_frames, self.current_target_fps);
+            self.gear_dampen_frames =
+                scale_frames(self.cfg.gear_dampen_frames, self.current_target_fps);
             self.post_loading_downgrade_guard = self.cfg.post_loading_downgrade_guard;
             self.apply_freqs();
-            info!("{}", t_with_args("fas-app-switch", &fluent_args!(
-                "ms" => format!("{:.0}", actual_ms),
-                "perf" => format!("{:.2}", self.perf_index)
-            )));
+            info!(
+                "{}",
+                t_with_args(
+                    "fas-app-switch",
+                    &fluent_args!(
+                        "ms" => format!("{:.0}", actual_ms),
+                        "perf" => format!("{:.2}", self.perf_index)
+                    )
+                )
+            );
             return true;
         }
 
@@ -66,22 +73,33 @@ impl FasController {
             if !self.is_loading && self.loading_cumulative_ms > self.cfg.loading_cumulative_ms {
                 self.is_loading = true;
                 let old = self.perf_index;
-                self.perf_index = self.perf_index
+                self.perf_index = self
+                    .perf_index
                     .clamp(self.cfg.loading_perf_floor, self.cfg.loading_perf_ceiling);
-                if old != self.perf_index { self.apply_freqs(); }
-                info!("{}", t_with_args("fas-loading-start", &fluent_args!(
-                    "frames" => self.loading_frames.to_string(),
-                    "ms" => format!("{:.0}", self.loading_cumulative_ms),
-                    "old_perf" => format!("{:.2}", old),
-                    "new_perf" => format!("{:.2}", self.perf_index)
-                )));
+                if old != self.perf_index {
+                    self.apply_freqs();
+                }
+                info!(
+                    "{}",
+                    t_with_args(
+                        "fas-loading-start",
+                        &fluent_args!(
+                            "frames" => self.loading_frames.to_string(),
+                            "ms" => format!("{:.0}", self.loading_cumulative_ms),
+                            "old_perf" => format!("{:.2}", old),
+                            "new_perf" => format!("{:.2}", self.perf_index)
+                        )
+                    )
+                );
             }
             return true;
         }
 
         if self.loading_frames > 0 {
             self.loading_normal_tolerance += 1;
-            if self.loading_normal_tolerance < self.cfg.loading_normal_tolerance { return true; }
+            if self.loading_normal_tolerance < self.cfg.loading_normal_tolerance {
+                return true;
+            }
             self.loading_frames = 0;
             self.loading_cumulative_ms = 0.0;
             self.loading_normal_tolerance = 0;
@@ -99,10 +117,17 @@ impl FasController {
             let ceil = self.effective_perf_ceil();
             self.perf_index = self.cfg.post_loading_perf.clamp(floor.min(ceil), ceil);
             self.post_loading_ignore = self.cfg.post_loading_ignore_frames;
-            self.gear_dampen_frames = scale_frames(self.cfg.gear_dampen_frames, self.current_target_fps);
+            self.gear_dampen_frames =
+                scale_frames(self.cfg.gear_dampen_frames, self.current_target_fps);
             self.post_loading_downgrade_guard = self.cfg.post_loading_downgrade_guard;
             self.apply_freqs();
-            info!("{}", t_with_args("fas-loading-exit", &fluent_args!("perf" => format!("{:.2}", self.perf_index))));
+            info!(
+                "{}",
+                t_with_args(
+                    "fas-loading-exit",
+                    &fluent_args!("perf" => format!("{:.2}", self.perf_index))
+                )
+            );
         }
 
         false
@@ -119,14 +144,21 @@ impl FasController {
         let budget_ms = 1000.0 / eff_target.max(1.0);
         let norm = self.cached_norm;
         let ema_input_ms = {
-            let base = if self.fps_window.count() >= 8 && avg_fps > 5.0
-                && avg_fps < eff_target * 0.50
-            { 1000.0 / avg_fps } else { budget_ms };
+            let base =
+                if self.fps_window.count() >= 8 && avg_fps > 5.0 && avg_fps < eff_target * 0.50 {
+                    1000.0 / avg_fps
+                } else {
+                    budget_ms
+                };
             let cap = base * 2.0;
             let extreme = base * 4.0;
-            if actual_ms > extreme { base + 1.0 }
-            else if actual_ms > cap { cap }
-            else { actual_ms }
+            if actual_ms > extreme {
+                base + 1.0
+            } else if actual_ms > cap {
+                cap
+            } else {
+                actual_ms
+            }
         };
         if self.ema_actual_ms <= 0.0 {
             self.ema_actual_ms = ema_input_ms;
@@ -134,7 +166,11 @@ impl FasController {
             let fps_factor = (self.current_target_fps / 60.0).clamp(0.5, 2.5);
             let a_up = (0.15 * fps_factor).clamp(0.10, 0.35);
             let a_down = ((0.25 + (1.0 - norm) * 0.25) * fps_factor).clamp(0.15, 0.45);
-            let a = if ema_input_ms > self.ema_actual_ms { a_up } else { a_down };
+            let a = if ema_input_ms > self.ema_actual_ms {
+                a_up
+            } else {
+                a_down
+            };
             self.ema_actual_ms = self.ema_actual_ms * (1.0 - a) + ema_input_ms * a;
         }
     }
@@ -162,9 +198,19 @@ impl FasController {
         {
             let fps_dampen = (60.0 / self.current_target_fps.max(30.0)).powf(0.40);
             // 衰减步长额外乘以 0.6，降低高刷下的衰减激进度
-            let decay_scale = if self.current_target_fps > 90.0 { 0.6 } else { 1.0 };
-            let step = ((self.perf_index - 0.50) / 0.50 * self.cfg.fast_decay_max_step * fps_dampen * decay_scale)
-                .clamp(self.cfg.fast_decay_min_step * fps_dampen, self.cfg.fast_decay_max_step * fps_dampen * decay_scale);
+            let decay_scale = if self.current_target_fps > 90.0 {
+                0.6
+            } else {
+                1.0
+            };
+            let step = ((self.perf_index - 0.50) / 0.50
+                * self.cfg.fast_decay_max_step
+                * fps_dampen
+                * decay_scale)
+                .clamp(
+                    self.cfg.fast_decay_min_step * fps_dampen,
+                    self.cfg.fast_decay_max_step * fps_dampen * decay_scale,
+                );
             self.perf_index -= step;
             self.consecutive_normal_frames = 0;
         }
@@ -175,9 +221,12 @@ impl FasController {
             && self.fps_window.count() >= 30
         {
             let fps_scale = (60.0 / self.current_target_fps.max(30.0)).clamp(0.4, 1.0);
-            let s = ((avg_fps - self.current_target_fps) / self.current_target_fps * 0.04 * fps_scale)
-                .clamp(0.0, 0.008 * fps_scale.max(0.5));
-            if s > 0.0005 { self.perf_index -= s; }
+            let s =
+                ((avg_fps - self.current_target_fps) / self.current_target_fps * 0.04 * fps_scale)
+                    .clamp(0.0, 0.008 * fps_scale.max(0.5));
+            if s > 0.0005 {
+                self.perf_index -= s;
+            }
         }
 
         self.perf_index = self.perf_index.clamp(floor.min(ceil), ceil);
@@ -191,9 +240,39 @@ impl FasController {
                 self.stable_gear_frames = self.stable_gear_frames.saturating_sub(3);
             }
             if self.stable_gear_frames >= 900 {
-                self.consecutive_downgrade_count = self.consecutive_downgrade_count.saturating_sub(1);
+                self.consecutive_downgrade_count =
+                    self.consecutive_downgrade_count.saturating_sub(1);
                 self.stable_gear_frames = 0;
             }
+        }
+    }
+
+    // ════════════════════════════════════════════════════════════
+    //  Phase 2.5: 温度护栏（temp_threshold=0 禁用）
+    // ════════════════════════════════════════════════════════════
+
+    /// 护栏锁存状态机：≥temp_threshold 进入、<temp_threshold-3℃ 退出
+    /// （迟滞防阈值边缘振荡；温度源 3s 刷新，见 FasManager::refresh_temperature）
+    fn update_thermal_hold(&mut self) {
+        if self.temp_threshold <= 0.0 || self.current_temperature <= 0.0 {
+            self.thermal_hold = false;
+            return;
+        }
+        if self.thermal_hold {
+            if self.current_temperature < self.temp_threshold - 3.0 {
+                self.thermal_hold = false;
+            }
+        } else if self.current_temperature >= self.temp_threshold {
+            self.thermal_hold = true;
+        }
+    }
+
+    /// 护栏激活期间的 perf 上限（None = 无护栏）
+    fn thermal_perf_cap(&self) -> Option<f32> {
+        if self.temp_threshold > 0.0 && self.thermal_hold {
+            Some(self.cfg.core_temp_throttle_perf)
+        } else {
+            None
         }
     }
 
@@ -202,22 +281,40 @@ impl FasController {
     // ════════════════════════════════════════════════════════════
 
     pub fn update_frame(&mut self, frame_delta_ns: u64) {
-        if frame_delta_ns == 0 || self.policies.is_empty() { return; }
+        if frame_delta_ns == 0 || self.policies.is_empty() {
+            return;
+        }
 
         let actual_ms = frame_delta_ns as f32 / 1_000_000.0;
         let is_heavy = actual_ms > self.cfg.heavy_frame_threshold_ms;
         let max_ns = (self.cfg.fixed_max_frame_ms * 1_000_000.0) as u64;
 
-        if frame_delta_ns < self.min_frame_ns() { return; }
+        if frame_delta_ns < self.min_frame_ns() {
+            return;
+        }
 
         // Phase 1
-        if self.handle_early_exit(actual_ms) { return; }
+        if self.handle_early_exit(actual_ms) {
+            return;
+        }
 
         // Phase 2
-        if self.handle_loading(actual_ms, is_heavy) { return; }
-        if self.is_loading { return; }
-        if self.post_loading_ignore > 0 { self.post_loading_ignore -= 1; return; }
-        if frame_delta_ns > max_ns { return; }
+        if self.handle_loading(actual_ms, is_heavy) {
+            return;
+        }
+        if self.is_loading {
+            return;
+        }
+        if self.post_loading_ignore > 0 {
+            self.post_loading_ignore -= 1;
+            return;
+        }
+        if frame_delta_ns > max_ns {
+            return;
+        }
+
+        // Phase 2.5: 温度护栏状态机（锁存阈值见 update_thermal_hold）
+        self.update_thermal_hold();
 
         // 帧率采样
         let current_fps = 1_000_000_000.0 / frame_delta_ns as f32;
@@ -233,9 +330,20 @@ impl FasController {
 
         // Phase 3: 齿轮
         match self.evaluate_gear(avg_fps, recent30) {
-            GearDecision::Upgrade { target, perf, dampen } |
-            GearDecision::Downgrade { target, perf, dampen } => {
+            GearDecision::Upgrade {
+                target,
+                perf,
+                dampen,
+            }
+            | GearDecision::Downgrade {
+                target,
+                perf,
+                dampen,
+            } => {
                 self.do_gear_switch(target, perf, dampen);
+                if let Some(cap) = self.thermal_perf_cap() {
+                    self.perf_index = self.perf_index.min(cap);
+                }
                 self.apply_freqs();
                 return;
             }
@@ -261,23 +369,35 @@ impl FasController {
             let eff_target = self.effective_target_fps();
             let ema_err = 1000.0 / (eff_target - self.fps_margin).max(1.0) - self.ema_actual_ms;
             let inst_err = 1000.0 / eff_target.max(1.0) - actual_ms;
-            debug!("{}", t_with_args("fas-tick-log", &fluent_args!(
-                "target" => format!("{:.0}", self.current_target_fps),
-                "avg" => format!("{:.1}", avg_fps),
-                "ms" => format!("{:.2}", actual_ms),
-                "ema" => format!("{:.2}", self.ema_actual_ms),
-                "err_ema" => format!("{:+.2}", ema_err),
-                "err_inst" => format!("{:+.2}", inst_err),
-                "act" => act,
-                "perf" => format!("{:.3}", self.perf_index),
-                "util" => format!("{:.2}", self.foreground_max_util),
-                "cd" => if self.upgrade_cooldown > 0 { " cd" } else { "" },
-                "damp" => if self.gear_dampen_frames > 0 { " damp" } else { "" },
-                "temp" => if self.current_temperature > 0.0 { format!(" T:{:.0}℃", self.current_temperature) } else { "".to_string() },
-                "offset" => if self.target_fps_offset.abs() > 0.05 { format!(" off:{:+.1}", self.target_fps_offset) } else { "".to_string() }
-            )));
+            debug!(
+                "{}",
+                t_with_args(
+                    "fas-tick-log",
+                    &fluent_args!(
+                        "target" => format!("{:.0}", self.current_target_fps),
+                        "avg" => format!("{:.1}", avg_fps),
+                        "ms" => format!("{:.2}", actual_ms),
+                        "ema" => format!("{:.2}", self.ema_actual_ms),
+                        "err_ema" => format!("{:+.2}", ema_err),
+                        "err_inst" => format!("{:+.2}", inst_err),
+                        "act" => act,
+                        "perf" => format!("{:.3}", self.perf_index),
+                        "util" => format!("{:.2}", self.foreground_max_util),
+                        "cd" => if self.upgrade_cooldown > 0 { " cd" } else { "" },
+                        "damp" => if self.gear_dampen_frames > 0 { " damp" } else { "" },
+                        "temp" => if self.current_temperature > 0.0 { format!(" T:{:.0}℃", self.current_temperature) } else { "".to_string() },
+                        "offset" => if self.target_fps_offset.abs() > 0.05 { format!(" off:{:+.1}", self.target_fps_offset) } else { "".to_string() }
+                    )
+                )
+            );
         }
 
+        // Phase 7: 温度护栏终值钳制——放最后以覆盖 PID/jank 的全部增量，
+        // 热限频期间 PID 看到的帧时间变长会持续抬频，不钳制会与内核 thermal
+        // 形成正反馈（越热越抬频 → 越抬频越热）
+        if let Some(cap) = self.thermal_perf_cap() {
+            self.perf_index = self.perf_index.min(cap);
+        }
         self.apply_freqs();
     }
 }

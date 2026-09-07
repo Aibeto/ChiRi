@@ -19,7 +19,7 @@ use crate::fas_types::{ClusterProfile, FasRulesConfig};
 use crate::utils::FastWriter;
 use log::{info, warn};
 use std::fs;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::fluent_args;
 use crate::i18n::{t, t_with_args};
@@ -386,6 +386,7 @@ impl FasController {
                 profile,
                 max_f,
                 orig_governor,
+                fas_rules.verify_freq_interval_secs,
             ));
         }
 

@@ -19,7 +19,7 @@ use crate::fas_types::ClusterProfile;
 use crate::utils::FastWriter;
 use log::warn;
 use std::fs;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::fluent_args;
 use crate::i18n::t_with_args;
@@ -38,6 +38,8 @@ pub struct PolicyController {
 
     verify_freq: Option<u32>,
     verify_timer: Instant,
+    /// 写频后校验间隔（来自 FasRulesConfig::verify_freq_interval_secs）
+    verify_interval: Duration,
 
     pub ignore_write: bool,
 
@@ -58,6 +60,7 @@ impl PolicyController {
         cluster_profile: ClusterProfile,
         current_freq: u32,
         orig_governor: Option<String>,
+        verify_interval_secs: u32,
     ) -> Self {
         let freq_min = *available_freqs.first().unwrap_or(&0) as f32;
         let freq_max = *available_freqs.last().unwrap_or(&1) as f32;
@@ -79,6 +82,7 @@ impl PolicyController {
             freq_max,
             verify_freq: None,
             verify_timer: Instant::now(),
+            verify_interval: Duration::from_secs(verify_interval_secs.max(1) as u64),
             ignore_write: false,
             orig_governor,
         }
@@ -125,13 +129,18 @@ impl PolicyController {
     }
 
     fn do_verify_freq(&mut self, write_freq: u32) {
-        // 缩短校验间隔：3秒→1.5秒，更快发现内核频率覆写
-        // 日志中104次freq mismatch说明内核覆写非常频繁
-        let verify_interval = std::time::Duration::from_millis(1500);
-        if self.verify_timer.elapsed() >= verify_interval {
+        // 校验间隔来自 verify_freq_interval_secs（默认 1s）：verify 只在
+        // 写频事件后触发一次读数（非周期轮询），调小无长期开销，能更快
+        // 发现内核频率覆写
+        if self.verify_timer.elapsed() >= self.verify_interval {
             self.verify_timer = Instant::now();
             if let Some(expected) = self.verify_freq {
                 if let Some(actual) = self.read_current_freq() {
+                    // 只校验下沿：min=max 锁频下 cur_freq 高于目标值属于
+                    // hw 量化/迁移中的瞬态（MTK 频表步进可达 +18%），性能
+                    // 无损，且实测反复「紧急重写」从未修正过该读数——重写
+                    // 只造成 write/umount 抖动。低于目标值才是锁频未生效
+                    // （thermal cap / QoS 覆写），需要重写夺回
                     let min_ok = self
                         .available_freqs
                         .iter()
@@ -139,13 +148,7 @@ impl PolicyController {
                         .last()
                         .copied()
                         .unwrap_or(expected);
-                    let max_ok = self
-                        .available_freqs
-                        .iter()
-                        .find(|&&f| f >= expected)
-                        .copied()
-                        .unwrap_or(expected);
-                    if actual < min_ok || actual > max_ok {
+                    if actual < min_ok {
                         warn!(
                             "{}",
                             t_with_args(
@@ -153,20 +156,15 @@ impl PolicyController {
                                 &fluent_args!(
                                     "pid" => self.policy_id.to_string(),
                                     "min" => min_ok.to_string(),
-                                    "max" => max_ok.to_string(),
+                                    "max" => expected.to_string(),
                                     "actual" => actual.to_string()
                                 )
                             )
                         );
                         self.max_writer.re_unmount();
                         self.min_writer.re_unmount();
-                        if write_freq >= actual {
-                            self.max_writer.write_value_force(write_freq);
-                            self.min_writer.write_value_force(write_freq);
-                        } else {
-                            self.min_writer.write_value_force(write_freq);
-                            self.max_writer.write_value_force(write_freq);
-                        }
+                        self.max_writer.write_value_force(write_freq);
+                        self.min_writer.write_value_force(write_freq);
                     }
                 }
             }

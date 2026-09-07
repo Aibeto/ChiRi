@@ -32,7 +32,7 @@ use crate::scheduler::fas::FasController;
 
 /// 非活跃实例保留时长：丢失前台后 60s 内切回可复用（免重建 policies 快照）
 const FAS_INSTANCE_TTL: Duration = Duration::from_secs(60);
-/// 活跃实例 CPU 温度刷新周期（喂给 FAS 引擎内部限温逻辑，core_temp_threshold=0 时无效）
+/// 活跃实例温度刷新周期（喂给 FAS 引擎内部限温逻辑，core_temp_threshold=0 时无效）
 const FAS_TEMP_REFRESH: Duration = Duration::from_secs(3);
 
 struct FasInstance {
@@ -46,22 +46,26 @@ pub struct FasManager {
     active_pkg: Option<String>,
     last_temp: f64,
     last_temp_read: Instant,
-    temp_path: Option<PathBuf>,
+    /// (温度节点路径, 读数换算除数)。电池温度 0.1℃ → 除数 10.0；
+    /// None = 无温度源（引擎侧护栏失效，不影响其余功能）
+    temp_source: Option<(PathBuf, f64)>,
     /// FAS 前台激活共享标志（monitor 层 fps_monitor 消费）：activate 置位、
     /// deactivate 清零——fps_monitor 据此推迟/摘除 eBPF uprobe（反偷跑门控）
     fas_active_flag: Arc<AtomicBool>,
 }
 
 impl FasManager {
-    /// temp_path：FAS 专用 CPU 温度源（毫摄氏度），None = 无传感器（内部限温默认关闭，不影响其余功能）。
+    /// temp_source：FAS 专用温度源。温度看电池不看处理器——电池温度是
+    /// 热安全边界（阈值按 ℃ 配置），处理器长期 95℃ 属正常工作区，不作为
+    /// 降频依据。None = 无温度源（内部限温关闭，不影响其余功能）。
     /// fas_active_flag 由 main.rs 创建、monitor 与 chiri 两层共享。
-    pub fn new(temp_path: Option<PathBuf>, fas_active_flag: Arc<AtomicBool>) -> Self {
+    pub fn new(temp_source: Option<(PathBuf, f64)>, fas_active_flag: Arc<AtomicBool>) -> Self {
         Self {
             instances: Vec::new(),
             active_pkg: None,
             last_temp: 0.0,
             last_temp_read: Instant::now(),
-            temp_path,
+            temp_source,
             fas_active_flag,
         }
     }
@@ -268,23 +272,21 @@ impl FasManager {
         self.instances.iter_mut().find(|i| &i.package == pkg)
     }
 
-    /// 每 FAS_TEMP_REFRESH 读一次温度源（毫摄氏度 → ℃），缓存 last_temp 并喂给活跃实例
-    /// 的引擎内部限温逻辑（core_temp_threshold=0 时引擎侧无效，此处照常喂）。
+    /// 每 FAS_TEMP_REFRESH 读一次温度源（按 temp_source 除数换算为 ℃），
+    /// 缓存 last_temp 并喂给活跃实例的引擎内部限温逻辑
+    /// （core_temp_threshold=0 时引擎侧无效，此处照常喂）。
     fn refresh_temperature(&mut self) {
-        if self.temp_path.is_none() {
+        let Some((path, divisor)) = self.temp_source.as_ref() else {
             return;
-        }
+        };
         if self.last_temp_read.elapsed() < FAS_TEMP_REFRESH {
             return;
         }
         self.last_temp_read = Instant::now();
-        let Some(path) = self.temp_path.as_ref() else {
-            return;
-        };
         let Ok(raw) = crate::utils::read_f64_from_file(&path.to_string_lossy()) else {
             return;
         };
-        let temp = raw / 1000.0;
+        let temp = raw / divisor;
         self.last_temp = temp;
         if let Some(inst) = self.active_instance_mut() {
             inst.controller.set_temperature(temp);
