@@ -56,6 +56,12 @@ screen-uevent-received = [Screen] 收到 uevent: subsystem={ $subsystem } devpat
 screen-uevent-power-action = [Screen] 电源动作: { $action }
 screen-uevent-backlight = [Screen] 背光事件: { $dev } -> state={ $state }
 screen-uevent-backlight-unreadable = [Screen] 背光状态不可读: { $dev }
+screen-detect-source-found = [Screen] 屏幕状态检测源就绪: { $kind } @ { $path }
+screen-detect-no-source = [Screen] 未找到可用屏幕状态检测源（/sys/class/backlight、/sys/class/leds/*backlight*、/sys/class/graphics/fb0/blank 均不可用），屏幕状态无法自动校正，仅能依赖 uevent 事件
+screen-uevent-leds = [Screen] leds 背光事件: { $dev } -> state={ $state }
+screen-uevent-leds-unreadable = [Screen] leds 背光状态不可读: { $dev }
+scheduler-screen-on = [Scheduler] 亮屏触发事件: 已记录（息屏节电已暂停，调度保持当前状态）
+scheduler-screen-off = [Scheduler] 息屏触发事件: 已记录（息屏节电已暂停，调度保持当前状态）
 
 # --- Monitors ---
 cpu-monitor-started = [CPU Monitor] eBPF 系统负载监控已启动 (修复长任务盲区)。

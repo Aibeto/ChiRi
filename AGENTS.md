@@ -1,6 +1,6 @@
 # AGENTS.md
 
-> 上次更新时间：2026-09-05
+> 上次更新时间：2026-09-08
 > 最后更新位于此 head 之后：40577b0af15ce66a0875546b1d98d730fa2925af
 
 本文档为 AI 编程助手（Cursor / Claude Code / Trae 等）在本仓库工作时的指导文件。
@@ -193,7 +193,7 @@ cd webui && npm run type-check
 
 - 特调是完全独立调度：`src/chiri/akmode.rs` 的 `AkmodeGovernor` 与 CLG 完全解耦。前台为白名单应用时由 `mod.rs` 的 scheduler_ipc 先 `cpu_governor.release()` 再 `ak_governor.init_policies()` 接管，退出前台反向释放。
 
-- 特调模式下息屏保持 akmode 接管、不切换 CLG doze（akmode 已统一 schedutil，息屏随负载自然降频省电；`mod.rs` 的 `ScreenStateChange` 分支先判 `is_special_mode`），非特调模式息屏仍走 CLG doze。
+- 特调模式下息屏保持 akmode 接管（akmode 已统一 schedutil，息屏随负载自然降频省电）。[已暂停] 息屏节电触发点已注释（见「息屏省电与屏幕状态」）：屏幕状态不驱动任何调度，特调/非特调的息屏切换与亮屏恢复均已停用。
 
 - 四档就是全局那套模式档位 powersave/balance/performance/fast（不另起 tier 体系）。档位由 rules.yaml 生效模式决定（明日方舟 app_modes > global_mode，`config::mode_to_tier` 换算）；特调期间固定应用、不自动切换档位，用户改 rules.yaml 模式后经 ConfigReload 热重载更新档位。所有档位都能使用硬件最高档位。
 
@@ -223,9 +223,9 @@ WebUI 侧：
 
 - FAS 模式下 CLG/akmode/fast 全部暂停（三 governor release 后接管）；激活失败（load_policies 后无可用 policy）→ 300s 冷却（`FAS_COOLDOWN`，镜像 AKMODE_COOLDOWN）+ CLG balance 回退；进入 fas 的回退分支也先释放三 governor（可能从特调/极速切入）。
 
-- 移除的调度（FAS 活跃期间豁免）：ChiRi 热保护仅当 `mode=="fas" && fas_mgr.is_active()` 时跳过（fas 模式但实例未活跃——息屏已释放/冷却/初始化失败——照常生效，否则 CLG doze 期间失去热保护；FAS 活跃时温度由 FasManager 每 3s 独立读传感器喂引擎内部限温，endfield 配置 core_temp_threshold=0 即关闭；1s 遥测温度读数保留）；触摸升频不参与（fas 非 boost，`is_boost_mode` 不含 fas）；scenemode 进入判定按 `!fas_mgr.is_active()` 门控（息屏已释放，正常进 scenemode）；config_dirty/ConfigReload 的 CLG 分支对 fas 模式守卫（FAS 配置编译期嵌入静态）。
+- 移除的调度（FAS 活跃期间豁免）：ChiRi 热保护仅当 `mode=="fas" && fas_mgr.is_active()` 时跳过（fas 模式但实例未活跃——冷却/初始化失败——照常生效；FAS 活跃时温度由 FasManager 每 3s 独立读传感器喂引擎内部限温，endfield 配置 core_temp_threshold=0 即关闭；1s 遥测温度读数保留）；触摸升频不参与（fas 非 boost，`is_boost_mode` 不含 fas）；scenemode 进入判定随息屏节电暂停（见「息屏省电与屏幕状态」）；config_dirty/ConfigReload 的 CLG 分支对 fas 模式守卫（FAS 配置编译期嵌入静态）。
 
-- 息屏释放（原 C4 doze 已废弃删除）：`ScreenStateChange(false)` 在非特调分支统一 `ak/fast release` + （fas 活跃时）`fas_mgr.deactivate_active()` → 走 CLG doze → scenemode 全局接管；亮屏 `ScreenStateChange(true)` 的 fas 分支只把 CLG 从 doze 热切回 balance，FAS 由 app_detect（亮屏 force_refresh）的 ModeChange / 1s 兜底重新激活（activate 复用保留实例 + apply_freqs）。勿改回「息屏 enter_doze 写低频锁、亮屏 exit_doze 恢复」：锁屏前台无帧事件时 apply_freqs 恢复路径不触发（且被 freq_hold_frames 挡 2 拍），全簇锁死最低频表现为亮屏 0.2fps；息屏期间也无法进入 CLG doze/scenemode（口袋发热）。
+- 息屏释放（[已暂停]，原 C4 doze 亦已废弃删除）：原 `ScreenStateChange(false)` 在非特调分支统一 `ak/fast release` + （fas 活跃时）`fas_mgr.deactivate_active()` → 走 CLG doze → scenemode 全局接管。2026-09 起息屏节电整体暂停：屏幕状态不驱动任何调度，**FAS 激活/去激活仅由前台包名驱动**（亮屏才检测前台是 app_detect 既有行为，不变），fas 分支的息屏特殊处理与 1s 兜底的 is_screen_on 门控均已停用（chiri/mod.rs 搜 "PAUSED"）。恢复时注意勿改回「息屏 enter_doze 写低频锁、亮屏 exit_doze 恢复」：锁屏前台无帧事件时 apply_freqs 恢复路径不触发（且被 freq_hold_frames 挡 2 拍），全簇锁死最低频表现为亮屏 0.2fps。
 
 - 线程亲和预留接口：`fas_affinity_hook(affinity_mgr, corectl_mgr, active, fg_pid)` 在 chiri/mod.rs，FAS 激活/去激活时调用；当前职责 = FAS 激活期放开 top-app uclamp.max 为 100（快照还原；boost 进入按机型写入的 85 会钳制 EAS 对重线程的 capacity 视图、抑制 prime 放置，与 FAS 让 prime 承载负载相悖——8475 实测 prime 空转 45%；FAS 激活期 min=max 锁频绕过 schedutil，85 对调频无效仅剩放置负效应；去激活时若 boost 已退出则跳过还原，由 restore 链归位避免把 boost 值泄漏到 normal；8998 内核 4.4 走兜底探测永久跳过），后续 FAS 线程钉核扩展也在此实现，无需再改事件循环接线。
 
@@ -241,7 +241,7 @@ WebUI 侧：
 
 - 升频 = 平滑抬高上限：ceiling 提升不强制频率跳变，无需读 `scaling_cur_freq` 做余量检查（旧 `clg-up-skipped` 机制已随锁频语义删除）。降频 = 一步到位降上限：防抖确认（`down_rate_limit_ticks`，极低负载命中 `down_fast_threshold` 免防抖）后直接写目标档（`ratio_of_freq` 同步 current_perf），降 ceiling 只收窄 schedutil 区间、不会把实际频率抬上去。已删除废弃参数 `smoothing_down / slow_down_scale / down_fast_mult`。
 
-- 热切换配置重放 perf_init：`reload_config` 重置 current_perf 到新 perf_init 并立即写频，避免息屏 doze/scenemode 期间 current_perf 掉到 0 后亮屏恢复原模式时频率要从地板缓慢爬升数秒（表现为"亮屏了还卡在 scenemode 低频"）；模式变更 / ConfigReload 热重载同理。
+- 热切换配置重放 perf_init：`reload_config` 重置 current_perf 到新 perf_init 并立即写频，避免接管间隙 current_perf 掉到 0 后频率要从地板缓慢爬升数秒（息屏 doze/scenemode 切换路径已暂停，见「息屏省电与屏幕状态」）；模式变更 / ConfigReload 热重载同理。
 
 ### Thermal 热保护（ChiRi 专属）
 
@@ -267,17 +267,15 @@ WebUI 侧：
 
 - 屏蔽系统触摸升频：`chiri/scheduler.rs::apply_disable_touch_boost` 写 0 到 `/sys/module/cpu_boost/parameters/` 的 `input_boost_enabled / sched_boost_on_input / input_boost_ms / boost_ms`（按存在性尝试，无节点静默跳过）；`start_scheduler_thread` 启动时即调用一次 `apply_system_tweaks()`。
 
-### 息屏省电与屏幕状态
+### 息屏省电与屏幕状态（息屏节电已暂停）
 
-- scenemode（息屏超时省电）：chiri `Config` 的 `scenemode`（Mode 段，默认 `enabled:true`、`perf_ceil` 极低封顶、`up_threshold=1.0` 不主动升频）与顶层 `scene_mode_delay_secs`（默认 300s=5 分钟）。`mod.rs` 息屏时记录 `screen_off_at`，`SystemLoadUpdate` 分支在息屏超时且非特调模式下一次性把 CLG 热切到 scenemode（scenemode 未启用则 release 回系统默认），亮屏自动恢复原模式。**进入 scenemode 时同步应用离线核**（`CoreCtl.scenemode_offline` 门控，见 core_ctl 章节：**小核+大核全开常驻低频**（频率上限由 scenemode CLG 配置压制）+ prime 下线 + **专用小核独占**给调度服务 + 抑制 boost），CPU 侧待机功耗大幅下降；**常驻簇（小核∪大核）持续顶满上限则饱和退回 powersave 并 300s 冷却**。
-
-- 息屏 doze 天花板 0.30：`ScreenStateChange(false)` 生成的 doze 配置 `perf_ceil` 钳到 0.30（原 0.40），配合动态上限后后台突发（sync/JobScheduler）借力受限、空闲间隙照常降到地板频，压制"口袋发热"；5 分钟后 scenemode 进一步压到 0.15。
+- **[已暂停 2026-09] 息屏节电（doze + scenemode）**：屏幕状态识别（背光/uevent）在部分机型不可靠（误判息屏 → 亮屏期间被切低功耗配置/下线大核，卡到不可用），整体暂停——**屏幕状态不再驱动任何调度**：doze 低功耗切换、scenemode（配置切换 + prime 下线 + 专用小核独占 + 饱和退出/冷却）、FAS/极速锁频息屏释放与亮屏恢复、亲和 normal/doze 布局切换、息屏不喂帧、config_dirty/ConfigReload 的 is_screen_on 门控全部停用；息屏/亮屏触发仅 info 打点（`scheduler-screen-on/off`）+ status.csv 记录。**暂停方式 = 注释入口与触发点，不删代码**（chiri/mod.rs 搜 "PAUSED"），功能代码、配置字段（`scenemode` Mode 段 / `scene_mode_delay_secs` / `CoreCtl.scenemode_offline`）与 i18n key 原样保留，恢复时解开标记块即可。apply_affinity_and_corectl 的 `_screen_on`/`_scenemode_offline` 参数保留但被忽略（亲和按亮屏口径常态生效、core_ctl 第二参数恒 false）。
 
 - cpuidle governor 默认启用 menu：8550/8475/8998 的 `config.yaml` 将 `CpuIdleScalingGovernor` 置 true、`CpuIdle.current_governor` 置 "menu"（menu 按预期空闲时长选最深 C 状态，降低空闲功耗），内核无 menu 时写入失败静默跳过、无副作用。
 
-- 屏幕状态自愈校验：uevent 可能漏报/误报（开机早期背光未就绪、长时间息屏后唤醒、netlink 缓冲溢出），导致 `screen_state_arc` 锁死在错误状态——亮屏仍为 false 时 scenemode 计时器被误触发（实测：亮屏用微信/QQ 全程被判息屏，大核 4-7 离线 + UI 挤小核，psiCpu 80% 卡爆）。`screen_detect.rs::verify_screen_state` 由 app_detect 主循环每轮调用，读 `/sys/class/backlight` 校正 arc。**判据必须三分支**：`bl_power==0` → 亮（FB 权威亮屏信号）；`bl_power!=0` → **不可信**（部分 DRM 面板驱动息屏写 FB_BLANK 后亮屏不清零，节点长期停留非 0——把它当权威灭屏信号会把状态反向钉死），以 `actual_brightness>0` 为准（Android 息屏时把亮度写 0）；bl 不可读回退亮度（原行为）。勿改回「bl_power==0 即亮、非 0 即灭」的两分支。缓存背光节点连续 8 次全不可读时丢弃缓存重扫（设备可能被移除/更换）。
+- 屏幕状态自愈校验：uevent 可能漏报/误报（开机早期背光未就绪、长时间息屏后唤醒、netlink 缓冲溢出，或机型根本不广播屏幕类 uevent——现代内核已无 early_suspend/late_resume power uevent，leds/backlight 亮度变化多数驱动也不发 KOBJ_CHANGE），导致 `screen_state_arc` 锁死在错误状态。`screen_detect.rs::verify_screen_state` 由 app_detect 主循环每轮调用，读检测源 sysfs 校正 arc。**检测源按可靠性优先级自动扫描并缓存**：① `/sys/class/backlight`（bl_power/actual_brightness 三分支：`bl_power==0`→亮（FB 权威亮屏信号）；非 0 **不可信**——部分 DRM 面板驱动息屏写 FB_BLANK 后亮屏不清零，以 `actual_brightness>0` 为准；bl 不可读回退亮度。勿改回「bl_power==0 即亮、非 0 即灭」的两分支）；② `/sys/class/leds/*backlight*`（MTK 等无 backlight class 机型，`brightness>0` 即亮——**此前这类机型屏幕状态完全读不到的主因**，2026-09 修复）；③ `/sys/class/graphics/fb0/blank`（0=亮）。源发现/无源各 info 打点一次（`screen-detect-source-found` / `screen-detect-no-source`），「屏幕状态读不到」时从 daemon.log 即可确认设备实际可用的源；缓存源连续 8 次全不可读时丢弃缓存重扫（设备可能被移除/更换）。
 
-- 亮屏事件双源直推：`monitor_screen_state_uevent` 收到 power（early_suspend/late_resume）或 backlight KOBJ_CHANGE 且状态确实变化时**直接 send `DaemonEvent::ScreenStateChange`**（纯推送，scenemode 下感知延迟从最坏 ~1.1s+ 降到 ~100ms），不再依赖 app_detect 息屏轮询（1s）转发；app_detect 的 verify+轮询转发保留为 uevent 漏报时的自愈兜底。双源可能对同一次屏幕切换各发一次事件，两套调度器的 ScreenStateChange 分支开头都有 `screen_on == is_screen_on` 去重守卫（状态未变只打点）——新增屏幕事件生产点时必须维持该守卫。
+- 屏幕事件双源直推：`monitor_screen_state_uevent` 收到 power（early_suspend/late_resume）、backlight KOBJ_CHANGE 或 leds backlight KOBJ_CHANGE（仅认名字含 backlight 的 leds，跳过通知灯/按键灯）且状态确实变化时**直接 send `DaemonEvent::ScreenStateChange`**（纯推送），不再依赖 app_detect 轮询转发；app_detect 的 verify+轮询转发保留为 uevent 漏报时的自愈兜底。双源可能对同一次屏幕切换各发一次事件，两套调度器的 ScreenStateChange 分支开头都有 `screen_on == is_screen_on` 去重守卫（状态未变只打点）——新增屏幕事件生产点时必须维持该守卫。
 
 ### 极速模式（fast）
 
@@ -323,13 +321,13 @@ WebUI 侧：
 
 ### core_ctl 核心在线接管（ChiRi 专属）
 
-- `src/chiri/core_ctl.rs` 的 `CoreCtlManager`，**三态状态机**（None/Boost/Scenemode，`set_power_state(boost, scenemode)` 统一入口，内部去重可被 2s 周期安全调用；切换时先退出旧状态恢复快照再进入新状态）。调度线程收尾 `release()` 按当前状态恢复。
+- `src/chiri/core_ctl.rs` 的 `CoreCtlManager`，**三态状态机**（None/Boost/Scenemode，`set_power_state(boost, scenemode)` 统一入口，内部去重可被 2s 周期安全调用；切换时先退出旧状态恢复快照再进入新状态）。调度线程收尾 `release()` 按当前状态恢复。[已暂停] 息屏节电暂停期间 scenemode 参数恒 false，Scenemode 态不可达（代码保留，恢复见「息屏省电与屏幕状态」）。
 
 - **Boost**：把各 cluster 的 core_ctl `min_cpus` 抬到全组常在线（防厂商热插拔与 ChiRi 调频打架），退出恢复快照；只动 min_cpus 不动 max_cpus/busy 阈值。
 
-- **Scenemode 离线核（息屏深度省电）**：`CoreCtl.scenemode_offline` 门控（8550/8475 true，8998 内核 4.4 默认 false）。进入 scenemode 时先解除 boost（min_cpus 抬着会让厂商 core_ctl 重新拉起被下线的核——两者互斥由 `apply_affinity_and_corectl` 保证），下线目标由 `scenemode_targets()` 计算：**小核 + 大核全开常驻**（频率上限由 scenemode CLG 配置统一压制），**仅 prime 整簇下线**消除空转漏电流；逐核写 online=0 回读验证，失败跳过（warn），已在 offlined 中的核防重复登记。**独占一颗小核给调度服务**（编号最大的 little——三步实现：① `affinity::exclude_core_from_cpusets` 把该核从全部业务 cpuset 组（top-app/foreground/background/system-background/restricted）的 cpus 移除，其他进程/新进程（继承组掩码）均不可调度到该核；② 自身全部线程移入 cpuset 根组（根组含全部在线核，sched_setaffinity 才不会被原组掩码二次过滤）；③ 全线程自钉到该核）；设备无 /dev/cpuset 时降级为仅自钉。维持期每 2s 纠偏：重新下线被外部拉起的核 + `exclude_core_from_cpusets` 重写被框架 CpusetManager 加回保留核的组（快照只记首次原始值，防框架中间值覆盖）。**退出恢复 `restore_online` 失败的核必须保留在 offlined 中由 STATE_NONE 分支每 2s 重试**——此前失败即 clear、状态机回 NONE 再无重试路径，写回被内核拒绝的核永久离线；全部恢复后才释放独占（cpuset 快照还原 + 自身线程移回原组 + 解除自钉），重新下线前先把残留核拉回在线（否则 online=0 被跳过记录、核永远失去恢复登记）。
+- **Scenemode 离线核（[已暂停] 息屏深度省电）**：`CoreCtl.scenemode_offline` 门控（8550/8475 true，8998 内核 4.4 默认 false）。进入 scenemode 时先解除 boost（min_cpus 抬着会让厂商 core_ctl 重新拉起被下线的核——两者互斥由 `apply_affinity_and_corectl` 保证），下线目标由 `scenemode_targets()` 计算：**小核 + 大核全开常驻**（频率上限由 scenemode CLG 配置统一压制），**仅 prime 整簇下线**消除空转漏电流；逐核写 online=0 回读验证，失败跳过（warn），已在 offlined 中的核防重复登记。**独占一颗小核给调度服务**（编号最大的 little——三步实现：① `affinity::exclude_core_from_cpusets` 把该核从全部业务 cpuset 组（top-app/foreground/background/system-background/restricted）的 cpus 移除，其他进程/新进程（继承组掩码）均不可调度到该核；② 自身全部线程移入 cpuset 根组（根组含全部在线核，sched_setaffinity 才不会被原组掩码二次过滤）；③ 全线程自钉到该核）；设备无 /dev/cpuset 时降级为仅自钉。维持期每 2s 纠偏：重新下线被外部拉起的核 + `exclude_core_from_cpusets` 重写被框架 CpusetManager 加回保留核的组（快照只记首次原始值，防框架中间值覆盖）。**退出恢复 `restore_online` 失败的核必须保留在 offlined 中由 STATE_NONE 分支每 2s 重试**——此前失败即 clear、状态机回 NONE 再无重试路径，写回被内核拒绝的核永久离线；全部恢复后才释放独占（cpuset 快照还原 + 自身线程移回原组 + 解除自钉），重新下线前先把残留核拉回在线（否则 online=0 被跳过记录、核永远失去恢复登记）。
 
-- **scenemode 饱和退出**：常驻簇（小核∪大核）max_util 持续 10s ≥ 70%（`SCENEMODE_SAT_UTIL/SECS`，util 是忙时占比与频率无关，饱和即真饱和）→ 视为后台负载压不死常驻核：一次性退回 powersave 的 CLG 配置 + 立即恢复全部在线核 + 释放独占小核，并进入 **300s 冷却**（`SCENEMODE_COOLDOWN`，期间 scenemode 入口被门控不得重进，防反复拉锯）；冷却结束后息屏条件仍满足则自然重进。
+- **scenemode 饱和退出（[已暂停]）**：常驻簇（小核∪大核）max_util 持续 10s ≥ 70%（`SCENEMODE_SAT_UTIL/SECS`，util 是忙时占比与频率无关，饱和即真饱和）→ 视为后台负载压不死常驻核：一次性退回 powersave 的 CLG 配置 + 立即恢复全部在线核 + 释放独占小核，并进入 **300s 冷却**（`SCENEMODE_COOLDOWN`，期间 scenemode 入口被门控不得重进，防反复拉锯）；冷却结束后息屏条件仍满足则自然重进。
 
 - 为什么选核排除离线核而不"按需唤醒"：唤醒大核要拉电压轨/重建 L2，为后台线程点亮大核净亏能；直接写 online 会与厂商热插拔守护进程打架（对方再下线，ping-pong）。需要更多在线核时的正确姿势是抬 core_ctl min_cpus（Boost 态）。scenemode 是唯一反向使用 online 写入的场景（目标恰恰是让 prime 睡死，小核+大核常驻保住待命响应）。
 
@@ -382,6 +380,8 @@ WebUI 侧：
 - 模块热更新必须 `exit 1` 收尾：customize.sh 的热更新分支把新文件直接 cp 进已安装模块目录 `/data/adb/modules/chiri` 并重启服务后，必须轮询确认 daemon（`pidof`/`pgrep yumi`，最多 \~6s）存活，然后无条件 `exit 1` 按报错退出。若 `return 0` 让安装器继续"完整安装"，会再覆盖一遍模块目录并写 update 标记，管理器随即识别为"模块更新"提示重启、隐藏 WebUI/Action；`exit 1` 使安装器按失败中止（清理暂存目录、不碰已热替换的目录），管理器不感知更新。管理器显示"安装失败"是预期行为，脚本内已双语提示；服务未启动时同样 exit 1 并提示重启设备走完整安装。
 
 - 没有要求或引用的情况下默认视所有log和csv分析文件都是过时的、错误的、具有误导性的，不能参考或用于分析。但是如果引用或指出了需要参考文件夹则需要查看里面的所有文件，无论你认为有没有必要。
+
+- **暂停功能用 `// [PAUSED]` 注释入口/触发点而非删除**：需求方明确「功能以后大概率还要加回来」。功能代码、配置字段与 i18n key 原样保留，只在触发点注释并打标记（变量声明随触发点一并注释、调用点实参保留恒值以防扩散改动），恢复时 grep "PAUSED" 解开标记块。当前实例：息屏节电 doze + scenemode（chiri/mod.rs），详见「息屏省电与屏幕状态」。
 
 ## AGENTS.md 维护要求
 

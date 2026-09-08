@@ -652,6 +652,8 @@ pub struct CoreCtlConfig {
     /// 按机型配置：8550/8475 开，8998（4.4 老内核热插拔质量未知）默认关。
     /// 注意：与 boost 互斥——scenemode 下 boost 被抑制，防止厂商 core_ctl
     /// 按 min_cpus 把下线的核又拉回来。
+    /// [PAUSED] 息屏节电暂停期间该字段不被读取（字段保留供恢复）。
+    #[allow(dead_code)]
     #[serde(default = "crate::utils::default_true")]
     pub scenemode_offline: bool,
 }
@@ -696,6 +698,8 @@ pub struct Config {
     #[serde(default)]
     pub scenemode: Mode,
     /// 息屏进入 scenemode 的延迟（秒）：默认 300s（5 分钟），YAML 可覆盖
+    /// [PAUSED] 息屏节电暂停期间该字段不被读取（字段保留供恢复）。
+    #[allow(dead_code)]
     #[serde(default = "default_scene_mode_delay_secs")]
     pub scene_mode_delay_secs: u64,
 

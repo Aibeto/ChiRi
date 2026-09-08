@@ -57,6 +57,12 @@ screen-uevent-received = [Screen] uevent received: subsystem={ $subsystem } devp
 screen-uevent-power-action = [Screen] power action: { $action }
 screen-uevent-backlight = [Screen] backlight event: { $dev } -> state={ $state }
 screen-uevent-backlight-unreadable = [Screen] backlight state unreadable: { $dev }
+screen-detect-source-found = [Screen] Screen state source ready: { $kind } @ { $path }
+screen-detect-no-source = [Screen] No usable screen state source (/sys/class/backlight, /sys/class/leds/*backlight* and /sys/class/graphics/fb0/blank all unavailable); state cannot be self-healed, uevent events only
+screen-uevent-leds = [Screen] leds backlight event: { $dev } -> state={ $state }
+screen-uevent-leds-unreadable = [Screen] leds backlight state unreadable: { $dev }
+scheduler-screen-on = [Scheduler] Screen ON trigger event: recorded (screen-off power saving paused, scheduler state unchanged)
+scheduler-screen-off = [Scheduler] Screen OFF trigger event: recorded (screen-off power saving paused, scheduler state unchanged)
 
 # --- Monitors ---
 cpu-monitor-started = [CPU Monitor] eBPF System Load monitor started (Long-task blind spot fixed).

@@ -22,7 +22,7 @@ use std::error::Error;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::SyncSender;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -72,34 +72,112 @@ fn update_state_if_changed(state_arc: &Arc<Mutex<bool>>, new_state: bool, source
     }
 }
 
-/// 背光设备路径缓存：`None` 表示尚未发现，每次校验重扫直到找到——
-/// 避免开机早期 /sys/class/backlight 尚未就绪时永久缓存 None 导致自愈失效。
-static BACKLIGHT_CACHE: Mutex<Option<PathBuf>> = Mutex::new(None);
-/// 缓存背光节点连续不可读计数（verify_screen_state 维护，达限丢弃缓存重扫）
-static BACKLIGHT_READ_FAILS: AtomicU32 = AtomicU32::new(0);
-/// 连续不可读丢弃阈值：verify 每轮调用（息屏期 1s / 亮屏期 1.5s+），8 次 ≈ 8~12s
-const BACKLIGHT_READ_FAIL_LIMIT: u32 = 8;
+/// 屏幕状态检测源类别：不同机型暴露的屏幕状态节点不同（QCOM/通用内核走
+/// backlight class；MTK 等仅以 leds class 暴露背光；老内核可读 fbdev blank），
+/// 按可靠性优先级依次探测，找到第一个可用源即锁定缓存。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ScreenSourceKind {
+    /// backlight class（/sys/class/backlight）：bl_power/actual_brightness 三分支判定
+    Backlight,
+    /// leds class（/sys/class/leds/*backlight*，如 MTK lcd-backlight）：
+    /// Android 息屏时背光亮度写 0，brightness > 0 即面板在发光
+    Leds,
+    /// fbdev blank（/sys/class/graphics/fb0/blank）：0 = unblank（亮），非 0 = 灭
+    FbBlank,
+}
 
-/// 扫描 /sys/class/backlight，返回首个具备状态节点（bl_power 或 actual_brightness）的背光设备路径
-fn backlight_dev_path() -> Option<PathBuf> {
-    let mut cache = BACKLIGHT_CACHE.lock().unwrap();
+impl ScreenSourceKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            ScreenSourceKind::Backlight => "backlight",
+            ScreenSourceKind::Leds => "leds",
+            ScreenSourceKind::FbBlank => "fb-blank",
+        }
+    }
+}
+
+/// 检测源缓存：`None` 表示尚未发现，每次校验重扫直到找到——
+/// 避免开机早期 sysfs 尚未就绪时永久缓存 None 导致自愈失效。
+static SCREEN_SOURCE: Mutex<Option<(PathBuf, ScreenSourceKind)>> = Mutex::new(None);
+/// 缓存源连续不可读计数（verify_screen_state 维护，达限丢弃缓存重扫）
+static SCREEN_READ_FAILS: AtomicU32 = AtomicU32::new(0);
+/// 连续不可读丢弃阈值：verify 每轮调用（息屏期 1s / 亮屏期 1.5s+），8 次 ≈ 8~12s
+const SCREEN_READ_FAIL_LIMIT: u32 = 8;
+/// 诊断打点去重：检测源发现 / 无源告警各只打一条（verify 高频调用防刷屏）
+static SOURCE_FOUND_LOGGED: AtomicBool = AtomicBool::new(false);
+static NO_SOURCE_LOGGED: AtomicBool = AtomicBool::new(false);
+
+/// 按可靠性优先级扫描可用的屏幕状态检测源：
+/// 1. `/sys/class/backlight`（QCOM/通用内核）——具备状态节点（bl_power 或
+///    actual_brightness）的设备；
+/// 2. `/sys/class/leds` 下名字含 "backlight" 的节点（MTK 常见 lcd-backlight）——
+///    具备 brightness 节点；这是「/sys/class/backlight 不存在导致屏幕状态
+///    完全读不到」机型的主要修复路径；
+/// 3. `/sys/class/graphics/fb0/blank`（fbdev 旧接口兜底）。
+/// 全部缺失返回 None（调用方 info 告警一次，verify 静默跳过）。
+fn find_screen_source() -> Option<(PathBuf, ScreenSourceKind)> {
+    if let Ok(entries) = fs::read_dir("/sys/class/backlight") {
+        for entry in entries.flatten() {
+            let dev = entry.path();
+            if dev.join("bl_power").exists() || dev.join("actual_brightness").exists() {
+                return Some((dev, ScreenSourceKind::Backlight));
+            }
+        }
+    }
+    if let Ok(entries) = fs::read_dir("/sys/class/leds") {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            // 只认背光类 leds（lcd-backlight/backlight/pwm-backlight 等），
+            // 跳过通知灯、按键灯、充电灯等无关节点
+            if !name.to_string_lossy().to_lowercase().contains("backlight") {
+                continue;
+            }
+            let dev = entry.path();
+            if dev.join("brightness").exists() {
+                return Some((dev, ScreenSourceKind::Leds));
+            }
+        }
+    }
+    let fb0 = PathBuf::from("/sys/class/graphics/fb0");
+    if fb0.join("blank").exists() {
+        return Some((fb0, ScreenSourceKind::FbBlank));
+    }
+    None
+}
+
+/// 取缓存的检测源；未缓存时扫描一次并缓存。
+fn screen_source() -> Option<(PathBuf, ScreenSourceKind)> {
+    let mut cache = SCREEN_SOURCE.lock().unwrap();
     if cache.is_none() {
-        *cache = fs::read_dir("/sys/class/backlight")
-            .ok()?
-            .flatten()
-            .find_map(|entry| {
-                let dev = entry.path();
-                if dev.join("bl_power").exists() || dev.join("actual_brightness").exists() {
-                    Some(dev)
-                } else {
-                    None
-                }
-            });
+        *cache = find_screen_source();
+        if cache.is_some() {
+            // 从「无源/源失效」恢复：重置告警去重与失败计数，重新打点新源
+            NO_SOURCE_LOGGED.store(false, Ordering::Relaxed);
+            SOURCE_FOUND_LOGGED.store(false, Ordering::Relaxed);
+            SCREEN_READ_FAILS.store(0, Ordering::Relaxed);
+        }
     }
     cache.clone()
 }
 
-/// 读取背光设备的屏幕开关状态。
+/// 读取检测源的屏幕开关状态；None = 不可读（调用方静默跳过）。
+fn read_screen_state(kind: ScreenSourceKind, dev: &Path) -> Option<bool> {
+    match kind {
+        ScreenSourceKind::Backlight => read_backlight_state(dev),
+        ScreenSourceKind::Leds => crate::utils::read_i32_from_file(
+            &dev.join("brightness").to_string_lossy(),
+        )
+        .ok()
+        .map(|v| v > 0),
+        ScreenSourceKind::FbBlank => crate::utils::read_i32_from_file(
+            &dev.join("blank").to_string_lossy(),
+        )
+        .ok()
+        .map(|v| v == 0),
+    }
+}
+
+/// 读取 backlight class 设备的屏幕开关状态。
 ///
 /// 判定口径（实测案例：部分 DRM 面板驱动的 bl_power 在息屏路径写 FB_BLANK
 /// 后，亮屏路径不清零——节点长期停留非 0，把它当权威"灭屏"信号会让
@@ -124,31 +202,49 @@ fn read_backlight_state(dev: &Path) -> Option<bool> {
     }
 }
 
-/// 屏幕状态自愈校验：uevent 可能漏报（开机早期背光未就绪、长时间息屏后唤醒、
-/// netlink 缓冲溢出等），导致 `state_arc` 与实际屏幕状态脱节——亮屏时仍为 false，
-/// scenemode 计时器在亮屏期间被误触发、且后续亮屏因无 ScreenStateChange(true) 无法退出。
-/// 由 app_detect 主循环每轮调用一次，直接读 backlight sysfs 校正 arc；
-/// 无背光节点或读取失败时静默跳过，不干扰 uevent 主路径。
-/// 缓存节点连续 8 次全不可读（~8s，app_detect 息屏轮询周期 1s）时丢弃缓存
-/// 重扫 /sys/class/backlight：背光设备可能在运行中被移除/更换（多屏/折叠态），
+/// 屏幕状态自愈校验：uevent 可能漏报（开机早期 sysfs 未就绪、长时间息屏后
+/// 唤醒、netlink 缓冲溢出，或机型根本不广播屏幕类 uevent——现代内核已无
+/// early_suspend/late_resume power uevent，leds/backlight 亮度变化多数驱动
+/// 也不广播 KOBJ_CHANGE），导致 `state_arc` 与实际屏幕状态脱节。
+/// 由 app_detect 主循环每轮调用一次，直接读检测源 sysfs 校正 arc；
+/// 无可用源或读取失败时静默跳过，不干扰 uevent 主路径。
+///
+/// 诊断打点（各一次，防刷屏）：发现可用源时 info 打点源类别与路径——
+/// 「屏幕状态读不到」时从 daemon.log 即可确认设备实际可用的检测源；
+/// 三类源全部缺失时 info 告警一次。缓存源连续 8 次全不可读（~8s）时
+/// 丢弃缓存重扫：背光设备可能在运行中被移除/更换（多屏/折叠态），
 /// 死缓存会让自愈永久失效。
 pub fn verify_screen_state(state_arc: &Arc<Mutex<bool>>) {
-    if let Some(dev) = backlight_dev_path() {
-        match read_backlight_state(&dev) {
+    if let Some((dev, kind)) = screen_source() {
+        match read_screen_state(kind, &dev) {
             Some(state) => {
-                BACKLIGHT_READ_FAILS.store(0, Ordering::Relaxed);
-                update_state_if_changed(state_arc, state, "verify");
+                SCREEN_READ_FAILS.store(0, Ordering::Relaxed);
+                if !SOURCE_FOUND_LOGGED.swap(true, Ordering::Relaxed) {
+                    info!(
+                        "{}",
+                        t_with_args(
+                            "screen-detect-source-found",
+                            &fluent_args!(
+                                "kind" => kind.as_str(),
+                                "path" => dev.display().to_string()
+                            )
+                        )
+                    );
+                }
+                update_state_if_changed(state_arc, state, kind.as_str());
             }
             None => {
-                let fails = BACKLIGHT_READ_FAILS.fetch_add(1, Ordering::Relaxed) + 1;
-                if fails >= BACKLIGHT_READ_FAIL_LIMIT {
-                    if let Ok(mut cache) = BACKLIGHT_CACHE.lock() {
+                let fails = SCREEN_READ_FAILS.fetch_add(1, Ordering::Relaxed) + 1;
+                if fails >= SCREEN_READ_FAIL_LIMIT {
+                    if let Ok(mut cache) = SCREEN_SOURCE.lock() {
                         *cache = None;
                     }
-                    BACKLIGHT_READ_FAILS.store(0, Ordering::Relaxed);
+                    SCREEN_READ_FAILS.store(0, Ordering::Relaxed);
                 }
             }
         }
+    } else if !NO_SOURCE_LOGGED.swap(true, Ordering::Relaxed) {
+        info!("{}", t("screen-detect-no-source"));
     }
 }
 
@@ -193,9 +289,7 @@ pub fn monitor_screen_state_uevent(
                                 None
                             };
                             if let Some(state) = new_state {
-                                // 状态变化直接推送 ScreenStateChange：亮屏事件不再等
-                                // app_detect 息屏轮询（1s）转发，scenemode 下感知延迟
-                                // 从最坏 ~1.1s+ 降到 ~100ms（含背光稳定 sleep）
+                                // 状态变化直接推送 ScreenStateChange：消费者零轮询延迟
                                 if update_state_if_changed(&state_arc, state, "power") {
                                     let _ = tx.send(DaemonEvent::ScreenStateChange(state));
                                 }
@@ -207,9 +301,9 @@ pub fn monitor_screen_state_uevent(
                         // 非 0（含亮屏路径不清零的陈旧值）以 actual_brightness 为准，
                         // 不可读返回 None。此前行内旧口径把陈旧 bl_power 非 0 当权威
                         // 灭屏信号，亮屏期间每次背光 uevent 误报 OFF、~1s 后才被 verify
-                        // 拉回，纠正竞态失败时调度器滞留息屏态、误触发 scenemode。
+                        // 拉回，纠正竞态失败时调度器滞留息屏态。
                         let dev = std::path::PathBuf::from(format!("/sys{}", event.devpath.display()));
-                        let new_state = read_backlight_state(&dev);
+                        let new_state = read_screen_state(ScreenSourceKind::Backlight, &dev);
 
                         if let Some(state) = new_state {
                             debug!(
@@ -222,7 +316,7 @@ pub fn monitor_screen_state_uevent(
                                     )
                                 )
                             );
-                            // 同 power 分支：变化直推事件，消除 app_detect 轮询延迟
+                            // 同 power 分支：变化直推事件，消除轮询延迟
                             if update_state_if_changed(&state_arc, state, "backlight") {
                                 let _ = tx.send(DaemonEvent::ScreenStateChange(state));
                             }
@@ -236,6 +330,45 @@ pub fn monitor_screen_state_uevent(
                                     )
                                 )
                             );
+                        }
+                    } else if event.subsystem == "leds" && event.action == ActionType::Change {
+                        // leds class 背光（MTK lcd-backlight 等）亮度变化 uevent：
+                        // 仅认名字含 backlight 的节点（跳过通知灯/按键灯/充电灯等
+                        // 无关 leds 事件）。多数 led 驱动不广播亮度变化 uevent，
+                        // verify 轮询兜底才是主路径，此处能收到即零延迟直推。
+                        let dev = std::path::PathBuf::from(format!("/sys{}", event.devpath.display()));
+                        let is_backlight_led = dev
+                            .file_name()
+                            .map(|n| n.to_string_lossy().to_lowercase().contains("backlight"))
+                            .unwrap_or(false);
+                        if is_backlight_led {
+                            thread::sleep(Duration::from_millis(100));
+                            let new_state = read_screen_state(ScreenSourceKind::Leds, &dev);
+                            if let Some(state) = new_state {
+                                debug!(
+                                    "{}",
+                                    t_with_args(
+                                        "screen-uevent-leds",
+                                        &fluent_args!(
+                                            "dev" => dev.display().to_string(),
+                                            "state" => state.to_string()
+                                        )
+                                    )
+                                );
+                                if update_state_if_changed(&state_arc, state, "leds") {
+                                    let _ = tx.send(DaemonEvent::ScreenStateChange(state));
+                                }
+                            } else {
+                                debug!(
+                                    "{}",
+                                    t_with_args(
+                                        "screen-uevent-leds-unreadable",
+                                        &fluent_args!(
+                                            "dev" => dev.display().to_string()
+                                        )
+                                    )
+                                );
+                            }
                         }
                     }
                 }

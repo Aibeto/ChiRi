@@ -1,4 +1,6 @@
 # 息屏场景模式（scenemode）：息屏超过 scene_mode_delay_secs 后切换，压低功耗拉长续航。
+# [已暂停] 息屏节电触发点已在 src/chiri/mod.rs 注释（搜 "PAUSED"），本文件暂不生效；
+# 编译期嵌入与合并逻辑保留，恢复功能后自动生效。
 # 需要关闭时把 enabled 改为 false
 scenemode:
   cpu_load_governor:

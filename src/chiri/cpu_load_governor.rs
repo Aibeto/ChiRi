@@ -906,8 +906,9 @@ impl CpuLoadGovernor {
     /// 热切换配置：停止旧 Worker 并用新配置重新创建（与 init_policies 同路径，
     /// 保证 current_perf 重置到新 perf_init 并立即写频）。
     ///
-    /// 切换后频率从 perf_init 起步，避免息屏 doze/scenemode 期间 current_perf 掉到 ~0
-    /// 后亮屏恢复原模式时频率要从地板缓慢爬升数秒。
+    /// 切换后频率从 perf_init 起步，避免配置热切换/模式变更接管期间
+    /// current_perf 掉到 ~0 后频率要从地板缓慢爬升数秒
+    /// （息屏 doze/scenemode 触发路径已暂停，见 chiri/mod.rs "PAUSED"）。
     pub fn reload_config(&mut self, gov_cfg: &CpuLoadGovernorConfig) {
         // 保存旧 Worker 的 policy 信息用于重建
         let policy_ids: Vec<i32> = self.workers.iter().map(|w| w.policy_id).collect();
