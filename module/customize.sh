@@ -22,45 +22,49 @@ if [ -z "$CURRENT_LOCALE" ]; then
 fi
 
 LANG_CODE="en"
-MSG_WELCOME="Welcome to ChiRi Scheduler! (Based on Yumi Scheduler)"
+MSG_WELCOME="ChiRi Scheduler"
 MSG_SELECT_MODE="Please select installation mode:"
-MSG_VOLUME_UP="[Volume UP] Full installation"
-MSG_VOLUME_DOWN="[Volume DOWN] Hot update"
-MSG_SELECTED_UP="Selected: Full installation (Requires device reboot)"
-MSG_SELECTED_DOWN="Selected: Hot update"
-MSG_HOT_UPDATE_START="Starting hot update process..."
+MSG_VOLUME_UP="[Volume UP] Normal installation (requires reboot) [Recommended]"
+MSG_VOLUME_DOWN="[Volume DOWN] Hot update (Experimental)"
+MSG_SELECTED_UP="Selected: Normal installation (Requires device reboot)"
+MSG_SELECTED_DOWN="Selected: Hot update (Experimental)"
+MSG_HOT_UPDATE_START="Mission start"
 MSG_STOPPING_DAEMON="Stopping daemon process..."
 MSG_STOPPING_MAIN="Stopping main process..."
 MSG_COPYING_FILES="Copying module files..."
 MSG_RESTARTING_SERVICE="Restarting service..."
-MSG_HOT_UPDATE_DONE="Hot update completed successfully!"
-MSG_FULL_INSTALL="Proceeding with full installation..."
-MSG_HOT_UPDATE_UNAVAILABLE="Hot update unavailable, falling back to full installation..."
+MSG_HOT_UPDATE_DONE="Mission accomplished"
+MSG_FULL_INSTALL="Proceeding with normal installation"
+MSG_HOT_UPDATE_UNAVAILABLE="Hot update unavailable, falling back to normal installation..."
 MSG_RESTARTING_SCHEDULER="Restarting scheduler..."
 MSG_VERIFY_SERVICE="Verifying daemon service..."
-MSG_SERVICE_FAIL="Daemon did not start! Please reboot the device to complete the update."
-MSG_HOT_UPDATE_HINT="(The installer will now report a failure on purpose: this prevents the manager from flagging the module as updated/reboot-required. WebUI and Action stay available.)"
+MSG_SERVICE_FAIL="Restart process failed, please try again or choose normal installation"
+MSG_HOT_UPDATE_HINT="If you encounter any errors at the end, please ignore them. Run Action manually, or the scheduler will stop once the manager closes."
+MSG_INSTALL_CANCELLED="Installation cancelled"
+MSG_HOT_UPDATE_ABORT="Hot update done. Please run Action manually, or the scheduler will stop once the manager closes."
 
 if echo "$CURRENT_LOCALE" | $BUSYBOX grep -qi "zh"; then
   LANG_CODE="zh"
-  MSG_WELCOME="ChiRi INSTALLATION SCRIPT"
-  MSG_SELECT_MODE="TELL ME YOUR CHOICE:"
-  MSG_VOLUME_UP="[ Volume + ] FULL INSTALL (NEED REBOOT) [Recommended]"
-  MSG_VOLUME_DOWN="[ Volume - ] HOT UPDATE (BETA)"
-  MSG_SELECTED_UP="SELECT: FULL INSTALL (NEED REBOOT)"
-  MSG_SELECTED_DOWN="SELECT: HOT UPDATE (BETA)"
-  MSG_HOT_UPDATE_START="MISSION START"
-  MSG_STOPPING_DAEMON="STOPPING DAEMON PROCESS"
-  MSG_STOPPING_MAIN="STOPPING MAIN PROCESS"
-  MSG_COPYING_FILES="COPYING MODULE FILES"
-  MSG_RESTARTING_SERVICE="RESTARTING SERVICE"
-  MSG_HOT_UPDATE_DONE="MISSION ACCOMPLISHED"
-  MSG_FULL_INSTALL="FULL INSTALLATION PROCESS"
-  MSG_HOT_UPDATE_UNAVAILABLE="HOT UPDATE UNAVAILABLE, FALLING TO FULL INSTALLATION..."
-  MSG_RESTARTING_SCHEDULER="RESTARTING SCHEDULER"
-  MSG_VERIFY_SERVICE="VERIFYING DAEMON SERVICE"
-  MSG_SERVICE_FAIL="DAEMON DID NOT START! PLEASE REBOOT THE DEVICE TO COMPLETE THE UPDATE. (DAEMON IS REQUIRED TO START THE SCHEDULER)"
-  MSG_HOT_UPDATE_HINT="Please execute the action manually, or the scheduler will cease operation upon closure of the manager. 请手动执行action，否则调度将在管理器被关闭后停止运行"
+  MSG_WELCOME="ChiRi 千漓调度"
+  MSG_SELECT_MODE="模式选择："
+  MSG_VOLUME_UP="[ 音量 + ] 普通安装（需要重启）[推荐]"
+  MSG_VOLUME_DOWN="[ 音量 - ] 热更新（实验性）"
+  MSG_SELECTED_UP="已选择：普通安装（需要重启）"
+  MSG_SELECTED_DOWN="已选择：热更新（实验性）"
+  MSG_HOT_UPDATE_START="任务开始"
+  MSG_STOPPING_DAEMON="正在停止守护进程..."
+  MSG_STOPPING_MAIN="正在停止主进程..."
+  MSG_COPYING_FILES="正在复制模块文件..."
+  MSG_RESTARTING_SERVICE="正在重启服务..."
+  MSG_HOT_UPDATE_DONE="完成"
+  MSG_FULL_INSTALL="开始安装"
+  MSG_HOT_UPDATE_UNAVAILABLE="热更新不可用，回退到完整安装..."
+  MSG_RESTARTING_SCHEDULER="正在重启调度器..."
+  MSG_VERIFY_SERVICE="正在确认守护进程状态..."
+  MSG_SERVICE_FAIL="重启进程失败，请重试或使用普通安装"
+  MSG_HOT_UPDATE_HINT="如有报错请忽略。需要手动执行一次Action，否则调度可能会在管理器关闭后退出。"
+  MSG_INSTALL_CANCELLED="安装已取消"
+  MSG_HOT_UPDATE_ABORT="热更新已完成，如有报错请忽略。需要手动执行一次Action，否则调度可能会在管理器关闭后退出。"
 fi
 
 # --- 欢迎信息 ---
@@ -182,9 +186,10 @@ if [ "$HOT_UPDATE_AVAILABLE" = "true" ]; then
     
     # 检查是否检测到多个按键事件（错误）
     if [ $choice_result -eq 2 ]; then
-        ui_print "安装已取消，请重新运行安装脚本。"
-        ui_print "Installation cancelled. Please run the installation script again."
-        exit 1
+        ui_print "$MSG_INSTALL_CANCELLED"
+        # 用 abort 而非 exit：exit 会跳过安装器收尾清理，modules_update 暂存
+        # 残留会让管理器把模块标记为「待重启更新」、屏蔽 Action/WebUI
+        abort "$MSG_INSTALL_CANCELLED"
     fi
     
     if [ $choice_result -eq 0 ]; then
@@ -273,8 +278,9 @@ if [ "$HOT_UPDATE_AVAILABLE" = "true" ]; then
         # 文本页时 cp 会 ETXTBSY 失败——静默失败会残留旧版本，热更新后调度
         # 跑旧版。失败时恢复配置备份并重启旧版服务保持调度连续，明确告知
         # 用户当前为旧版。
-        # 注意：热更新路径**必须以 exit 1 结束**（成功与失败皆然）——exit 0
-        # 会让 KSU 把模块归为「待更新」，Action/WebUI 被禁用直到重启。
+        # 注意：热更新路径**必须以 abort 报错结束**（成功与失败皆然）——正常
+        # 结束（exit 0）会让安装器保留 modules_update 暂存，KSU 把模块归为
+        # 「待重启更新」，Action/WebUI 被禁用直到重启。
         UPDATE_OK=true
         if [ "$YUMI_ALIVE" = "true" ] || ! cp "$MODPATH/core/bin/yumi" "$MODDIR/core/bin/yumi" 2>/dev/null; then
             UPDATE_OK=false
@@ -363,10 +369,31 @@ if [ "$HOT_UPDATE_AVAILABLE" = "true" ]; then
         fi
         ui_print "$MSG_HOT_UPDATE_HINT"
 
-        # 5. 按报错退出：安装器视本次安装为失败，中止后续“完整安装”——
-        #    不覆盖上面已热替换的模块目录、不写 update 标记，管理器不会把
-        #    热更新识别为“模块更新”（不提示重启，WebUI 与 Action 保持可用）。
-        exit 1
+        # 5. 清理安装暂存 + 走官方失败路径结束安装。
+        #    背景：安装器在执行 customize.sh **之前**已把 zip 解压到
+        #    /data/adb/modules_update/<id>（暂存），脚本正常结束后由安装器
+        #    收尾并标记「待重启应用」。热更新已把文件直接热替换到 live 目录，
+        #    若让安装"成功"，管理器（KSU/Magisk）会按 modules_update/<id>
+        #    的存在显示「需要重启更新」并屏蔽 Action/WebUI——必须以失败收场。
+        #    此前用 exit 1 实现，但 KSU 官方文档明确：**exit 会跳过安装器的
+        #    收尾清理步骤**——暂存目录残留在磁盘上，管理器照样按「有暂存 =
+        #    待重启」标记模块（且旧暂存永久残留，之后每次热更新都无法解除，
+        #    Action/WebUI 一直被屏蔽）。
+        #    正确做法（官方 abort 语义）：
+        #    1) 显式清理两处「待重启」标记——
+        #       a. modules_update/chiri：本次安装的暂存（其内容已热替换进
+        #          live 目录，无保留价值）及此前残留的旧暂存；
+        #       b. 模块目录内的 update 标记文件：管理器判定「待重启更新」的
+        #          另一依据（上次完整安装/被标记后遗留），一并删除；
+        #       两处清理后 Action/WebUI 立即恢复可用、无需重启；
+        #    2) abort 走官方失败路径：打印消息 + 执行收尾清理 + 安装器报失败，
+        #       后续「完整安装」代码不会执行。
+        #    顺序约束：必须位于所有 $MODPATH 读取（cp -r 源）之后；脚本自身
+        #    由安装器从暂存 source 执行，unlink 不影响已打开的 fd，删除后
+        #    仅剩 abort 一条语句。
+        rm -rf /data/adb/modules_update/chiri
+        rm -f /data/adb/modules/chiri/update
+        abort "$MSG_HOT_UPDATE_ABORT"
     fi
 else
     # 热更新不可用，显示提示信息
