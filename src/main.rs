@@ -53,14 +53,25 @@ fn main() -> Result<()> {
     unsafe {
         libc::prctl(libc::PR_SET_PDEATHSIG, 0, 0, 0, 0);
         libc::setsid();
+        // 经典 daemonize 手法：先关 stdin，open /dev/null 必然复用 fd 0，
+        // 再 dup2 覆盖 1/2——三个标准 fd 全部指向 /dev/null 且与派生方管道
+        // 解除关联（断裂管道的写入从「EPIPE/panic/潜在 SIGPIPE」变为普通
+        // 写 /dev/null 恒成功）。
+        libc::close(0);
         let null_fd = libc::open(b"/dev/null\0".as_ptr() as *const libc::c_char, libc::O_RDWR);
         if null_fd >= 0 {
-            for fd in [0, 1, 2] {
-                libc::dup2(null_fd, fd);
-            }
+            libc::dup2(null_fd, 0);
+            libc::dup2(null_fd, 1);
+            libc::dup2(null_fd, 2);
             if null_fd > 2 {
                 libc::close(null_fd);
             }
+        } else {
+            // /dev/null 打不开（fd 耗尽等极端场景）：退而求其次关闭 stdout/
+            // stderr，与派生方管道解除关联——后续写入返回 EBADF，同样无
+            // SIGPIPE 风险、无阻塞写；fd 0 已在上面关闭，不留管道残留。
+            libc::close(1);
+            libc::close(2);
         }
     }
 
