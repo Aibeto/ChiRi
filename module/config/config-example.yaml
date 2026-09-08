@@ -77,8 +77,7 @@ Affinity:
   # 内核 >= 5.3 生效，节点缺失/写入回读无效会自动纠正关闭）。
   # 按机型：8550/8475 配 85，8998（内核 4.4）配 0 关闭
   top_app_uclamp_max_pct: 85
-  # 线程层总开关：前台线程按核钉定 + 后台动态 promote/demote
-  # （息屏不再暂停，屏幕状态不驱动调度）
+  # 线程层总开关：前台线程按核钉定 + 后台动态 promote/demote（仅亮屏）
   pin_foreground_threads: true
 
 # ── core_ctl 核心在线接管（ChiRi 专属）───────────────────────
@@ -87,9 +86,8 @@ Affinity:
 CoreCtl:
   # 总开关：false 时不写任何 core_ctl 节点
   enabled: true
-  # [已暂停] scenemode 离线核（息屏深度省电）：随息屏节电整体暂停，本字段暂不生效。
-  # 恢复后语义：进入 scenemode（息屏超过 scene_mode_delay_secs）后仅
-  # prime（超大核）整簇断电消除空转漏电流，
+  # scenemode 离线核（息屏深度省电）：进入 scenemode（息屏超过
+  # scene_mode_delay_secs）后仅 prime（超大核）整簇断电消除空转漏电流，
   # 小核 + 大核全开常驻（频率上限由 scenemode CLG 配置压到 0.15 档），
   # 编号最大的小核独占给调度服务（从业务 cpuset 组移除 + 自身线程移入
   # 根组 + 自钉，后台任务堵塞不了调度服务）。常驻簇（小核+大核）util

@@ -53,15 +53,13 @@ const EVENT_POLL_MS: Duration = Duration::from_millis(1000);
 const THERMAL_CHECK_INTERVAL: Duration = Duration::from_secs(2);
 /// 遥测 CSV 落盘间隔：1s 一次（功耗统计精度 1s；telemetry 线程 1s 刷新共享原子量）。
 const TELEMETRY_LOG_INTERVAL: Duration = Duration::from_secs(1);
-// [PAUSED] 息屏节电（doze + scenemode）已暂停：屏幕状态识别（背光/uevent）在部分
-// 机型不可靠，误判时会在亮屏期间误触发节电（下线大核 + UI 挤小核，卡到不可用）。
-// 暂停方式 = 注释入口与触发点，功能代码原样保留，恢复时 grep "PAUSED" 解开标记块：
-//   1. 本常量段；2. scheduler_ipc 内 screen_off_at/scene_mode_active 等状态变量；
-//   3. ScreenStateChange 分支的 doze/恢复调度块；4. SystemLoadUpdate 分支的
-//   scenemode 进入与饱和退出块；5. apply_affinity_and_corectl 的 boost/screen 门控。
-// const SCENEMODE_SAT_UTIL: f32 = 0.75;
-// const SCENEMODE_SAT_SECS: Duration = Duration::from_secs(10);
-// const SCENEMODE_COOLDOWN: Duration = Duration::from_secs(300);
+/// scenemode 饱和退出：**常驻簇（小核 + 大核）** max_util 持续高于该值视为
+/// 顶满性能上限（util 是忙时占比，与频率无关——后台负载压不住常驻核时即饱和）
+const SCENEMODE_SAT_UTIL: f32 = 0.75;
+/// 饱和持续判定时长：连续满足才退出，防止瞬时突发误触发
+const SCENEMODE_SAT_SECS: Duration = Duration::from_secs(10);
+/// scenemode 冷却：饱和退出后 300s 内不得重新进入（防止与后台负载反复拉锯）
+const SCENEMODE_COOLDOWN: Duration = Duration::from_secs(300);
 /// scheduler_ipc 事件循环 panic 自愈：连续崩溃超过该次数后放弃重启（防止
 /// poisoned lock 等确定性 panic 变成打满 CPU 的重启风暴），仅保留最终清理
 const SCHEDULER_IPC_RESTART_MAX: u32 = 5;
@@ -325,37 +323,34 @@ fn is_boost_mode(mode: &str) -> bool {
     mode == "performance" || mode == "fast" || crate::common::is_special_mode(mode)
 }
 
-/// 应用 CPU 亲和布局与 core_ctl 在线策略（ChiRi 专属，跟随模式/前台 PID）。
+/// 应用 CPU 亲和布局与 core_ctl 在线策略（ChiRi 专属，跟随模式/屏幕/前台 PID）。
 /// 内部带去重：布局与 PID 未变化时无 sysfs 写入，可安全周期性调用。
 /// `core_utils` 为最近一次 SystemLoadUpdate 的逐核 util（按核选核打分输入）。
-/// [PAUSED] `screen_on`/`scenemode_offline` 实参保留但被忽略（息屏节电暂停）：
-/// 亲和按亮屏口径常态生效、scenemode 离线核不触发；恢复时改回下方注释的原逻辑
-/// 并把参数名改回 screen_on/scenemode_offline。
+/// `scenemode_offline` 为 scenemode 激活标志：抑制 boost（防厂商 core_ctl 把
+/// 下线的核拉回来）并触发 core_ctl 离线（prime 下线深度省电）。
 fn apply_affinity_and_corectl(
     affinity: &mut affinity::AffinityManager,
     corectl: &mut core_ctl::CoreCtlManager,
     config: &Config,
     mode: &str,
-    _screen_on: bool,
+    screen_on: bool,
     fg_pid: i32,
     core_utils: &[f32],
-    _scenemode_offline: bool,
+    scenemode_offline: bool,
 ) {
-    // [PAUSED] 原 boost 判定（scenemode 抑制 + fas 仅亮屏入 boost）随息屏节电暂停：
-    //   let boost = (is_boost_mode(mode) || (mode == "fas" && screen_on)) && !scenemode_offline;
     // fas 模式按 boost 处理：FAS 只负责调频，线程摆放沿用 boost 布局
     // （top-app/foreground 收窄 prime∪big + 前台钉核 + core_ctl 保大核）。
+    // FAS 息屏省电已完全移除（2026-09）：FAS 与屏幕状态完全解耦——息屏不再
+    // 释放实例，故 fas 全时段入 boost，不再按 screen_on 回退 normal 布局。
     // 语义声明：boost 只看 mode、不查 FAS 引擎是否活跃——初始化
     // 失败冷却期（最长 FAS_COOLDOWN=300s）与重激活间隙内，
     // mode 仍为 fas，boost 布局照常生效（调频为 CLG balance）。这是有意的：
     // mode=="fas" 时前台必为白名单游戏，摆放对游戏非负收益，且 gating
     // is_active 会引入激活边界的布局抖动
-    let boost = is_boost_mode(mode) || mode == "fas";
-    affinity.apply(true, fg_pid, &config.affinity, boost, core_utils);
-    // [PAUSED] scenemode 离线核（prime 下线 + 专用小核独占）触发点停用，恒 false：
-    //   let offline_on = scenemode_offline && config.core_ctl.scenemode_offline;
-    //   corectl.set_power_state(config.core_ctl.enabled && boost, offline_on);
-    corectl.set_power_state(config.core_ctl.enabled && boost, false);
+    let boost = (is_boost_mode(mode) || mode == "fas") && !scenemode_offline;
+    affinity.apply(screen_on, fg_pid, &config.affinity, boost, core_utils);
+    let offline_on = scenemode_offline && config.core_ctl.scenemode_offline;
+    corectl.set_power_state(config.core_ctl.enabled && boost, offline_on);
 }
 
 /// FAS 亲和接入点：FAS 激活/去激活时调整线程摆放相关状态。
@@ -572,12 +567,11 @@ pub fn start_scheduler_thread(
             let mut last_telemetry_log = Instant::now();
             let mut telemetry_log_counter: u32 = 0;
 
-            let mut is_screen_on = true; // 屏幕状态标记（[PAUSED] 息屏节电停用后仅用于日志/CSV 记录）
-            // [PAUSED] 息屏节电（doze + scenemode）暂停：以下状态变量随触发点一并注释，
-            // 恢复时解开（见文件头 [PAUSED] 说明）。scene_mode_active 保留恒 false，
-            // 仅使 apply_affinity_and_corectl 调用点实参不变（该参数当前被忽略）。
-            // let mut screen_off_at: Option<Instant> = None;
-            let scene_mode_active = false;
+            let mut is_screen_on = true; // 屏幕状态标记
+            // 息屏计时：屏幕熄灭时记录，超过 scene_mode_delay_secs 后切到 scenemode 低功耗
+            let mut screen_off_at: Option<Instant> = None;
+            // 是否已进入 scenemode（一次性切换，亮屏/模式变更时复位）
+            let mut scene_mode_active = false;
             // 特调模式冷却：init_policies 因配置缺失/硬件不支持失败后，5 分钟内不再触发
             const AKMODE_COOLDOWN: Duration = Duration::from_secs(300);
             let mut akmode_cooldown_until: Option<Instant> = None;
@@ -586,13 +580,14 @@ pub fn start_scheduler_thread(
             const FAS_COOLDOWN: Duration = Duration::from_secs(300);
             let mut fas_cooldown_until: Option<Instant> = None;
 
-            // [PAUSED] scenemode 饱和退出冷却：饱和退回 powersave 后 300s 内不得重新进入
-            // let mut scenemode_cooldown_until: Option<Instant> = None;
-            // [PAUSED] scenemode 饱和计时起点（常驻大核簇 max_util 连续超阈值的窗口起点）
-            // let mut scenemode_sat_since: Option<Instant> = None;
+            // scenemode 饱和退出冷却：常驻簇（大核簇）util 持续顶满上限退回
+            // powersave 后，300s 内不得重新进入 scenemode（防止与后台负载反复拉锯）
+            let mut scenemode_cooldown_until: Option<Instant> = None;
+            // scenemode 饱和计时起点（常驻大核簇 max_util 连续超阈值的窗口起点）
+            let mut scenemode_sat_since: Option<Instant> = None;
 
-            // [PAUSED] scenemode 负载门槛打点去重：持续被拒期间只记一条 scene_hold
-            // let mut scene_hold_logged = false;
+            // scenemode 负载门槛打点去重：持续被拒期间只记一条 scene_hold
+            let mut scene_hold_logged = false;
 
             // 热保护：启动时探测一次温度传感器（CPU + 电池），缺失的参考静默降级；
             // 事件循环内每 2s 采样，按 config.thermal 阈值计算压制上限下发给 CLG
@@ -692,10 +687,9 @@ pub fn start_scheduler_thread(
                 }
 
                 // config.yaml 热重载联动：config_watcher 成功重载后置位。
-                // [PAUSED] 原 `&& is_screen_on` 门控（息屏不用新配置覆盖 Doze）随 doze
-                // 暂停移除——亮屏恢复块不再重放配置，息屏期重载必须立即生效。
-                // 恢复 doze 时把 `&& is_screen_on` 加回。
-                if dirty_ipc.swap(false, Ordering::AcqRel) {
+                // 与 ConfigReload（rules.yaml）同口径：亮屏时按当前模式把新配置应用到
+                // 运行中的 CLG/akmode，并刷新亲和/core_ctl（息屏不覆盖 Doze，亮屏事件补上）。
+                if dirty_ipc.swap(false, Ordering::AcqRel) && is_screen_on {
                     let current_mode = mode_clone.lock().unwrap().clone();
                     let config_lock = config_clone.read().unwrap();
                     log::debug!(
@@ -861,8 +855,8 @@ pub fn start_scheduler_thread(
                     // 包名实际变化才触发热切换，天然幂等。热切换逻辑与 PackageSwitch
                     // arm 同款内联（借用检查下两处各自持有 governor 可变引用，无法
                     // 提取公共闭包——与文件内既有风格一致）。
-                    // [PAUSED] 原「仅亮屏时执行」门控（息屏时 FAS 保持释放、绕过 doze）
-                    // 随息屏节电暂停移除：FAS 兜底激活全时段生效。app_detect 息屏期
+                    // FAS 息屏省电已完全移除（2026-09）：原「仅亮屏时执行」门控删除——
+                    // FAS 息屏保持接管，兜底激活（失效自愈）全时段生效。app_detect 息屏期
                     // 不更新前台包名，此处比较的是缓存包名，稳态为 no-op。
                     if mode_clone.lock().unwrap().clone() == "fas" {
                         let cur_pkg = crate::monitor::app_detect::get_current_package();
@@ -897,6 +891,30 @@ pub fn start_scheduler_thread(
                                     .and_then(|cfg| crate::common::fas_app_config(cfg))
                                     .is_some()
                                 {
+                                    // FAS 激活优先于 scenemode（2026-09）：scenemode 激活期间
+                                    // prime 离线 + 专用小核独占，不允许 FAS 在残缺 CPU 拓扑上
+                                    // 接管——先恢复全部在线核再激活（与亮屏恢复「先恢复核再
+                                    // init」同序）。守卫维持「FAS 实例存在 ⇒ 非 scenemode」不变量
+                                    if scene_mode_active {
+                                        scene_mode_active = false;
+                                        scene_hold_logged = false;
+                                        log::info!("{}", t("scheduler-scene-mode-exit-fas"));
+                                        {
+                                            let cfg = config_clone.read().unwrap();
+                                            let cur_mode = mode_clone.lock().unwrap().clone();
+                                            apply_affinity_and_corectl(
+                                                &mut affinity_mgr,
+                                                &mut corectl_mgr,
+                                                &cfg,
+                                                &cur_mode,
+                                                is_screen_on,
+                                                crate::monitor::app_detect::get_current_pid(),
+                                                &last_core_utils,
+                                                false,
+                                            );
+                                        }
+                                        crate::logger::devimp_event("scene_exit", "-", "fas_activate_preempt");
+                                    }
                                     ak_governor.release();
                                     fast_lock.release();
                                     cpu_governor.release();
@@ -1113,148 +1131,147 @@ pub fn start_scheduler_thread(
                         )));
                         is_screen_on = screen_on;
                         // 息屏/亮屏触发事件 info 打点：uevent 直推路径绕过了 app_detect 的
-                        // info 级变更日志，这里统一保证触发点可见（[PAUSED] 后仅记录不调度）
+                        // info 级变更日志，这里统一保证触发点可见
                         if screen_on {
                             log::info!("{}", t("scheduler-screen-on"));
                         } else {
                             log::info!("{}", t("scheduler-screen-off"));
                         }
-                        // [PAUSED] 息屏节电（doze + scenemode）暂停：屏幕状态不再驱动任何调度。
-                        // 以下息屏 doze 切换 / 亮屏恢复（FAS、极速锁频、akmode 释放与接管、
-                        // 亲和 normal 布局切换）整体注释，恢复时解开（见文件头 [PAUSED] 说明）。
-                        // let current_mode = mode_clone.lock().unwrap().clone();
-                        //
-                        // if !is_screen_on {
-                        //     log::info!("{}", t("scheduler-doze-enable"));
-                        //     // 息屏计时起点：超过 scene_mode_delay_secs 后切到 scenemode 低功耗
-                        //     screen_off_at = Some(Instant::now());
-                        //     scene_mode_active = false;
-                        //
-                        //     // 特调模式下息屏保持 akmode 接管，不切换到 CLG doze：
-                        //     // akmode 已统一为 schedutil，息屏后 schedutil 随负载自然降频省电，
-                        //     // 无需 CLG 介入；避免 release + 亮屏 re-init 的 governor 反复切换。
-                        //     if crate::common::is_special_mode(&current_mode) {
-                        //         // akmode 继续运行，CLG 保持释放状态
-                        //         log::info!("{}", t("scheduler-doze-special-keep"));
-                        //     } else {
-                        //         // 非特调模式：交回 CLG 处理深度睡眠。
-                        //         // FAS 同样释放（接管前 governor 快照已恢复），息屏降载走全局
-                        //         // 的 CLG doze → scenemode 路径；实例保留 60s，亮屏后由
-                        //         // app_detect 的 ModeChange（+force_refresh）重新激活。
-                        //         // 旧设计 enter_doze 写低频锁后依赖帧事件恢复——锁屏无帧
-                        //         // 事件时全簇锁死最低频，亮屏 0.2fps，且永久阻塞 CLG 接管。
-                        //         ak_governor.release();
-                        //         fast_lock.release();
-                        //         if current_mode == "fas" && fas_mgr.is_active() {
-                        //             fas_mgr.deactivate_active();
-                        //             log::info!("{}", t("scheduler-fas-screen-release"));
-                        //         }
-                        //
-                        //         // 让 CLG 接管，动态生成一个低功耗配置
-                        //         let config_lock = config_clone.read().unwrap();
-                        //         let mut doze_cfg = get_clg_cfg(&config_lock, "powersave");
-                        //         doze_cfg.enabled = true;
-                        //         doze_cfg.perf_floor = 0.0;
-                        //         // 息屏 doze 天花板 0.30：后台任务（sync/JobScheduler）突发时
-                        //         // 允许短暂借力，但压住"口袋发热"；5 分钟后 scenemode 进一步压到 0.15
-                        //         doze_cfg.perf_ceil = doze_cfg.perf_ceil.min(0.30); // 锁死天花板最高只给 30% 性能
-                        //         doze_cfg.smoothing_up = 0.10;           // 升频极其迟钝
-                        //         doze_cfg.touch_boost_enabled = false;   // 息屏无触摸，关闭触摸升频
-                        //
-                        //         cpu_governor.init_policies(&doze_cfg);
-                        //     }
-                        //     // 亲和/core_ctl 跟随息屏：top-app 恢复快照、后台压小核（特调保持 boost 布局）
-                        //     {
-                        //         let cfg = config_clone.read().unwrap();
-                        //         apply_affinity_and_corectl(
-                        //             &mut affinity_mgr,
-                        //             &mut corectl_mgr,
-                        //             &cfg,
-                        //             &current_mode,
-                        //             false,
-                        //             crate::monitor::app_detect::get_current_pid(),
-                        //             &last_core_utils,
-                        //             scene_mode_active,
-                        //         );
-                        //     }
-                        // } else {
-                        //     log::info!("{}", t("scheduler-doze-restore"));
-                        //     // 亮屏：清空息屏计时与 scenemode 状态（恢复逻辑在下方重放原模式）
-                        //     screen_off_at = None;
-                        //     scene_mode_active = false;
-                        //     scene_hold_logged = false;
-                        //     let config_lock = config_clone.read().unwrap();
-                        //
-                        //     // 亲和/core_ctl 先恢复：若此前处于 scenemode，prime 仍离线，
-                        //     // 其 cpufreq policy 目录不存在——必须先恢复全部核上线，
-                        //     // 下方 CLG/akmode/fast_lock 的 reload/init 才能枚举到完整
-                        //     // policy 列表（否则 prime 永久失去 worker，上线后残留
-                        //     // 离线前的锁频状态、脱离调度控制）
-                        //     apply_affinity_and_corectl(
-                        //         &mut affinity_mgr,
-                        //         &mut corectl_mgr,
-                        //         &config_lock,
-                        //         &current_mode,
-                        //         true,
-                        //         crate::monitor::app_detect::get_current_pid(),
-                        //         &last_core_utils,
-                        //         scene_mode_active,
-                        //     );
-                        //
-                        //     if crate::common::is_special_mode(&current_mode) {
-                        //         // 亮屏恢复特调：akmode 息屏期间通常保持接管（息屏分支不释放）；
-                        //         // 但若息屏时负载事件停止触发看门狗释放过 akmode，这里必须重新接管，
-                        //         // 否则特调限频失效、采样间隔也不会切回 40ms。
-                        //         // 冷却期内跳过特调，直接走 CLG。
-                        //         let in_cooldown = akmode_cooldown_until
-                        //             .map_or(false, |until| Instant::now() < until);
-                        //         if !ak_governor.is_active() && !in_cooldown {
-                        //             cpu_governor.release();
-                        //             let ak_cfg = config_lock.get_akmode().clone();
-                        //             if !ak_governor.init_policies(&ak_cfg) {
-                        //                 // init 失败（配置缺失/硬件不支持）：冷却 5 分钟，CLG 接管
-                        //                 akmode_cooldown_until = Some(Instant::now() + AKMODE_COOLDOWN);
-                        //                 log::warn!("{}", t_with_args(
-                        //                     "scheduler-akmode-cooldown",
-                        //                     &fluent_args!("secs" => AKMODE_COOLDOWN.as_secs().to_string())
-                        //                 ));
-                        //                 let clg_cfg = get_clg_cfg(&config_lock, &current_mode);
-                        //                 if clg_cfg.enabled { cpu_governor.init_policies(&clg_cfg); }
-                        //             }
-                        //         } else if !ak_governor.is_active() {
-                        //             // 冷却中：CLG 接管
-                        //             let clg_cfg = get_clg_cfg(&config_lock, &current_mode);
-                        //             if clg_cfg.enabled { cpu_governor.init_policies(&clg_cfg); }
-                        //         }
-                        //     } else if current_mode == "fast" {
-                        //         // 亮屏恢复极速模式：释放 doze CLG，由 fast_lock 接管
-                        //         ak_governor.release();
-                        //         cpu_governor.release();
-                        //         fast_lock.init();
-                        //     } else if current_mode == "fas" {
-                        //         // FAS 已在息屏时释放：CLG 从 doze 恢复到 balance，
-                        //         // 随后 app_detect（force_refresh）的 ModeChange / 1s 兜底
-                        //         // 会重新激活 FAS（activate 复用保留实例 + apply_freqs）
-                        //         let clg_cfg = get_clg_cfg(&config_lock, "balance");
-                        //         if clg_cfg.enabled {
-                        //             if cpu_governor.is_active() {
-                        //                 cpu_governor.reload_config(&clg_cfg);
-                        //             } else {
-                        //                 cpu_governor.init_policies(&clg_cfg);
-                        //             }
-                        //         }
-                        //     } else {
-                        //         ak_governor.release();
-                        //         fast_lock.release();
-                        //         let clg_cfg = get_clg_cfg(&config_lock, &current_mode);
-                        //         if clg_cfg.enabled {
-                        //             // 息屏 doze 期间 CLG 仍持有 writer，热切换配置即可
-                        //             if cpu_governor.is_active() { cpu_governor.reload_config(&clg_cfg); }
-                        //             else { cpu_governor.init_policies(&clg_cfg); }
-                        //         }
-                        //         else { cpu_governor.release(); }
-                        //     }
-                        // }
+                        let current_mode = mode_clone.lock().unwrap().clone();
+
+                        if !is_screen_on {
+                            log::info!("{}", t("scheduler-doze-enable"));
+                            // 息屏计时起点：超过 scene_mode_delay_secs 后切到 scenemode 低功耗
+                            screen_off_at = Some(Instant::now());
+                            scene_mode_active = false;
+
+                            // 特调模式下息屏保持 akmode 接管，不切换到 CLG doze：
+                            // akmode 已统一为 schedutil，息屏后 schedutil 随负载自然降频省电，
+                            // 无需 CLG 介入；避免 release + 亮屏 re-init 的 governor 反复切换。
+                            if crate::common::is_special_mode(&current_mode) {
+                                // akmode 继续运行，CLG 保持释放状态
+                                log::info!("{}", t("scheduler-doze-special-keep"));
+                            } else if current_mode == "fas" && fas_mgr.is_active() {
+                                // FAS 息屏省电已完全移除（2026-09）：FAS 息屏保持接管，
+                                // 不释放实例、不切 CLG doze（与特调息屏保持接管同语义）。
+                                // FAS 失效（看门狗释放/初始化冷却）时走下方分支由 doze 接管。
+                            } else {
+                                // 非特调模式：交回 CLG 处理深度睡眠。
+                                // FAS 息屏不再释放（息屏省电已移除）：本分支仅在非 fas 模式
+                                // 或 FAS 未活跃（看门狗释放/初始化冷却）时执行。
+                                // 旧设计 enter_doze 写低频锁后依赖帧事件恢复——锁屏无帧
+                                // 事件时全簇锁死最低频，亮屏 0.2fps，且永久阻塞 CLG 接管。
+                                ak_governor.release();
+                                fast_lock.release();
+
+                                // 让 CLG 接管，动态生成一个低功耗配置
+                                let config_lock = config_clone.read().unwrap();
+                                let mut doze_cfg = get_clg_cfg(&config_lock, "powersave");
+                                doze_cfg.enabled = true;
+                                doze_cfg.perf_floor = 0.0;
+                                // 息屏 doze 天花板 0.30：后台任务（sync/JobScheduler）突发时
+                                // 允许短暂借力，但压住"口袋发热"；5 分钟后 scenemode 进一步压到 0.15
+                                doze_cfg.perf_ceil = doze_cfg.perf_ceil.min(0.30); // 锁死天花板最高只给 30% 性能
+                                doze_cfg.smoothing_up = 0.10;           // 升频极其迟钝
+                                doze_cfg.touch_boost_enabled = false;   // 息屏无触摸，关闭触摸升频
+
+                                cpu_governor.init_policies(&doze_cfg);
+                            }
+                            // 亲和/core_ctl 跟随息屏：top-app 恢复快照、后台压小核（特调保持 boost 布局）
+                            {
+                                let cfg = config_clone.read().unwrap();
+                                apply_affinity_and_corectl(
+                                    &mut affinity_mgr,
+                                    &mut corectl_mgr,
+                                    &cfg,
+                                    &current_mode,
+                                    false,
+                                    crate::monitor::app_detect::get_current_pid(),
+                                    &last_core_utils,
+                                    scene_mode_active,
+                                );
+                            }
+                        } else {
+                            log::info!("{}", t("scheduler-doze-restore"));
+                            // 亮屏：清空息屏计时与 scenemode 状态（恢复逻辑在下方重放原模式）
+                            screen_off_at = None;
+                            scene_mode_active = false;
+                            scene_hold_logged = false;
+                            let config_lock = config_clone.read().unwrap();
+
+                            // 亲和/core_ctl 先恢复：若此前处于 scenemode，prime 仍离线，
+                            // 其 cpufreq policy 目录不存在——必须先恢复全部核上线，
+                            // 下方 CLG/akmode/fast_lock 的 reload/init 才能枚举到完整
+                            // policy 列表（否则 prime 永久失去 worker，上线后残留
+                            // 离线前的锁频状态、脱离调度控制）
+                            apply_affinity_and_corectl(
+                                &mut affinity_mgr,
+                                &mut corectl_mgr,
+                                &config_lock,
+                                &current_mode,
+                                true,
+                                crate::monitor::app_detect::get_current_pid(),
+                                &last_core_utils,
+                                scene_mode_active,
+                            );
+
+                            if crate::common::is_special_mode(&current_mode) {
+                                // 亮屏恢复特调：akmode 息屏期间通常保持接管（息屏分支不释放）；
+                                // 但若息屏时负载事件停止触发看门狗释放过 akmode，这里必须重新接管，
+                                // 否则特调限频失效、采样间隔也不会切回 40ms。
+                                // 冷却期内跳过特调，直接走 CLG。
+                                let in_cooldown = akmode_cooldown_until
+                                    .map_or(false, |until| Instant::now() < until);
+                                if !ak_governor.is_active() && !in_cooldown {
+                                    cpu_governor.release();
+                                    let ak_cfg = config_lock.get_akmode().clone();
+                                    if !ak_governor.init_policies(&ak_cfg) {
+                                        // init 失败（配置缺失/硬件不支持）：冷却 5 分钟，CLG 接管
+                                        akmode_cooldown_until = Some(Instant::now() + AKMODE_COOLDOWN);
+                                        log::warn!("{}", t_with_args(
+                                            "scheduler-akmode-cooldown",
+                                            &fluent_args!("secs" => AKMODE_COOLDOWN.as_secs().to_string())
+                                        ));
+                                        let clg_cfg = get_clg_cfg(&config_lock, &current_mode);
+                                        if clg_cfg.enabled { cpu_governor.init_policies(&clg_cfg); }
+                                    }
+                                } else if !ak_governor.is_active() {
+                                    // 冷却中：CLG 接管
+                                    let clg_cfg = get_clg_cfg(&config_lock, &current_mode);
+                                    if clg_cfg.enabled { cpu_governor.init_policies(&clg_cfg); }
+                                }
+                            } else if current_mode == "fast" {
+                                // 亮屏恢复极速模式：释放 doze CLG，由 fast_lock 接管
+                                ak_governor.release();
+                                cpu_governor.release();
+                                fast_lock.init();
+                            } else if current_mode == "fas" {
+                                // FAS 活跃：保持接管，CLG 绝不能接管 FAS 已接管的 CPU，
+                                // 亮屏不做任何恢复（FAS 息屏保持接管，2026-09）。
+                                // FAS 失效（初始化冷却/异常）：激活 CLG balance 接管——
+                                // 冷却期内 1s 兜底被短路（fas_cooldown 门控），此处是
+                                // 退出 doze/scenemode 低性能配置的唯一恢复路径；冷却结束
+                                // 后由 1s 兜底重新激活 FAS（activate 前先 release CLG）。
+                                if !fas_mgr.is_active() {
+                                    let clg_cfg = get_clg_cfg(&config_lock, "balance");
+                                    if clg_cfg.enabled {
+                                        if cpu_governor.is_active() { cpu_governor.reload_config(&clg_cfg); }
+                                        else { cpu_governor.init_policies(&clg_cfg); }
+                                    }
+                                    else { cpu_governor.release(); }
+                                }
+                            } else {
+                                ak_governor.release();
+                                fast_lock.release();
+                                let clg_cfg = get_clg_cfg(&config_lock, &current_mode);
+                                if clg_cfg.enabled {
+                                    // 息屏 doze 期间 CLG 仍持有 writer，热切换配置即可
+                                    if cpu_governor.is_active() { cpu_governor.reload_config(&clg_cfg); }
+                                    else { cpu_governor.init_policies(&clg_cfg); }
+                                }
+                                else { cpu_governor.release(); }
+                            }
+                        }
                         crate::logger::devimp_event("screen", "-", if is_screen_on { "on" } else { "off" });
                     },
 
@@ -1311,11 +1328,8 @@ pub fn start_scheduler_thread(
                                 )));
                             }
 
-                            // [PAUSED] 息屏进入 fas 的特殊分支（不激活 FAS、交 doze 接管）
-                            // 随息屏节电暂停：屏幕状态不再影响 FAS 激活，fas 模式全时段生效。
-                            // if mode == "fas" && !is_screen_on {
-                            //     fas_mgr.deactivate_active();
-                            // } else
+                            // FAS 息屏省电已完全移除（2026-09）：原「息屏进入 fas 不激活
+                            // FAS、交 doze 接管」的特殊分支已删除，屏幕状态不再影响 FAS 激活。
                             if mode == "fas" {
                                 // 防御复查：determine_mode 已门控白名单，此处兜底（不应发生）
                                 let fas_ready = crate::common::fas_whitelist_entry(&package_name)
@@ -1479,167 +1493,173 @@ pub fn start_scheduler_thread(
                             cpu_governor.on_load_update(&core_utils);
                         }
 
-                        // [PAUSED] scenemode 进入触发点停用：息屏超过 scene_mode_delay_secs
-                        // 后把 CLG 切到低功耗配置 + prime 下线 + 专用小核独占。屏幕状态识别
-                        // 在部分机型不可靠（背光误判息屏→亮屏期间被下线大核卡死），随息屏
-                        // 节电整体暂停。恢复时解开本块与饱和退出块、SCENEMODE_* 常量及
-                        // screen_off_at/scenemode_cooldown_until/scenemode_sat_since/
-                        // scene_hold_logged 变量声明（见文件头 [PAUSED] 说明）。
-                        // let scenemode_cooldown_ok = scenemode_cooldown_until
-                        //     .map_or(true, |u| Instant::now() >= u);
-                        // if !is_screen_on && !scene_mode_active && scenemode_cooldown_ok {
-                        //     // 先用免锁的计时预判（最低 60s），避免息屏期间每个负载 tick 都抢锁
-                        //     let delay_hit = screen_off_at
-                        //         .map_or(false, |off| off.elapsed().as_secs() >= 60);
-                        //     if delay_hit {
-                        //         let current_mode = mode_clone.lock().unwrap().clone();
-                        //         // fas 模式下息屏已释放 FAS（CLG doze 接管），正常参与 scenemode；
-                        //         // FAS 仍活跃（防御：理论上不会发生）时不进入
-                        //         if !crate::common::is_special_mode(&current_mode) && !fas_mgr.is_active() {
-                        //             let config_read = config_clone.read().unwrap();
-                        //             let delay = config_read.scene_mode_delay_secs.max(60);
-                        //             let scene_cfg =
-                        //                 config_read.scenemode.cpu_load_governor.clone();
-                        //             drop(config_read);
-                        //             if screen_off_at
-                        //                 .map_or(false, |off| off.elapsed().as_secs() >= delay)
-                        //             {
-                        //                 // 负载门槛：与饱和退出共用 SCENEMODE_SAT_UTIL——常驻簇
-                        //                 // 仍被后台负载顶满时进入 scenemode 必然 ~10s 后饱和退出，
-                        //                 // 形成整夜「进→退→300s 冷却」拉锯。跳过本次（不动
-                        //                 // screen_off_at，后续 tick 持续复评），负载回落后自动进入。
-                        //                 let ranges = crate::common::chiri_core_ranges();
-                        //                 let standby_max = ranges
-                        //                     .little
-                        //                     .clone()
-                        //                     .chain(ranges.big.clone())
-                        //                     .filter_map(|c| last_core_utils.get(c).copied())
-                        //                     .fold(0.0_f32, f32::max);
-                        //                 if standby_max >= SCENEMODE_SAT_UTIL {
-                        //                     if !scene_hold_logged {
-                        //                         scene_hold_logged = true;
-                        //                         crate::logger::devimp_event(
-                        //                             "scene_hold",
-                        //                             "-",
-                        //                             &format!("util={:.0}", standby_max * 100.0),
-                        //                         );
-                        //                     }
-                        //                 } else {
-                        //                     scene_hold_logged = false;
-                        //                     if scene_cfg.enabled {
-                        //                         if cpu_governor.is_active() {
-                        //                             cpu_governor.reload_config(&scene_cfg);
-                        //                         } else {
-                        //                             cpu_governor.init_policies(&scene_cfg);
-                        //                         }
-                        //                     } else {
-                        //                         cpu_governor.release();
-                        //                     }
-                        //                     log::info!("{}", t("scheduler-scene-mode-enter"));
-                        //                     scene_mode_active = true;
-                        //                     // 立即应用 scenemode 离线核（不等 2s 周期块）：
-                        //                     // 小核+大核常驻低频（频率上限由 scenemode
-                        //                     // CLG 配置压制）+ prime 下线 + 专用小核独占
-                        //                     // 自钉（cpuset 排除其他进程）
-                        //                     {
-                        //                         let cfg = config_clone.read().unwrap();
-                        //                         apply_affinity_and_corectl(
-                        //                             &mut affinity_mgr,
-                        //                             &mut corectl_mgr,
-                        //                             &cfg,
-                        //                             &current_mode,
-                        //                             is_screen_on,
-                        //                             crate::monitor::app_detect::get_current_pid(),
-                        //                             &last_core_utils,
-                        //                             scene_mode_active,
-                        //                         );
-                        //                     }
-                        //                 }
-                        //             }
-                        //         }
-                        //     }
-                        // }
+                        // scenemode：息屏超过 scene_mode_delay_secs 后把 CLG 切到低功耗配置
+                        // （一次性）。特调模式由 akmode 独立接管不参与；亮屏后恢复原模式。
+                        // FAS 优先（2026-09）：任意 FAS 实例存在（活跃或后台保留）即禁止
+                        // 进入 scenemode——CLG 绝不能接管 FAS 已接管的 CPU，后台保留实例
+                        // 也视为 FAS 存在；保留实例 60s TTL reap 后自动放行。前台不在 FAS
+                        // 名单时模式非 fas，CLG 正常走 doze → scenemode。
+                        // scenemode 未启用时释放 CLG 回系统默认。
+                        // 饱和退出冷却期内不得重进（防止与后台负载反复拉锯）。
+                        let scenemode_cooldown_ok = scenemode_cooldown_until
+                            .map_or(true, |u| Instant::now() >= u);
+                        if !is_screen_on && !scene_mode_active && scenemode_cooldown_ok {
+                            // 先用免锁的计时预判（最低 60s），避免息屏期间每个负载 tick 都抢锁
+                            let delay_hit = screen_off_at
+                                .map_or(false, |off| off.elapsed().as_secs() >= 60);
+                            if delay_hit {
+                                let current_mode = mode_clone.lock().unwrap().clone();
+                                // 特调由 akmode 独立接管不参与；任意 FAS 实例存在（活跃或
+                                // 后台保留）不参与——FAS 失效实例 reap 后才允许进入
+                                if !crate::common::is_special_mode(&current_mode)
+                                    && !fas_mgr.has_any_instance()
+                                {
+                                    let config_read = config_clone.read().unwrap();
+                                    let delay = config_read.scene_mode_delay_secs.max(60);
+                                    let scene_cfg =
+                                        config_read.scenemode.cpu_load_governor.clone();
+                                    drop(config_read);
+                                    if screen_off_at
+                                        .map_or(false, |off| off.elapsed().as_secs() >= delay)
+                                    {
+                                        // 负载门槛：与饱和退出共用 SCENEMODE_SAT_UTIL——常驻簇
+                                        // 仍被后台负载顶满时进入 scenemode 必然 ~10s 后饱和退出，
+                                        // 形成整夜「进→退→300s 冷却」拉锯。跳过本次（不动
+                                        // screen_off_at，后续 tick 持续复评），负载回落后自动进入。
+                                        let ranges = crate::common::chiri_core_ranges();
+                                        let standby_max = ranges
+                                            .little
+                                            .clone()
+                                            .chain(ranges.big.clone())
+                                            .filter_map(|c| last_core_utils.get(c).copied())
+                                            .fold(0.0_f32, f32::max);
+                                        if standby_max >= SCENEMODE_SAT_UTIL {
+                                            if !scene_hold_logged {
+                                                scene_hold_logged = true;
+                                                crate::logger::devimp_event(
+                                                    "scene_hold",
+                                                    "-",
+                                                    &format!("util={:.0}", standby_max * 100.0),
+                                                );
+                                            }
+                                        } else {
+                                            scene_hold_logged = false;
+                                            if scene_cfg.enabled {
+                                                if cpu_governor.is_active() {
+                                                    cpu_governor.reload_config(&scene_cfg);
+                                                } else {
+                                                    cpu_governor.init_policies(&scene_cfg);
+                                                }
+                                            } else {
+                                                cpu_governor.release();
+                                            }
+                                            log::info!("{}", t("scheduler-scene-mode-enter"));
+                                            scene_mode_active = true;
+                                            // 立即应用 scenemode 离线核（不等 2s 周期块）：
+                                            // 小核+大核常驻低频（频率上限由 scenemode
+                                            // CLG 配置压制）+ prime 下线 + 专用小核独占
+                                            // 自钉（cpuset 排除其他进程）
+                                            {
+                                                let cfg = config_clone.read().unwrap();
+                                                apply_affinity_and_corectl(
+                                                    &mut affinity_mgr,
+                                                    &mut corectl_mgr,
+                                                    &cfg,
+                                                    &current_mode,
+                                                    is_screen_on,
+                                                    crate::monitor::app_detect::get_current_pid(),
+                                                    &last_core_utils,
+                                                    scene_mode_active,
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
 
-                        // [PAUSED] scenemode 饱和退出触发点停用（随入口块一并暂停）：
-                        // **常驻簇（小核 + 大核）** max_util 持续顶满性能上限 →
-                        // 退回 powersave（恢复全部在线核）+ 300s 冷却不得重进。
-                        // if scene_mode_active && !is_screen_on {
-                        //     let ranges = crate::common::chiri_core_ranges();
-                        //     let standby_max = ranges
-                        //         .little
-                        //         .clone()
-                        //         .chain(ranges.big.clone())
-                        //         .filter_map(|c| last_core_utils.get(c).copied())
-                        //         .fold(0.0_f32, f32::max);
-                        //     if standby_max >= SCENEMODE_SAT_UTIL {
-                        //         let sustained = match scenemode_sat_since {
-                        //             Some(since) => since.elapsed() >= SCENEMODE_SAT_SECS,
-                        //             None => {
-                        //                 scenemode_sat_since = Some(Instant::now());
-                        //                 false
-                        //             }
-                        //         };
-                        //         if sustained {
-                        //             scenemode_sat_since = None;
-                        //             scene_mode_active = false;
-                        //             scene_hold_logged = false;
-                        //             scenemode_cooldown_until =
-                        //                 Some(Instant::now() + SCENEMODE_COOLDOWN);
-                        //             let current_mode = mode_clone.lock().unwrap().clone();
-                        //             // 立即恢复全部在线核 + 解除专用核钉定。
-                        //             // 必须先于 CLG reload：prime 离线期间其 cpufreq policy
-                        //             // 目录会消失，reload 枚举不到该 policy，prime 将永久
-                        //             // 失去 worker（上线后残留离线前的锁频状态、脱离调度控制）
-                        //             {
-                        //                 let cfg = config_clone.read().unwrap();
-                        //                 apply_affinity_and_corectl(
-                        //                     &mut affinity_mgr,
-                        //                     &mut corectl_mgr,
-                        //                     &cfg,
-                        //                     &current_mode,
-                        //                     is_screen_on,
-                        //                     crate::monitor::app_detect::get_current_pid(),
-                        //                     &last_core_utils,
-                        //                     scene_mode_active,
-                        //                 );
-                        //             }
-                        //             // 退回 powersave：给后台负载更大余量（核已全部上线，
-                        //             // 此时枚举 policy 才完整）。powersave CLG 未启用时释放，
-                        //             // 与 ModeChange 路径口径一致
-                        //             let ps_cfg = get_clg_cfg(&config_clone.read().unwrap(), "powersave");
-                        //             if ps_cfg.enabled {
-                        //                 if cpu_governor.is_active() {
-                        //                     cpu_governor.reload_config(&ps_cfg);
-                        //                 } else {
-                        //                     cpu_governor.init_policies(&ps_cfg);
-                        //                 }
-                        //             } else {
-                        //                 cpu_governor.release();
-                        //             }
-                        //             log::info!(
-                        //                 "{}",
-                        //                 t_with_args(
-                        //                     "scheduler-scene-mode-saturation",
-                        //                     &fluent_args!("util" => format!("{:.0}", standby_max * 100.0))
-                        //                 )
-                        //             );
-                        //             crate::logger::devimp_event(
-                        //                 "scene_exit",
-                        //                 "-",
-                        //                 "saturation->powersave+300s",
-                        //             );
-                        //         }
-                        //     } else {
-                        //         scenemode_sat_since = None;
-                        //     }
-                        // }
+                        // scenemode 饱和退出：**常驻簇（小核 + 大核）** max_util
+                        // 持续顶满性能上限 → 退回 powersave（恢复全部在线核）+
+                        // 300s 冷却不得重进，防止后台负载压不死常驻核时反复
+                        // 拉锯。util 是忙时占比（与频率无关），饱和即真饱和，
+                        // 与 perf_ceil 数值无耦合。
+                        if scene_mode_active && !is_screen_on {
+                            let ranges = crate::common::chiri_core_ranges();
+                            let standby_max = ranges
+                                .little
+                                .clone()
+                                .chain(ranges.big.clone())
+                                .filter_map(|c| last_core_utils.get(c).copied())
+                                .fold(0.0_f32, f32::max);
+                            if standby_max >= SCENEMODE_SAT_UTIL {
+                                let sustained = match scenemode_sat_since {
+                                    Some(since) => since.elapsed() >= SCENEMODE_SAT_SECS,
+                                    None => {
+                                        scenemode_sat_since = Some(Instant::now());
+                                        false
+                                    }
+                                };
+                                if sustained {
+                                    scenemode_sat_since = None;
+                                    scene_mode_active = false;
+                                    scene_hold_logged = false;
+                                    scenemode_cooldown_until =
+                                        Some(Instant::now() + SCENEMODE_COOLDOWN);
+                                    let current_mode = mode_clone.lock().unwrap().clone();
+                                    // 立即恢复全部在线核 + 解除专用核钉定。
+                                    // 必须先于 CLG reload：prime 离线期间其 cpufreq policy
+                                    // 目录会消失，reload 枚举不到该 policy，prime 将永久
+                                    // 失去 worker（上线后残留离线前的锁频状态、脱离调度控制）
+                                    {
+                                        let cfg = config_clone.read().unwrap();
+                                        apply_affinity_and_corectl(
+                                            &mut affinity_mgr,
+                                            &mut corectl_mgr,
+                                            &cfg,
+                                            &current_mode,
+                                            is_screen_on,
+                                            crate::monitor::app_detect::get_current_pid(),
+                                            &last_core_utils,
+                                            scene_mode_active,
+                                        );
+                                    }
+                                    // 退回 powersave：给后台负载更大余量（核已全部上线，
+                                    // 此时枚举 policy 才完整）。powersave CLG 未启用时释放，
+                                    // 与 ModeChange 路径口径一致
+                                    let ps_cfg = get_clg_cfg(&config_clone.read().unwrap(), "powersave");
+                                    if ps_cfg.enabled {
+                                        if cpu_governor.is_active() {
+                                            cpu_governor.reload_config(&ps_cfg);
+                                        } else {
+                                            cpu_governor.init_policies(&ps_cfg);
+                                        }
+                                    } else {
+                                        cpu_governor.release();
+                                    }
+                                    log::info!(
+                                        "{}",
+                                        t_with_args(
+                                            "scheduler-scene-mode-saturation",
+                                            &fluent_args!("util" => format!("{:.0}", standby_max * 100.0))
+                                        )
+                                    );
+                                    crate::logger::devimp_event(
+                                        "scene_exit",
+                                        "-",
+                                        "saturation->powersave+300s",
+                                    );
+                                }
+                            } else {
+                                scenemode_sat_since = None;
+                            }
+                        }
                     },
 
                     // --- 4. 帧率事件 (eBPF 驱动) ---
                     DaemonEvent::FrameUpdate { frame_delta_ns } => {
                         // 帧事件喂给 FAS 活跃实例（内部含 3s 温度刷新）
-                        // [PAUSED] 原 `is_screen_on &&` 门控（息屏不喂帧）随息屏节电暂停移除：
-                        // FAS 息屏保持活跃后帧事件照常投喂（息屏无帧，稳态为 no-op）
+                        // FAS 息屏省电已完全移除（2026-09）：原 `is_screen_on &&` 门控删除——
+                        // FAS 息屏保持接管，帧事件照常投喂（息屏无帧，稳态为 no-op）
                         if fas_mgr.is_active() {
                             fas_mgr.on_frame(frame_delta_ns);
                         }
@@ -1658,9 +1678,7 @@ pub fn start_scheduler_thread(
                             "screen_on" => is_screen_on.to_string()
                         )));
                         // fas 模式：FAS 配置编译期嵌入静态，rules.yaml 重载不参与
-                        // [PAUSED] 原以 is_screen_on 门控（息屏不要新配置覆盖 Doze）随 doze
-                        // 暂停移除：重载全时段生效；恢复 doze 时重新包上 `if is_screen_on { .. }`
-                        {
+                        if is_screen_on { // 息屏时不要用新配置覆盖 Doze
                             let config_lock = config_clone.read().unwrap();
                             if crate::common::is_special_mode(&current_mode) {
                                 // 特调模式：重载 akmode 配置
@@ -1764,10 +1782,10 @@ pub fn start_scheduler_thread(
                 // 重置状态机到亮屏安全态：真实屏幕状态由下一个 ScreenStateChange
                 // 事件纠正（去重比较 is_screen_on，重置后的首个事件必然被处理）
                 is_screen_on = true;
-                // [PAUSED] scenemode 状态随息屏节电暂停，恢复时解开：
-                // screen_off_at = None;
-                // scene_hold_logged = false;
-                // scenemode_sat_since = None;
+                screen_off_at = None;
+                scene_mode_active = false;
+                scene_hold_logged = false;
+                scenemode_sat_since = None;
                 last_core_utils.clear();
                 std::thread::sleep(SCHEDULER_IPC_RESTART_BACKOFF);
                 // 按当前模式重新接管（等价亮屏恢复语义；特调/fast/fas 由后续事件重建）

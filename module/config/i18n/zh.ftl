@@ -58,10 +58,13 @@ screen-uevent-backlight = [Screen] 背光事件: { $dev } -> state={ $state }
 screen-uevent-backlight-unreadable = [Screen] 背光状态不可读: { $dev }
 screen-detect-source-found = [Screen] 屏幕状态检测源就绪: { $kind } @ { $path }
 screen-detect-no-source = [Screen] 未找到可用屏幕状态检测源（/sys/class/backlight、/sys/class/leds/*backlight*、/sys/class/graphics/fb0/blank 均不可用），屏幕状态无法自动校正，仅能依赖 uevent 事件
+screen-detect-read-failed = [Screen] 屏幕状态检测源读取失败（{ $kind } @ { $path }），连续失败将退役并切换下一个节点；读成功前不再重复告警
+screen-detect-nodes-exhausted = [Screen] 全部 { $count } 个屏幕状态节点已耗尽（不正确或矛盾），进入恒亮屏模式：不再检测息屏，屏幕状态永久按亮屏处理（宁可不节电，不可误判息屏卡死设备）
+screen-off-vetoed = [Screen] 息屏读数被亮屏否决: 节点 { $node } 报告亮屏（来源: { $source }），驳回息屏改判亮屏，并退役当前检测节点切换下一个
 screen-uevent-leds = [Screen] leds 背光事件: { $dev } -> state={ $state }
 screen-uevent-leds-unreadable = [Screen] leds 背光状态不可读: { $dev }
-scheduler-screen-on = [Scheduler] 亮屏触发事件: 已记录（息屏节电已暂停，调度保持当前状态）
-scheduler-screen-off = [Scheduler] 息屏触发事件: 已记录（息屏节电已暂停，调度保持当前状态）
+scheduler-screen-on = [Scheduler] 亮屏触发事件
+scheduler-screen-off = [Scheduler] 息屏触发事件
 
 # --- Monitors ---
 cpu-monitor-started = [CPU Monitor] eBPF 系统负载监控已启动 (修复长任务盲区)。
@@ -110,6 +113,7 @@ scheduler-event-config-reload = [Scheduler] 收到配置重载事件: 当前模�
 scheduler-special-mode-active = [Scheduler] 特调模式激活: { $pkg } -> { $mode }
 scheduler-akmode-cooldown = [Scheduler] 特调接管失败，进入 { $secs } 秒冷却，期间由 CLG 接管调度
 scheduler-scene-mode-enter = [Scheduler] 息屏已超过阈值，切换到 scenemode 省电模式
+scheduler-scene-mode-exit-fas = [Scheduler] FAS 重新激活，提前退出 scenemode（恢复全部在线核）
 scheduler-scene-mode-saturation = [Scheduler] scenemode 持续顶满性能上限（little util { $util }%），退回 powersave 并进入 300s 冷却
 
 # --- Scheduler: Config Watcher ---
@@ -198,7 +202,6 @@ scheduler-fas-activate = [Scheduler] FAS 实例激活: { $pkg } (pid={ $pid })
 scheduler-fas-switch = [Scheduler] FAS 实例热切换: { $old } -> { $new }
 scheduler-fas-deactivate = [Scheduler] FAS 实例去激活（频率已恢复）: { $pkg }
 scheduler-fas-destroy = [Scheduler] FAS 实例已注销（超过 60 秒未回前台）: { $pkg }
-scheduler-fas-screen-release = [Scheduler] FAS 息屏释放: 频率已恢复，息屏降载交由 CLG doze / scenemode 全局接管
 scheduler-fas-init-failed = [Scheduler] FAS 实例初始化失败，已回退 CLG: { $pkg }
 scheduler-fas-cooldown = [Scheduler] FAS 初始化失败已冷却，{ $secs } 秒内由 CLG 接管
 

@@ -11,11 +11,10 @@
 //!   必须先于任何其他 governor（CLG/akmode/fast）的 init，保证对方快照到真实状态；
 //!   非活跃实例的频率已在各自去激活时恢复，绝不再写（避免踩坏后续 governor）。
 //! - C3 注销：reap() —— 非活跃实例 last_fg 超过 FAS_INSTANCE_TTL 后移除（纯内存清理）。
-//! - C4 息屏释放：息屏时调用方 deactivate_active() 恢复频率并交由 CLG doze /
-//!   scenemode 全局接管，实例保留 60s；亮屏后由 ModeChange / 1s 兜底重新 activate()。
-//!   （原设计为息屏 enter_doze 写低频锁、亮屏 exit_doze 恢复，但锁频恢复依赖帧事件
-//!   驱动的 apply_freqs——锁屏前台无帧事件时全簇被锁死在最低频，亮屏后 0.2fps，
-//!   且息屏期间无法进入 CLG doze / scenemode，已废弃）
+//! - C4 息屏接管（2026-09 起，原「息屏释放」已废弃）：FAS 与屏幕状态完全解耦——
+//!   息屏不释放实例、不切 CLG doze；FAS 活跃即持有接管权，仅前台切换驱动
+//!   去激活。任意 FAS 实例存在（含后台保留实例，has_any_instance）期间
+//!   scenemode 禁止进入；FAS（重新）激活时优先于 scenemode（调用方负责先退出）。
 //! - C5 收尾：deactivate_all() —— panic/线程退出时恢复全部频率。
 //! - C6 事件路由：on_frame/on_load_update/温度刷新只作用于活跃实例。
 
@@ -212,6 +211,13 @@ impl FasManager {
 
     pub fn active_pkg(&self) -> Option<&str> {
         self.active_pkg.as_deref()
+    }
+
+    /// 是否存在任意 FAS 实例（活跃或后台保留）。
+    /// scenemode 入口门控依据：任意实例存在期间 scenemode 禁止进入；
+    /// 后台保留实例经 reap（60s TTL）移除后自动放行。
+    pub fn has_any_instance(&self) -> bool {
+        !self.instances.is_empty()
     }
 
     /// C6：帧事件（仅活跃实例）。内部每 FAS_TEMP_REFRESH 读一次 temp_path

@@ -59,10 +59,13 @@ screen-uevent-backlight = [Screen] backlight event: { $dev } -> state={ $state }
 screen-uevent-backlight-unreadable = [Screen] backlight state unreadable: { $dev }
 screen-detect-source-found = [Screen] Screen state source ready: { $kind } @ { $path }
 screen-detect-no-source = [Screen] No usable screen state source (/sys/class/backlight, /sys/class/leds/*backlight* and /sys/class/graphics/fb0/blank all unavailable); state cannot be self-healed, uevent events only
+screen-detect-read-failed = [Screen] Screen state source read failed ({ $kind } @ { $path }); node retired and next one selected after consecutive failures, no repeat until success
+screen-detect-nodes-exhausted = [Screen] All { $count } screen state nodes exhausted (incorrect or contradictory), entering always-on mode: screen-off detection disabled, screen state permanently treated as ON (prefer losing power saving over mis-detected screen-off freezing the device)
+screen-off-vetoed = [Screen] Screen-off reading vetoed: node { $node } reports ON (source: { $source }), rejected as screen-on, current detection node retired and switched
 screen-uevent-leds = [Screen] leds backlight event: { $dev } -> state={ $state }
 screen-uevent-leds-unreadable = [Screen] leds backlight state unreadable: { $dev }
-scheduler-screen-on = [Scheduler] Screen ON trigger event: recorded (screen-off power saving paused, scheduler state unchanged)
-scheduler-screen-off = [Scheduler] Screen OFF trigger event: recorded (screen-off power saving paused, scheduler state unchanged)
+scheduler-screen-on = [Scheduler] Screen ON trigger event
+scheduler-screen-off = [Scheduler] Screen OFF trigger event
 
 # --- Monitors ---
 cpu-monitor-started = [CPU Monitor] eBPF System Load monitor started (Long-task blind spot fixed).
@@ -111,6 +114,7 @@ scheduler-event-config-reload = [Scheduler] config reload event: mode={ $mode },
 scheduler-special-mode-active = [Scheduler] Special profile active: { $pkg } -> { $mode }
 scheduler-akmode-cooldown = [Scheduler] Special tuning takeover failed, entering { $secs }s cooldown; CLG takes over during cooldown
 scheduler-scene-mode-enter = [Scheduler] Screen off past threshold, switching to scenemode extreme power-saving.
+scheduler-scene-mode-exit-fas = [Scheduler] FAS re-activated, exiting scenemode early (all cores restored)
 scheduler-scene-mode-saturation = [Scheduler] scenemode perf ceiling saturated (little util { $util }%), falling back to powersave with 300s cooldown
 
 # --- Scheduler: Config Watcher ---
@@ -199,7 +203,6 @@ scheduler-fas-activate = [Scheduler] FAS instance activated: { $pkg } (pid={ $pi
 scheduler-fas-switch = [Scheduler] FAS instance hot-switched: { $old } -> { $new }
 scheduler-fas-deactivate = [Scheduler] FAS instance deactivated (frequencies restored): { $pkg }
 scheduler-fas-destroy = [Scheduler] FAS instance destroyed (not foregrounded for 60s): { $pkg }
-scheduler-fas-screen-release = [Scheduler] FAS released on screen OFF: frequencies restored, power saving delegated to CLG doze / scenemode
 scheduler-fas-init-failed = [Scheduler] FAS instance init failed, falling back to CLG: { $pkg }
 scheduler-fas-cooldown = [Scheduler] FAS init failed, entering { $secs }s cooldown; CLG takes over during cooldown
 
