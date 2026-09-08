@@ -61,7 +61,8 @@ screen-detect-source-found = [Screen] Screen state source ready: { $kind } @ { $
 screen-detect-no-source = [Screen] No usable screen state source (/sys/class/backlight, /sys/class/leds/*backlight* and /sys/class/graphics/fb0/blank all unavailable); state cannot be self-healed, uevent events only
 screen-detect-read-failed = [Screen] Screen state source read failed ({ $kind } @ { $path }); node retired and next one selected after consecutive failures, no repeat until success
 screen-detect-nodes-exhausted = [Screen] All { $count } screen state nodes exhausted (incorrect or contradictory), entering always-on mode: screen-off detection disabled, screen state permanently treated as ON (prefer losing power saving over mis-detected screen-off freezing the device)
-screen-off-vetoed = [Screen] Screen-off reading vetoed: node { $node } reports ON (source: { $source }), rejected as screen-on, current detection node retired and switched
+screen-off-vetoed = [Screen] Screen-off reading vetoed: node { $node } reports ON (source: { $source }), rejected as screen-on; node retired after 15s of persistent inconsistency
+screen-detect-node-switched = [Screen] Detection node persistently inconsistent/failed, retired { $retired }, switched to { $next }
 screen-uevent-leds = [Screen] leds backlight event: { $dev } -> state={ $state }
 screen-uevent-leds-unreadable = [Screen] leds backlight state unreadable: { $dev }
 scheduler-screen-on = [Scheduler] Screen ON trigger event

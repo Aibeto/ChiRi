@@ -26,7 +26,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::SyncSender;
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::common::DaemonEvent;
 use crate::fluent_args;
@@ -37,24 +37,29 @@ use crate::i18n::{t, t_with_args};
 /// uevent 线程直推（零轮询延迟），verify_screen_state 自愈路径的变化
 /// 由 app_detect 主循环兜底转发（其循环本身每轮比对 arc）。
 ///
-/// 两阶段息屏判定（2026-09）：正常情况只读主检测节点（省开销）；息屏事件
-/// （true→false 翻转）触发前扫描全部已知节点复核——任一节点读到亮屏即驳回
-/// 息屏改判亮屏（warn 打点），并退役报 OFF 的主节点、切换下一个（见
-/// retire_primary_and_switch）。所有息屏事件生产者（verify 自愈、power/
-/// backlight/leds uevent）共用本函数，策略天然覆盖全部息屏事件。
-/// 注意：否决扫描必须在拿 arc 锁之前——命中否决且全部节点耗尽时会进入
+/// 两阶段息屏判定（2026-09）：亮→息**翻转尝试**时做全节点复核——任一节点
+/// 读到亮屏即驳回息屏（warn 打点），并退役报 OFF 的主节点、切换下一个（见
+/// retire_primary_and_switch）。稳态（无翻转）快速返回不做扫描——稳态息屏
+/// 期的失真检测由 verify 的定时复核驱动，不随事件频率空跑全节点扫描。
+/// 所有息屏事件生产者（verify 自愈、power/backlight/leds uevent）共用本
+/// 函数，策略天然覆盖全部息屏事件。
+/// 注意：复核扫描必须在拿 arc 锁之前——命中驳回且全部节点耗尽时会进入
 /// 恒亮屏模式（enter_always_on 需要写 arc），持锁状态下会死锁。
 fn update_state_if_changed(state_arc: &Arc<Mutex<bool>>, new_state: bool, source: &str) -> bool {
-    // 恒亮屏模式：全部节点已耗尽，不再接受任何息屏事件（永久按亮屏处理）
-    if ALWAYS_ON.load(Ordering::Relaxed) {
-        if !new_state {
-            return false;
-        }
+    // 恒亮屏模式：全部节点已耗尽，拒绝一切息屏事件（永久按亮屏处理）
+    if !new_state && ALWAYS_ON.load(Ordering::Relaxed) {
+        return false;
     }
-    if new_state {
-        VETO_WARNED.store(false, Ordering::Relaxed);
-    } else {
-        // 息屏事件预检（亮屏否决）：在拿 arc 锁之前做全节点扫描
+    // 窥视当前状态（短锁）：稳态（无翻转）直接返回，不做全节点扫描
+    let current = *state_arc.lock().unwrap();
+    if new_state == current {
+        if new_state {
+            VETO_WARNED.store(false, Ordering::Relaxed);
+        }
+        return false;
+    }
+    if !new_state {
+        // 亮→息翻转尝试：全节点复核，任一节点亮屏即驳回息屏（立即生效）
         if let Some(node) = screen_on_reading_from_any_node() {
             if !VETO_WARNED.swap(true, Ordering::Relaxed) {
                 warn!(
@@ -65,10 +70,18 @@ fn update_state_if_changed(state_arc: &Arc<Mutex<bool>>, new_state: bool, source
                     )
                 );
             }
-            // 主节点报 OFF 却被其他节点驳回：该节点读数矛盾，退役并切换下一个
-            retire_primary_and_switch(state_arc);
+            // 主节点报 OFF 却被其他节点驳回：读数矛盾。退役切换延迟 15s——
+            // 单次不一致可能是瞬时毛刺，持续不一致才切换（见
+            // INCONSISTENCY_SWITCH_DELAY）；期间息屏事件持续驳回
+            if inconsistency_due_for_switch() {
+                retire_primary_and_switch(state_arc);
+            }
             return false;
         }
+        // 全节点一致 OFF：接受息屏，一致性恢复，清不一致计时
+        INCONSISTENT_SINCE.lock().unwrap().take();
+    } else {
+        VETO_WARNED.store(false, Ordering::Relaxed);
     }
     let mut state_lock = state_arc.lock().unwrap();
     if *state_lock != new_state {
@@ -83,7 +96,7 @@ fn update_state_if_changed(state_arc: &Arc<Mutex<bool>>, new_state: bool, source
                 )
             )
         );
-        info!(
+        debug!(
             "{}",
             t_with_args(
                 "screen-state-change-detected",
@@ -92,7 +105,7 @@ fn update_state_if_changed(state_arc: &Arc<Mutex<bool>>, new_state: bool, source
         );
         *state_lock = new_state;
         let state_str = if new_state { "ON" } else { "OFF" };
-        info!(
+        debug!(
             "{}",
             t_with_args(
                 "screen-state-changed-value",
@@ -153,6 +166,22 @@ static RETIRED_NODES: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 static ALWAYS_ON: AtomicBool = AtomicBool::new(false);
 /// 恒亮屏 error 打点去重（仅一次）
 static ALWAYS_ON_LOGGED: AtomicBool = AtomicBool::new(false);
+/// 稳态息屏期全节点复核间隔：arc 已 OFF 期间每该时长全节点扫描一次，
+/// 检测主节点失真（息屏不清零/读数卡死会让 arc 永久滞留 OFF——scenemode/
+/// prime 下线无法退出，亮屏使用中超大核异常离线）。息屏期 verify ~1s 一轮，
+/// 10s 复核 = 每 ~10 轮多读几个小文件，开销可忽略。
+const OFF_REVIEW_INTERVAL: Duration = Duration::from_secs(10);
+/// 稳态息屏复核计时器（记录器）：上次全节点复核时刻；None = 尚未复核过
+/// （进入息屏后首轮即复核一次）
+static LAST_OFF_REVIEW: Mutex<Option<Instant>> = Mutex::new(None);
+/// 不一致切换延迟：主节点息屏读数被其他节点亮屏驳回后，**持续不一致达到
+/// 该时长才退役主节点并切换**——单次不一致可能是瞬时毛刺，立即换节点反而
+/// 抖动；期间息屏事件照常驳回（亮屏优先，宁可不节电）
+const INCONSISTENCY_SWITCH_DELAY: Duration = Duration::from_secs(15);
+/// 不一致起始时刻（记录器）：None = 当前主节点无不一致；Some(t) = 自 t 起
+/// 持续不一致。清零时机：主节点读到 ON（verify）/ 息屏转换被全节点一致
+/// 接受 / 稳态复核全节点一致 OFF / 退役切换后（新主节点重新计时）
+static INCONSISTENT_SINCE: Mutex<Option<Instant>> = Mutex::new(None);
 
 /// fb0/blank 节点路径（fbdev 旧接口，FB_BLANK 权威灭屏信号；0 = unblank 亮）
 const FB0_BLANK: &str = "/sys/class/graphics/fb0/blank";
@@ -219,6 +248,19 @@ fn screen_source() -> Option<(PathBuf, ScreenSourceKind)> {
     cache.clone()
 }
 
+/// 登记一次「主节点息屏读数被亮屏驳回」的不一致，返回是否已持续达到
+/// 切换延迟（应退役主节点切换下一个）。首次不一致仅启动计时，不切换。
+fn inconsistency_due_for_switch() -> bool {
+    let mut since = INCONSISTENT_SINCE.lock().unwrap();
+    match *since {
+        None => {
+            *since = Some(Instant::now());
+            false
+        }
+        Some(t) => t.elapsed() >= INCONSISTENCY_SWITCH_DELAY,
+    }
+}
+
 /// 进入恒亮屏模式：全部候选节点耗尽（不正确或矛盾）——不再检测息屏，屏幕
 /// 状态永久按亮屏处理。error 打点一次（比 warn 高一级，提示所有节点均不正确
 /// 或矛盾）。若当前 arc 为 OFF，校正为 ON——app_detect 主循环会把该变化转发
@@ -226,6 +268,7 @@ fn screen_source() -> Option<(PathBuf, ScreenSourceKind)> {
 /// 注意：调用方不得持有 arc 锁（本函数经 update_state_if_changed 写 arc）。
 fn enter_always_on(state_arc: &Arc<Mutex<bool>>) {
     ALWAYS_ON.store(true, Ordering::Relaxed);
+    INCONSISTENT_SINCE.lock().unwrap().take();
     if !ALWAYS_ON_LOGGED.swap(true, Ordering::Relaxed) {
         let count = RETIRED_NODES.lock().unwrap().len();
         error!(
@@ -239,13 +282,17 @@ fn enter_always_on(state_arc: &Arc<Mutex<bool>>) {
     update_state_if_changed(state_arc, true, "always-on");
 }
 
-/// 退役当前主节点并切换到下一个未退役候选（息屏被驳回 = 主节点读数矛盾；
-/// 节点持续不可读/不存在 = 节点失效——两种情况都「直接再切一个节点」）。
-/// 全部候选退役 → 恒亮屏模式（error 一次，不再检测息屏）。
-/// 注意：调用方不得持有 arc 锁（耗尽路径经 enter_always_on 写 arc）。
+/// 退役当前主节点并切换到下一个未退役候选（息屏读数被驳回且不一致持续
+/// 超过 15s = 主节点读数矛盾；节点持续不可读/不存在 = 节点失效——两种
+/// 情况都「再切一个节点」）。全部候选退役 → 恒亮屏模式（error 一次，不再
+/// 检测息屏）。注意：调用方不得持有 arc 锁（耗尽路径经 enter_always_on 写 arc）。
 fn retire_primary_and_switch(state_arc: &Arc<Mutex<bool>>) {
     // 1) 当前主源登记退役（None = 本就无主源，仅尝试补选）
     let retired = SCREEN_SOURCE.lock().unwrap().take();
+    let retired_str = retired
+        .as_ref()
+        .map(|(d, _)| d.display().to_string())
+        .unwrap_or_else(|| "-".to_string());
     if let Some((dev, _)) = retired {
         let mut set = RETIRED_NODES.lock().unwrap();
         if !set.contains(&dev) {
@@ -254,9 +301,21 @@ fn retire_primary_and_switch(state_arc: &Arc<Mutex<bool>>) {
     }
     // 2) 切换到下一个未退役候选
     match select_primary_node() {
-        Some(next) => {
-            *SCREEN_SOURCE.lock().unwrap() = Some(next);
+        Some((next, kind)) => {
+            *SCREEN_SOURCE.lock().unwrap() = Some((next.clone(), kind));
             SCREEN_READ_FAILS.store(0, Ordering::Relaxed);
+            // 新主节点重新计时（15s 不一致窗口重新开始）
+            INCONSISTENT_SINCE.lock().unwrap().take();
+            warn!(
+                "{}",
+                t_with_args(
+                    "screen-detect-node-switched",
+                    &fluent_args!(
+                        "retired" => retired_str,
+                        "next" => next.display().to_string()
+                    )
+                )
+            );
         }
         None => {
             // 无候选可选：曾有候选（全部退役）→ 恒亮屏；系统本就无任何候选
@@ -404,6 +463,52 @@ pub fn verify_screen_state(state_arc: &Arc<Mutex<bool>>) {
                     );
                 }
                 update_state_if_changed(state_arc, state, kind.as_str());
+                if state {
+                    // 主节点读到 ON：息屏读数矛盾已消失，清不一致计时
+                    INCONSISTENT_SINCE.lock().unwrap().take();
+                } else {
+                    // 稳态息屏定时复核：arc 已 OFF 期间每 OFF_REVIEW_INTERVAL 全节点
+                    // 扫描一次，兜住「主节点失真把 arc 永久钉在 OFF」——否则
+                    // scenemode/prime 下线无法退出，亮屏使用中超大核异常离线
+                    // （翻转路径的全节点复核只覆盖「亮→息」瞬间，盖不住稳态）。
+                    // 复核发现任一节点亮屏 → 主节点读数失真：切换需不一致持续
+                    // 15s（INCONSISTENCY_SWITCH_DELAY），随后强制改判亮屏（经
+                    // update_state_if_changed 写 arc，app_detect 每轮比对转发
+                    // ScreenStateChange(true)，scenemode 退出恢复 prime）。
+                    let due = {
+                        let mut last = LAST_OFF_REVIEW.lock().unwrap();
+                        match *last {
+                            Some(t) if t.elapsed() < OFF_REVIEW_INTERVAL => false,
+                            _ => {
+                                *last = Some(Instant::now());
+                                true
+                            }
+                        }
+                    };
+                    if due {
+                        if let Some(node) = screen_on_reading_from_any_node() {
+                            if !VETO_WARNED.swap(true, Ordering::Relaxed) {
+                                warn!(
+                                    "{}",
+                                    t_with_args(
+                                        "screen-off-vetoed",
+                                        &fluent_args!(
+                                            "source" => "steady-review",
+                                            "node" => node
+                                        )
+                                    )
+                                );
+                            }
+                            if inconsistency_due_for_switch() {
+                                retire_primary_and_switch(state_arc);
+                            }
+                            update_state_if_changed(state_arc, true, "steady-review");
+                        } else {
+                            // 全节点一致 OFF：一致性恢复，清不一致计时
+                            INCONSISTENT_SINCE.lock().unwrap().take();
+                        }
+                    }
+                }
             }
             None => {
                 let fails = SCREEN_READ_FAILS.fetch_add(1, Ordering::Relaxed) + 1;

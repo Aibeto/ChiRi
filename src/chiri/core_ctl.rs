@@ -172,8 +172,9 @@ impl CoreCtlManager {
     /// - `scenemode`：prime 整簇下线（小核+大核常驻），独占一颗小核给调度服务。
     /// 两者互斥；切换时先退出旧状态（恢复快照）再进入新状态。
     /// scenemode 维持期每次调用都会纠偏（重新下线被外部拉起的核）。
-    /// STATE_NONE 下若仍有恢复失败的核残留，周期性重试恢复
-    /// （restore_online 失败不 clear，见其注释——防核永久离线）。
+    /// NONE / BOOST 稳态下若仍有恢复失败的核残留（restore_online 失败不
+    /// clear，见其注释），每 2s 周期重试恢复——BOOST 期不重试会让 scenemode
+    /// 退出的残留核（典型 = prime 超大核）在整段 boost 会话中保持离线。
     pub fn set_power_state(&mut self, boost: bool, scenemode: bool) {
         let target = if boost {
             STATE_BOOST
@@ -186,8 +187,10 @@ impl CoreCtlManager {
             if target == STATE_SCENEMODE {
                 // 维持期纠偏：厂商热插拔守护进程可能把核悄悄拉回来
                 self.reassert_offline();
-            } else if target == STATE_NONE && !self.offlined.is_empty() {
-                // 亮屏恢复路径：上次 restore 有核写回失败，2s 后重试
+            } else if !self.offlined.is_empty() {
+                // 恢复失败残留核的周期重试（NONE 与 BOOST 稳态）：亮屏恢复/
+                // boost 进入前的那次 restore 失败后，若 BOOST 期不再重试，
+                // prime 会持续离线直到模式切换——游戏整场无超大核
                 self.restore_online();
             }
             return;
