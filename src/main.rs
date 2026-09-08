@@ -146,6 +146,38 @@ fn main() -> Result<()> {
     load_language(&language);
     logger::init(&loglevel)?;
 
+    // 全局 panic 钩子：任何线程的 panic 都落盘到 daemon.log。
+    // 此前 panic 消息只写 stderr（守护进程的 stderr 无人接收），调度线程
+    // 崩溃后日志里零痕迹——status.csv 只能反推死亡时间线，无法定位原因。
+    // 钩子内**不得调用 i18n**：钩子在 unwind 开始前于 panic 线程执行，若
+    // panic 发生在持有 BUNDLE 锁的代码段（load_language 写锁 / fluent 格式化
+    // 持有的读锁），此刻锁尚未释放，钩子再请求同一把不可重入的锁会死锁；
+    // 且 fluent 自身可能就是 panic 源，钩子内复用会二次 panic 直接 abort。
+    // 这里只用纯格式化 + log::error!（SelfHealingAppender 全路径无 panic、
+    // 不依赖任何业务锁），保证钩子自身零崩溃风险。消息用英文格式（panic
+    // payload 本身即英文，检索一致性优先于界面语言）。
+    {
+        std::panic::set_hook(Box::new(|info| {
+            let payload = info.payload();
+            let msg = if let Some(s) = payload.downcast_ref::<&'static str>() {
+                (*s).to_string()
+            } else if let Some(s) = payload.downcast_ref::<String>() {
+                s.clone()
+            } else {
+                "<non-string panic payload>".to_string()
+            };
+            let loc = info
+                .location()
+                .map(|l| format!("{}:{}", l.file(), l.line()))
+                .unwrap_or_else(|| "<unknown>".to_string());
+            let thread_name = std::thread::current()
+                .name()
+                .unwrap_or("<unnamed>")
+                .to_string();
+            log::error!("[PANIC] thread \"{thread_name}\" panicked: {msg} (at {loc})");
+        }));
+    }
+
     // 日志系统就绪后输出归档结果（归档线程在 logger::init 之前已启动，不阻塞）
     if let Some(zip) = &archived_zip {
         info!(

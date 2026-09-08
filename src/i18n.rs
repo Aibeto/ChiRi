@@ -67,7 +67,9 @@ pub fn load_language(lang: &str) {
 
     match load_bundle(lang) {
         Ok(new_bundle) => {
-            let mut bundle_lock = BUNDLE.write().unwrap();
+            // 毒化防御：锁持有者 panic 后继续可用（与 logger/core_ctl 口径一致），
+            // 翻译服务绝不能因锁状态崩溃
+            let mut bundle_lock = BUNDLE.write().unwrap_or_else(|p| p.into_inner());
             *bundle_lock = new_bundle;
             log::info!(
                 "[i18n] Successfully loaded and switched to language: {}",
@@ -87,7 +89,7 @@ pub fn load_language(lang: &str) {
 
 /// 获取翻译文本
 pub fn t(key: &str) -> String {
-    let bundle = BUNDLE.read().unwrap();
+    let bundle = BUNDLE.read().unwrap_or_else(|p| p.into_inner());
     let msg = match bundle.get_message(key) {
         Some(msg) => msg,
         None => return key.to_string(),
@@ -114,7 +116,7 @@ pub fn t(key: &str) -> String {
 
 /// 获取带参数的翻译文本
 pub fn t_with_args(key: &str, args: &FluentArgs) -> String {
-    let bundle = BUNDLE.read().unwrap();
+    let bundle = BUNDLE.read().unwrap_or_else(|p| p.into_inner());
     let msg = match bundle.get_message(key) {
         Some(msg) => msg,
         None => return key.to_string(),
