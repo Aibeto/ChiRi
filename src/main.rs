@@ -35,6 +35,35 @@ use std::thread;
 use crate::scheduler::config::Config;
 
 fn main() -> Result<()> {
+    // 0. 进程自保：脱离派生方的会话与管道。
+    //    背景：模块热更新 / Action 按钮重启调度时，看门狗与 daemon 由管理器
+    //    app（KSU 等）的 su 会话派生——管理器被关闭（从最近任务划掉/被系统
+    //    杀后台）时，su 会话清理按会话/进程组连带终止调度服务，且看门狗同
+    //    死、无人拉起（boot 时 service.sh 由 ksud 系统执行不受影响，故表现
+    //    为「热更新场景下关闭管理器 app，调度就停」）。shell 层的 setsid 在
+    //    busybox 缺失时退化为 nohup（只忽略 SIGHUP、不换会话）无法兜底，
+    //    此处在 daemon 侧原生处理，覆盖全部启动路径：
+    //    - prctl(PR_SET_PDEATHSIG, 0)：显式归零父死信号，父进程死亡不牵连；
+    //    - setsid()：自成新会话、脱离原进程组（已是会话首进程时 EPERM，
+    //      忽略——说明上层 shell 已 setsid 成功）；
+    //    - stdio 重定向到 /dev/null：su 会话的管道在管理器死后断裂，重定向
+    //      后 daemon 与派生方再无任何 fd 关联（日志全走 log4rs/devimp 落盘，
+    //      panic 由全局钩子写 daemon.log，不依赖 stderr）。
+    #[cfg(unix)]
+    unsafe {
+        libc::prctl(libc::PR_SET_PDEATHSIG, 0, 0, 0, 0);
+        libc::setsid();
+        let null_fd = libc::open(b"/dev/null\0".as_ptr() as *const libc::c_char, libc::O_RDWR);
+        if null_fd >= 0 {
+            for fd in [0, 1, 2] {
+                libc::dup2(null_fd, fd);
+            }
+            if null_fd > 2 {
+                libc::close(null_fd);
+            }
+        }
+    }
+
     // 1. 环境初始化
     let chdir_path = std::env::args().nth(1);
     if let Some(path) = &chdir_path {

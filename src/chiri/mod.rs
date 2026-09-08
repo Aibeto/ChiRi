@@ -1739,7 +1739,11 @@ pub fn start_scheduler_thread(
                             &fluent_args!("count" => SCHEDULER_IPC_RESTART_MAX.to_string())
                         )
                     );
-                    break;
+                    // 极端兜底：看门狗（service.sh）只监控**进程**存活（前台运行
+                    // daemon、退出后 3s 拉起），线程级死亡它永远感知不到——上面
+                    // 已把 CPU 控制权清理到安全态，此处退出整个进程交给看门狗
+                    // 按进程级拉起全新 daemon（启动初始化含 force_online_all 全核上线）
+                    std::process::exit(1);
                 }
                 // 重置状态机到亮屏安全态：真实屏幕状态由下一个 ScreenStateChange
                 // 事件纠正（去重比较 is_screen_on，重置后的首个事件必然被处理）
