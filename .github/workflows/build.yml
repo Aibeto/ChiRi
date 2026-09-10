@@ -76,11 +76,23 @@ jobs:
           echo "ANDROID_NDK_HOME=${{ steps.setup-ndk.outputs.ndk-path }}" >> $GITHUB_ENV
           cargo install cargo-ndk
 
-      # 8. 运行 xtask 构建（仅组装目录，不预打包 zip；GitHub 下载产物时会自动压缩）
+      # 8. 删除模块文本文件中的注释行（编译打包前）
+      #    仅处理会打进模块包的文本文件（sh/yaml/ftl）中的整行 # 注释；
+      #    保留 shebang（#!），并排除 META-INF（updater-script 的 #MAGISK 为必需
+      #    标记）与无扩展名的标记文件。
+      - name: Strip comments in module files
+        run: |
+          find module -type f \
+            \( -name '*.sh' -o -name '*.block' -o -name '*.yaml' -o -name '*.yml' -o -name '*.ftl' \) \
+            -not -path 'module/META-INF/*' -print0 | while IFS= read -r -d '' f; do
+            perl -i -ne 'print if /^\s*#!/ || !/^\s*#/' "$f"
+          done
+
+      # 9. 运行 xtask 构建（仅组装目录，不预打包 zip；GitHub 下载产物时会自动压缩）
       - name: Run xtask build
         run: cargo xtask build --no-pack
 
-      # 9. 动态获取 xtask 生成的模块目录（按 module.prop 命名）
+      # 10. 动态获取 xtask 生成的模块目录（按 module.prop 命名）
       - name: Resolve Artifact Directory
         id: artifact
         run: |
@@ -92,7 +104,7 @@ jobs:
           echo "name=$DIR_NAME" >> "$GITHUB_OUTPUT"
           echo "path=$DIR_PATH" >> "$GITHUB_OUTPUT"
 
-      # 10. 上传整个模块目录（不做预打包，交由 GitHub 统一压缩成 <name>.zip）
+      # 11. 上传整个模块目录（不做预打包，交由 GitHub 统一压缩成 <name>.zip）
       - name: Upload Build Artifact
         uses: actions/upload-artifact@v7
         with:

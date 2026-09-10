@@ -2,7 +2,7 @@
 
 use inotify::{Inotify, WatchMask};
 use log::{debug, info, warn};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::error::Error;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};

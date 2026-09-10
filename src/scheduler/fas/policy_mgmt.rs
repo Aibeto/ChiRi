@@ -4,7 +4,7 @@ use crate::fas_types::{ClusterProfile, FasRulesConfig};
 use crate::utils::FastWriter;
 use log::{info, warn};
 use std::fs;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use crate::fluent_args;
 use crate::i18n::{t, t_with_args};
