@@ -1,3 +1,4 @@
+# zh.ftl: [main-monitor] [app-detect] [screen-detect] [monitors] [scheduler] [scheduler-config-watcher] [sysfs] [clg] [akmode] [touch] [fas] [fas-whitelist] [scheduler-settings] [fast-lock] [logger] [affinity] [corectl] [telemetry] [config-reload]
 # --- Main & Monitor ---
 yumi-module-starting = yumi-module 统一启动中...
 scheduler-module-started = 调度器模块已启动
@@ -17,7 +18,7 @@ main-chdir = [Main] 切换工作目录到: { $dir }
 main-module-root = [Main] 模块根目录: { $path }
 main-config-loaded = [Main] 已读取配置: { $path } (loglevel={ $loglevel }, language={ $language })
 main-chiri-scheduler-selected = [Main] 检测到特定处理器，已启用 Chiri 专用调度器
-main-special-tuned-exported = [Main] 已导出 { $count } 个内部特调白名单条目到 special_tuned.txt
+main-special-tuned-exported = [Main] 已导出 { $count } 个内部特调白名单条目到 special_tuned.yaml
 main-log-archive-submitted = [Main] 上一轮日志已归档，后台打包至 logd/{ $zip }
 main-devimp-archive-submitted = [Main] 上一轮 devimp 诊断日志已归档，后台打包至 logd/{ $zip }
 monitor-thread-start-screen = [Main] 启动屏幕状态监控线程...
@@ -115,6 +116,8 @@ scheduler-special-mode-active = [Scheduler] 特调模式激活: { $pkg } -> { $m
 scheduler-akmode-cooldown = [Scheduler] 特调接管失败，进入 { $secs } 秒冷却，期间由 CLG 接管调度
 scheduler-scene-mode-enter = [Scheduler] 息屏已超过阈值，切换到 scenemode 省电模式
 scheduler-scene-mode-exit-fas = [Scheduler] FAS 重新激活，提前退出 scenemode（恢复全部在线核）
+scheduler-scene-mode-exit-switch = [Scheduler] scenemode_enabled 已关闭，退出 scenemode 并恢复息屏低功耗配置
+scheduler-fas-switch-off = [Scheduler] fas_enabled 已关闭，注销全部 FAS 实例并恢复调度接管
 scheduler-scene-mode-saturation = [Scheduler] scenemode 持续顶满性能上限（little util { $util }%），退回 powersave 并进入 300s 冷却
 
 # --- Scheduler: Config Watcher ---
@@ -151,6 +154,8 @@ clg-touch-boost = [CLG] 触摸升频窗口开启：大核性能下限={ $floor }
 clg-thermal-cap = [CLG] 热保护压制: 电池={ $batt }°C / CPU={ $cpu }°C，性能上限压至 { $cap }%（≥{ $free } 豁免）
 clg-thermal-no-sensor = [CLG] 热保护: 未找到 CPU 温度传感器，CPU 参考停用
 clg-thermal-no-battery = [CLG] 热保护: 未找到电池温度节点，仅按 CPU 温度压制
+battery-temp-scale = [Thermal] 电池温度刻度预识别: { $unit }（换算除数 { $divisor }），CLG 热保护与 FAS 温度护栏共用
+battery-temp-scale-unknown = [Thermal] 电池温度刻度预识别未得出结论（节点缺失或读数未就绪），本次退化为仅 CPU 温度
 clg-min-write-failed = [CLG] P{ $pid } 写入 scaling_min_freq={ $khz }MHz 失败，空闲频率地板可能偏高
 
 # --- AKMode（明日方舟特调） ---
@@ -195,7 +200,7 @@ fas-rules-reloaded = [FAS] 规则已热重载 (冗余={ $margin }, 地板={ $flo
 fas-policy-writer-invalid = [FAS] P{ $pid } 策略写入器无效 (max_valid: { $max_valid }, min_valid: { $min_valid })，已跳过。
 
 # --- FAS（白名单/调度集成）---
-main-fas-whitelist-exported = [Main] 已导出 { $count } 个 FAS 白名单条目到 fas_whitelist.txt
+main-fas-whitelist-exported = [Main] 已导出 { $count } 个 FAS 白名单条目到 fas_whitelist.yaml
 app-detect-fas-fallback = [AppDetect] 前台应用命中 FAS 白名单，进入 FAS 模式: { $pkg }
 app-detect-fas-rejected = [AppDetect] 非白名单应用 { $pkg } 映射到 FAS 模式 { $mode } 已拒绝，回退全局模式
 app-detect-fas-global-rejected = [AppDetect] 全局模式 { $mode } 为 FAS 模式，不适用于非白名单应用 { $pkg }，回退 balance

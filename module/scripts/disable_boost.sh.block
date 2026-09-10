@@ -1,5 +1,8 @@
 #!/system/bin/sh
+# disable_boost.sh: [write-helper] [kernel-boost] [cpuset-system-boost] [vendor-boost] [main]
 
+# [write-helper] 
+# 通用节点写入函数
 write_value() {
     local path_pattern="$1"
     local value="$2"
@@ -17,6 +20,8 @@ write_value() {
     fi
 }
 
+# [kernel-boost] 
+# 禁用各厂商内核与调度框架的 boost 节点
 disable_kernel_boost() {
     echo "正在禁用内核 Boost..."
 
@@ -75,6 +80,8 @@ disable_kernel_boost() {
     write_value "/proc/sys/walt/input_boost/*" "0"
 }
 
+# [cpuset-system-boost] 
+# 禁用 cpuset 提速目录与厂商系统服务 boost
 disable_cpuset_boost() {
     echo "正在禁用 Cpuset Boost..."
     if [ -d /dev/cpuset/foreground/boost ]; then
@@ -106,6 +113,8 @@ disable_system_boost() {
     chmod 0000 /dev/migt 2>/dev/null
 }
 
+# [vendor-boost] 
+# 禁用厂商（一加/魅族/高通等）的游戏与性能加速
 disable_oneplus_game_boost() {
     if [ -e /proc/game_opt ]; then
         echo "正在禁用 OnePlus Game Boost..."
@@ -186,6 +195,8 @@ disable_msm_performance() {
     write_value "/sys/kernel/msm_performance/parameters/cpu_max_freq" "0:9999999 1:9999999 2:9999999 3:9999999 4:9999999 5:9999999 6:9999999 7:9999999"
 }
 
+# [main] 
+# 入口：依次执行全部禁用项
 main() {
     echo "正在禁用系统 Boost..."
     

@@ -1,3 +1,5 @@
+//! yumi-ebpf/src/main.rs: [fps-probe] [cpu-probe] [telemetry-probes] [helpers]
+
 /*
  * Copyright (C) 2026 yuki
  *
@@ -24,9 +26,8 @@ use aya_ebpf::{
     programs::{ProbeContext, TracePointContext},
 };
 
-// ═══════════════════════════════════════════════════════════════
-//  FPS Probe — uprobe on Surface::queueBuffer
-// ═══════════════════════════════════════════════════════════════
+// [fps-probe]
+// FPS Probe — uprobe on Surface::queueBuffer
 
 #[repr(C)]
 pub struct FrameTimestampEvent {
@@ -58,17 +59,16 @@ fn try_handle_frame(_ctx: ProbeContext) -> Result<u32, u32> {
     Ok(0)
 }
 
-// ═══════════════════════════════════════════════════════════════
-//  CPU Probe — tracepoint on sched/sched_switch
-// ═══════════════════════════════════════════════════════════════
+// [cpu-probe]
+// CPU Probe — tracepoint on sched/sched_switch
 
 // sched_switch 参数布局 (offset → field)
 //  0: pad            u64
-//  8: prev_comm      [u8; 16]
+//  8: prev_comm     [u8; 16]
 // 24: prev_pid       i32
 // 28: prev_prio      i32
 // 32: prev_state     i64
-// 40: next_comm      [u8; 16]
+// 40: next_comm     [u8; 16]
 // 56: next_pid       i32
 // 60: next_prio      i32
 const OFF_PREV_PID: usize = 24;
@@ -105,10 +105,9 @@ static TGID_RUN_TIME: HashMap<u32, u64> = HashMap::with_max_entries(1024, 0);
 const ZERO_KEY: u32 = 0;
 const NS_10_SEC: u64 = 10_000_000_000;
 
-// ═══════════════════════════════════════════════════════════════
-//  Telemetry Probes — 唤醒 / 线程迁移 / 频率切换计数（ChiRi 专属遥测）
-//  userspace 每 2s 读取累计值取增量；探针挂载失败（内核缺 tracepoint）不影响主探针
-// ═══════════════════════════════════════════════════════════════
+// [telemetry-probes]
+// Telemetry Probes — 唤醒 / 线程迁移 / 频率切换计数（ChiRi 专属遥测）
+// userspace 每 2s 读取累计值取增量；探针挂载失败（内核缺 tracepoint）不影响主探针
 
 /// sched_wakeup 唤醒次数（全核累计）
 #[map]
@@ -172,12 +171,16 @@ fn try_handle_sched_switch(ctx: &TracePointContext) -> Result<u32, i64> {
             if prev_tid == 0 {
                 // Idle 时间
                 if let Some(idle_ptr) = CORE_IDLE_TIME.get_ptr_mut(ZERO_KEY) {
-                    unsafe { *idle_ptr += delta; }
+                    unsafe {
+                        *idle_ptr += delta;
+                    }
                 }
             } else {
                 // Busy 时间
                 if let Some(busy_ptr) = CORE_BUSY_TIME.get_ptr_mut(ZERO_KEY) {
-                    unsafe { *busy_ptr += delta; }
+                    unsafe {
+                        *busy_ptr += delta;
+                    }
                 }
 
                 // 线程级累计
@@ -202,10 +205,14 @@ fn try_handle_sched_switch(ctx: &TracePointContext) -> Result<u32, i64> {
     Ok(0)
 }
 
+// [helpers]
+
 /// 向 HashMap 累加 delta（查找然后 +=，不存在则 insert）
 fn add_to_hash(map: &HashMap<u32, u64>, key: u32, delta: u64) {
     if let Some(ptr) = map.get_ptr_mut(&key) {
-        unsafe { *ptr += delta; }
+        unsafe {
+            *ptr += delta;
+        }
     } else {
         let _ = map.insert(&key, &delta, 0);
     }
@@ -214,11 +221,11 @@ fn add_to_hash(map: &HashMap<u32, u64>, key: u32, delta: u64) {
 /// 更新 PerCpuArray 中 key 对应的值
 fn update_percpu<T: Copy>(map: &PerCpuArray<T>, key: &u32, val: &T) {
     if let Some(ptr) = map.get_ptr_mut(*key) {
-        unsafe { *ptr = *val; }
+        unsafe {
+            *ptr = *val;
+        }
     }
 }
-
-// ────────────────────────────────────────────────
 
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {

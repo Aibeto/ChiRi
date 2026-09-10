@@ -1,4 +1,5 @@
 <script setup lang="ts">
+// App.vue: [global-init] [layout] [global-style]
 // 可以在这里做全局初始化，目前暂时留空
 </script>
 
@@ -13,7 +14,8 @@
 body {
   margin: 0;
   padding: 0;
-  background-color: #f7f8fa; /* 浅灰色背景，类似 MIUI 设置页 */
+  background-color: #f7f8fa;
+  /* 浅灰色背景，类似 MIUI 设置页 */
   font-family: -apple-system, BlinkMacSystemFont, 'Helvetica Neue', Helvetica, Segoe UI, Arial, Roboto, 'PingFang SC', 'miui', 'Hiragino Sans GB', 'Microsoft Yahei', sans-serif;
 }
 </style>

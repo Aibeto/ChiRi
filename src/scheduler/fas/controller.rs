@@ -1,19 +1,4 @@
-/*
- * Copyright (C) 2026 yuki
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
- */
+//! controller.rs: [struct] [load] [helpers] [game]
 
 use crate::fas_types::{FasRulesConfig, PerAppProfile};
 use log::{info, warn};
@@ -26,12 +11,11 @@ use super::fps_window::FpsWindow;
 use super::pid::{PidController, fps_norm};
 use super::policy_controller::PolicyController;
 
-// ════════════════════════════════════════════════════════════════
-//  FasController — 主控制器
+// [struct] 
+// FasController — 主控制器
 //
-//  帧率档位匹配 + PID 控制
-//  CPU 负载集成: core_utils 参与频率分配
-// ════════════════════════════════════════════════════════════════
+// 帧率档位匹配 + PID 控制
+// CPU 负载集成: core_utils 参与频率分配
 
 pub struct FasController {
     pub(super) cfg: FasRulesConfig,
@@ -176,9 +160,8 @@ impl FasController {
         }
     }
 
-    // ════════════════════════════════════════════════════════════
-    //  CPU 负载接口 (来自 SystemLoadUpdate 事件)
-    // ════════════════════════════════════════════════════════════
+    // [load] 
+    // CPU 负载接口 (来自 SystemLoadUpdate 事件)
 
     /// 更新前台最重线程的 CPU 利用率
     pub fn update_cpu_util(&mut self, fg_util: f32) {
@@ -203,9 +186,8 @@ impl FasController {
         self.core_utils.extend_from_slice(utils);
     }
 
-    // ════════════════════════════════════════════════════════════
-    //  辅助方法
-    // ════════════════════════════════════════════════════════════
+    // [helpers] 
+    // 辅助方法
 
     /// 获取有效 perf_floor —— 根据目标帧率动态抬高地板
     /// 高刷游戏 (120/144fps) 的 budget 仅 6.9~8.3ms，perf 过低会导致
@@ -295,9 +277,8 @@ impl FasController {
         (self.current_target_fps + self.target_fps_offset).max(10.0)
     }
 
-    // ════════════════════════════════════════════════════════════
-    //  公共接口：游戏生命周期
-    // ════════════════════════════════════════════════════════════
+    // [game] 
+    // 公共接口：游戏生命周期
 
     /// 通知 FAS 当前前台游戏变化
     pub fn set_game(&mut self, _pid: i32, package: &str) {

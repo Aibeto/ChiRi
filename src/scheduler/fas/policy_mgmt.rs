@@ -1,19 +1,4 @@
-/*
- * Copyright (C) 2026 yuki
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
- */
+//! policy_mgmt.rs: [reload] [apply] [load] [reset]
 
 use crate::fas_types::{ClusterProfile, FasRulesConfig};
 use crate::utils::FastWriter;
@@ -28,6 +13,8 @@ use super::FasController;
 use super::pid::PidController;
 use super::policy_controller::PolicyController;
 
+// [reload]
+// 规则热重载
 impl FasController {
     /// 热重载规则（预留能力：当前 FAS 配置为编译期嵌入（module/config/normal/fas/<app>.yaml），
     /// 每实例在 activate 时 load_policies 定型，ConfigReload 不再重载 FAS，本方法暂无调用方）
@@ -175,11 +162,10 @@ impl FasController {
         );
     }
 
-    // ════════════════════════════════════════════════════════════
-    //  频率应用 — CPU 负载感知
+    // [apply]
+    // 频率应用 — CPU 负载感知
     //
-    //  利用 core_utils 判断 cluster 负载，低负载 cluster 用 relaxed 模式
-    // ════════════════════════════════════════════════════════════
+    // 利用 core_utils 判断 cluster 负载，低负载 cluster 用 relaxed 模式
 
     pub fn apply_freqs(&mut self) {
         self.freq_force_counter = self.freq_force_counter.wrapping_add(1);
@@ -241,9 +227,8 @@ impl FasController {
             }
         }
     }
-    // ════════════════════════════════════════════════════════════
-    //  load_policies — 初始化
-    // ════════════════════════════════════════════════════════════
+    // [load]
+    // load_policies — 初始化
 
     pub fn load_policies(&mut self, fas_rules: &FasRulesConfig) {
         // 规范化配置（防 NaN/越界导致 clamp panic），遮蔽原引用使后续代码一致
@@ -417,6 +402,7 @@ impl FasController {
         );
     }
 
+    // [reset]
     /// 重置所有 policy 频率（退出游戏时调用）
     pub fn reset_all_freqs(&mut self) {
         for policy in &mut self.policies {

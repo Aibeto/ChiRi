@@ -1,4 +1,5 @@
 #!/system/bin/sh
+# action.sh: [paths] [stop-old] [permissions] [watchdog-start] [result]
 #
 # ChiRi 模块 action 脚本：手动启动/重启调度
 # KernelSU/Magisk 在用户点击模块「Action」按钮时执行本脚本。
@@ -6,7 +7,8 @@
 # 说明：action 阶段无 ui_print（那是安装期函数），统一用 log() 输出到 stdout 与 service.log。
 #
 
-# 0. 定义路径
+# [paths] 
+# 定义路径与日志函数
 [ -z "$MODDIR" ] && MODDIR=${0%/*}
 
 DAEMON_PATH="$MODDIR/core/bin/yumi"
@@ -20,7 +22,8 @@ mkdir -p "$LOG_DIR"
 # 分步消息：同时打印到 stdout（KernelSU action 弹窗可见）与日志文件
 log() { echo "$(date): $*"; echo "$(date): $*" >> "$LOG_FILE"; }
 
-# 1. 终止旧看门狗与主进程（确保不残留重复实例，消除竞态）
+# [stop-old] 
+# 终止旧看门狗与主进程（确保不残留重复实例，消除竞态）
 log "stopping old watchdog and daemon..."
 # 空文件/读取失败/内容损坏时不执行 kill：kill "" 无意义，kill 0 会向
 # 整个进程组发信号（可能终止本脚本），非纯数字内容一律跳过
@@ -34,10 +37,12 @@ rm -f "$PID_FILE"
 sleep 1
 log "stopped."
 
-# 2. 设置权限
+# [permissions] 
+# 设置权限
 chmod 755 "$DAEMON_PATH"
 
-# 3. 启动 yumi 看门狗（崩溃自动重启，卸载时退出）
+# [watchdog-start] 
+# 启动 yumi 看门狗（崩溃自动重启，卸载时退出）
 # 看门狗记录自身 PID，供后续 action/WebUI「关闭调度」定位并终止。
 # 使用 setsid 而非 nohup，确保进程完全脱离父进程组，防止关闭界面导致服务终止。
 
@@ -58,8 +63,8 @@ WATCHDOG_CMD="sh -c '
   PIDFILE=\"\$1\"; DAEMON=\"\$2\"; FLAG=\"\$3\"
   echo \$\$ > \"\$PIDFILE\"
   while :; do
-    [ -f \"\$FLAG\" ] && break      # 卸载标记 → 退出，不残留
-    [ -f \"\$DAEMON\" ] || break    # 二进制被删 → 退出，不残留
+   [ -f \"\$FLAG\" ] && break      # 卸载标记 → 退出，不残留
+   [ -f \"\$DAEMON\" ] || break    # 二进制被删 → 退出，不残留
     \"\$DAEMON\"                    # 崩溃/退出后返回，sleep 后再拉起
     sleep 3
   done
@@ -82,6 +87,7 @@ fi
 # 立即与后台作业脱钩：防止某些 shell 环境在脚本退出时向作业发 SIGHUP
 disown 2>/dev/null || true
 
-# 4. 打印执行结果
+# [result] 
+# 打印执行结果
 log "daemon restarted."
 exit 0

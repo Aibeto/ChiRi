@@ -1,17 +1,26 @@
 # yumi 配置文件，不能动
+# config.yaml: [meta] [function] [io-settings] [cpu-idle] [powersave] [balance] [performance] [fast]
 
+# [meta]
 # 元数据信息
 meta:
   name: "default_config"
   author: "yuki"
   language: "zh"
   loglevel: "INFO"
+  # 功能总开关（缺省 true，热重载即时生效）：
+  #   fas_enabled: FAS 帧感知调度总闸（关闭后运行中实例立即注销，模式判定不再产生 fas）
+  #   scenemode_enabled: 息屏场景模式总闸（关闭后息屏不进入 scenemode，运行中立即退出恢复 doze）
+  fas_enabled: true
+  scenemode_enabled: true
 
+# [function]
 # 主要功能开关
 function:
   CpuIdleScalingGovernor: false
   IOOptimization: true
 
+# [io-settings]
 # IO 设置
 IO_Settings:
   Scheduler: "none"
@@ -19,12 +28,12 @@ IO_Settings:
   nomerges: "2"
   iostats: "0"
 
+# [cpu-idle]
 # CPU 空闲设置
 CpuIdle:
   current_governor: ""
 
-# --- 性能模式 ---
-
+# [powersave]
 # 省电模式
 powersave:
   cpu_load_governor:
@@ -47,6 +56,7 @@ powersave:
     spike_jump_threshold: 0.35
     spike_decay: 0.30
 
+# [balance]
 # 均衡模式
 balance:
   cpu_load_governor:
@@ -69,6 +79,7 @@ balance:
     spike_jump_threshold: 0.35
     spike_decay: 0.30
 
+# [performance]
 # 性能模式
 performance:
   cpu_load_governor:
@@ -91,6 +102,7 @@ performance:
     spike_jump_threshold: 0.35
     spike_decay: 0.30
 
+# [fast]
 # 极速模式
 fast:
   cpu_load_governor:

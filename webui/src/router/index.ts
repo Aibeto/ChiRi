@@ -1,3 +1,4 @@
+// index.ts: [create-router]
 // src/router/index.ts
 import { createRouter, createWebHashHistory } from 'vue-router'
 import HomeView from '../views/HomeView.vue'

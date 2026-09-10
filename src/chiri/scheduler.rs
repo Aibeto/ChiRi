@@ -1,47 +1,16 @@
-/*
- * Copyright (C) 2026 yuki
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
- */
-
-/*
- * Copyright (C) 2026 ChiRi
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
- */
+//! scheduler.rs: [tweaks] [cpu_idle] [io] [touch_boost]
 
 use super::config::Config;
 use anyhow::Result;
 use std::fs;
 use std::sync::{Arc, RwLock};
 
+use crate::fluent_args;
 use crate::i18n::{t, t_with_args};
 use crate::utils;
 use crate::utils::SysPathExist;
-use crate::fluent_args;
 
+// [tweaks]
 /// 与模式无关的一次性系统设置执行器（cpuidle / IO）。
 /// 每次配置热重载后由 config_watcher 线程调用，用于把系统参数对齐到新配置。
 pub struct CpuScheduler {
@@ -67,6 +36,7 @@ impl CpuScheduler {
         Ok(())
     }
 
+    // [cpu_idle]
     /// 写入 cpuidle current_governor。
     /// 仅在 `CpuIdleScalingGovernor` 开关开启、配置了目标 governor 且 sysfs 路径存在时写入。
     fn apply_cpu_idle_governor(&self) -> Result<()> {
@@ -85,6 +55,7 @@ impl CpuScheduler {
         Ok(())
     }
 
+    // [io]
     /// 遍历 /sys/block/*/queue，逐设备写入 IO 优化参数（调度器/预读/合并/统计）。
     /// 开关关闭或 /sys/block 不存在时直接返回；每个参数非空且路径存在才写。
     fn apply_io_settings(&self) -> Result<()> {
@@ -144,6 +115,7 @@ impl CpuScheduler {
         Ok(())
     }
 
+    // [touch_boost]
     /// 屏蔽 Android/内核自带的触摸升频（cpu_boost 驱动），改由 ChiRi 触摸升频统一接管：
     /// 关闭 input_boost 与 sched_boost_on_input，避免内核一上一下互抢导致频率抖动。
     /// 各节点按存在性逐一尝试，设备内核无对应节点时静默跳过（非 ChiRi 通用内核不报错）。

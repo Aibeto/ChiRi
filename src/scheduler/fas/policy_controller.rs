@@ -1,19 +1,4 @@
-/*
- * Copyright (C) 2026 yuki
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
- */
+//! policy_controller.rs: [struct] [init] [apply] [reset]
 
 use crate::fas_types::ClusterProfile;
 use crate::utils::FastWriter;
@@ -24,6 +9,8 @@ use std::time::{Duration, Instant};
 use crate::fluent_args;
 use crate::i18n::t_with_args;
 
+// [struct]
+// 单 policy 频率控制器状态
 pub struct PolicyController {
     pub max_writer: FastWriter,
     pub min_writer: FastWriter,
@@ -51,6 +38,7 @@ pub struct PolicyController {
 }
 
 impl PolicyController {
+    // [init]
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         max_writer: FastWriter,
@@ -111,6 +99,7 @@ impl PolicyController {
         (self.current_freq as f32 - self.freq_min) / (self.freq_max - self.freq_min).max(1.0)
     }
 
+    // [apply]
     /// 锁频写入 (min=max)，用于关键 cluster
     pub fn apply_freq_locked(&mut self, target_freq: u32) {
         if self.ignore_write {
@@ -180,6 +169,7 @@ impl PolicyController {
         fs::read_to_string(&path).ok()?.trim().parse::<u32>().ok()
     }
 
+    // [reset]
     pub fn force_reapply(&mut self) {
         if self.ignore_write {
             return;

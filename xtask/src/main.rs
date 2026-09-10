@@ -1,3 +1,5 @@
+//! xtask/src/main.rs: [cli-entry] [version-helpers] [build-flow] [sub-builders]
+
 mod zip_ext;
 
 use std::{
@@ -8,10 +10,12 @@ use std::{
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use fs_extra::{dir, file};
-use xshell::{cmd, Shell};
-use zip::{write::FileOptions, CompressionMethod};
+use xshell::{Shell, cmd};
+use zip::{CompressionMethod, write::FileOptions};
 
 use crate::zip_ext::zip_create_from_directory_with_options;
+
+// [cli-entry] 
 
 #[derive(Parser)]
 #[command(name = "xtask", about = "Yumi Build System")]
@@ -42,6 +46,8 @@ fn main() -> Result<()> {
 
     Ok(())
 }
+
+// [version-helpers] 
 
 fn cal_git_code(sh: &Shell) -> Result<usize> {
     // xshell 极大地简化了获取命令 stdout 的过程
@@ -75,6 +81,8 @@ fn read_module_prop() -> Result<(String, String)> {
     }
     Ok((name, version))
 }
+
+// [build-flow] 
 
 fn build(sh: &Shell, no_pack: bool) -> Result<()> {
     let temp_dir = temp_dir();
@@ -154,6 +162,8 @@ fn build(sh: &Shell, no_pack: bool) -> Result<()> {
     Ok(())
 }
 
+// [sub-builders] 
+
 fn temp_dir() -> PathBuf {
     Path::new("output").join(".temp")
 }
@@ -169,7 +179,11 @@ fn build_core(sh: &Shell) -> Result<()> {
     println!("正在编译 Rust Core...");
     // push_env 会在当前作用域内设置环境变量，离开作用域自动恢复
     let _env = sh.push_env("RUSTFLAGS", "-C default-linker-libraries");
-    cmd!(sh, "cargo +nightly ndk --platform 26 -t arm64-v8a build -Z build-std -r").run()?;
+    cmd!(
+        sh,
+        "cargo +nightly ndk --platform 26 -t arm64-v8a build -Z build-std -r"
+    )
+    .run()?;
     Ok(())
 }
 

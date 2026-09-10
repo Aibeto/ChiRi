@@ -1,10 +1,18 @@
-use std::process::Command;
+//! build.rs: [bpf-linker-install] [ebpf-build]
+
 use std::env;
 use std::path::{Path, PathBuf};
+use std::process::Command;
+
+// [bpf-linker-install]
 
 /// bpf-linker 可执行文件名：Windows 下带 .exe，其余平台无扩展名
 fn bpf_linker_name() -> &'static str {
-    if cfg!(windows) { "bpf-linker.exe" } else { "bpf-linker" }
+    if cfg!(windows) {
+        "bpf-linker.exe"
+    } else {
+        "bpf-linker"
+    }
 }
 
 /// 检查 bpf-linker 是否已存在于 PATH（CI 预装 / 系统已装则跳过安装）
@@ -44,9 +52,13 @@ fn ensure_bpf_linker(tools_dir: &Path) -> Result<PathBuf, Box<dyn std::error::Er
     println!("cargo:warning=⏳ 正在安装 bpf-linker (可能需要数分钟)...");
     let install = Command::new("cargo")
         .args([
-            "install", "bpf-linker", "--force",
-            "--root", tools_dir.to_str().ok_or("tools_dir 非 UTF-8")?,
-            "--target-dir", tools_dir.to_str().ok_or("tools_dir 非 UTF-8")?,
+            "install",
+            "bpf-linker",
+            "--force",
+            "--root",
+            tools_dir.to_str().ok_or("tools_dir 非 UTF-8")?,
+            "--target-dir",
+            tools_dir.to_str().ok_or("tools_dir 非 UTF-8")?,
         ])
         .env_remove("RUSTUP_TOOLCHAIN")
         .output();
@@ -69,6 +81,8 @@ fn ensure_bpf_linker(tools_dir: &Path) -> Result<PathBuf, Box<dyn std::error::Er
     println!("cargo:warning=✅ bpf-linker 安装完成: {}", linker.display());
     Ok(linker)
 }
+
+// [ebpf-build]
 
 /// 写入 eBPF 占位产物，使 include_bytes! 可解析（纯类型检查用，产物内容无效，
 /// CI/发布不触发该路径，行为不变）。返回 OUT_DIR 下的 ebpf_target 目录。
@@ -101,7 +115,10 @@ fn build_ebpf() -> Result<PathBuf, Box<dyn std::error::Error>> {
     let tools_dir = out_dir.join("ebpf_tools");
 
     // 监控 ebpf crate 变化
-    println!("cargo:rerun-if-changed={}", ebpf_dir.join("Cargo.toml").display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        ebpf_dir.join("Cargo.toml").display()
+    );
     println!("cargo:rerun-if-changed={}", ebpf_dir.join("src").display());
 
     // 1. 安装 bpf-linker（参照 frame-analyzer install_ebpf_linker），严格校验。
@@ -119,9 +136,12 @@ fn build_ebpf() -> Result<PathBuf, Box<dyn std::error::Error>> {
     // 2. 编译 BPF 程序（在 yumi-ebpf 目录中，避免 workspace 干扰）
     #[allow(unused_mut)] // 仅 release 分支 push("--release")，debug 构建下无需可变
     let mut ebpf_args = vec![
-        "--target", "bpfel-unknown-none",
-        "-Z", "build-std=core",
-        "--target-dir", target_dir.to_str().unwrap(),
+        "--target",
+        "bpfel-unknown-none",
+        "-Z",
+        "build-std=core",
+        "--target-dir",
+        target_dir.to_str().unwrap(),
     ];
 
     #[cfg(not(debug_assertions))]

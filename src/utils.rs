@@ -1,19 +1,4 @@
-/*
- * Copyright (C) 2026 yuki
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
- */
+//! utils.rs: [io] [temp_probe] [batt_temp] [sys_path] [fast_writer] [misc]
 
 use anyhow::Result;
 use inotify::{Inotify, WatchMask};
@@ -24,10 +9,12 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use crate::fluent_args;
 use crate::i18n::t_with_args;
 
+// [io]
 /// 向文件写入内容，并处理可能的错误
 pub fn write_to_file<P: AsRef<Path>, C: AsRef<[u8]>>(path: P, content: C) -> Result<()> {
     let path = path.as_ref();
@@ -89,6 +76,7 @@ pub fn read_file_content(path: &str) -> Result<String> {
     Ok(content.trim().to_string())
 }
 
+// [temp_probe]
 // 查找 CPU 温度传感器路径
 pub fn find_cpu_temp_path() -> Result<String> {
     let thermal_path = "/sys/class/thermal";
@@ -127,9 +115,9 @@ pub fn find_cpu_temp_path() -> Result<String> {
     Err(anyhow::anyhow!("Valid CPU thermal zone not found"))
 }
 
-/// 电池温度节点（0.1℃ 精度）。FAS 温度护栏专用：电池温度是热安全边界，
-/// 处理器温度（soc_max 长期 95℃ 属正常工作区）不作为降频依据。
-/// None = 节点不存在（护栏自动失效，不影响其余功能）
+/// 电池温度节点路径。**原始刻度的单位因内核/厂商而异，不可硬编码换算**，
+/// 读取一律先经 `battery_temp_scale()` 预识别（见下）。
+/// None = 节点不存在（依赖它的功能自动失效，不影响其余功能）
 pub fn find_battery_temp_path() -> Option<&'static str> {
     const BATT_TEMP: &str = "/sys/class/power_supply/battery/temp";
     std::path::Path::new(BATT_TEMP)
@@ -137,7 +125,115 @@ pub fn find_battery_temp_path() -> Option<&'static str> {
         .then_some(BATT_TEMP)
 }
 
-// --- SysPathExist 结构体 ---
+// 电池温度刻度预识别
+//
+// `/sys/class/power_supply/battery/temp` 的单位在不同内核/厂商上不一致：
+// 内核 power_supply 标准是 0.1°C（raw 400 = 40.0°C），部分平台报毫摄氏度
+// （raw 40000 = 40.0°C），少数厂商直接报 °C（raw 40 = 40.0°C）。硬编码除数
+// 会带来 10×/100× 偏差：8550 的 0.1°C 节点曾被误按毫摄氏度除 1000，实测
+// 恒读 0.4°C（真实约 20~50°C），电池软/硬限（41/45°C）永不触发、主参考
+// 彻底失效。故改为运行时预识别一次并缓存，CLG 热保护与 FAS 温度护栏共用
+// 同一结论，避免两处口径漂移。
+
+// [batt_temp]
+/// 电池温度节点的原始刻度
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum BatteryTempScale {
+    /// 0.1°C（内核 power_supply 标准）：raw 400 = 40.0°C
+    TenthsCelsius,
+    /// 毫摄氏度：raw 40000 = 40.0°C
+    MilliCelsius,
+    /// 摄氏度（少数厂商直读）：raw 40 = 40.0°C
+    Celsius,
+}
+
+impl BatteryTempScale {
+    /// 原始读数换算为 °C 的除数
+    pub fn divisor(self) -> f64 {
+        match self {
+            BatteryTempScale::TenthsCelsius => 10.0,
+            BatteryTempScale::MilliCelsius => 1000.0,
+            BatteryTempScale::Celsius => 1.0,
+        }
+    }
+
+    /// 日志用刻度名
+    pub fn label(self) -> &'static str {
+        match self {
+            BatteryTempScale::TenthsCelsius => "0.1C",
+            BatteryTempScale::MilliCelsius => "milliC",
+            BatteryTempScale::Celsius => "C",
+        }
+    }
+}
+
+/// 合理电池温度窗口（°C）：用于在多种单位解释里挑出唯一合理者。
+/// 下界取 5、上界取 80：直读 °C 的内核常给出 5..80，若下界取 0，tenths 解释
+/// （raw/10）会把直读值 40 误判成 4.0°C 从而失去区分度；上界放宽到 80 是为了
+/// 让偶发高温读数仍能参与定档（真正离谱的值由热保护 `TempFilter` 的物理范围门兜底）。
+/// 该窗口下 tenths 与 milli 的解释不会互相碰撞（tenths raw 50..800 ↔ milli raw 5万..8万）
+const BATT_TEMP_PLAUSIBLE_MIN_C: f64 = 5.0;
+const BATT_TEMP_PLAUSIBLE_MAX_C: f64 = 80.0;
+
+/// 预识别结果缓存：仅在探测得出确定结论时写入；节点未就绪/读数异常时留空，
+/// 下次调用自动重试（避免把开机早期的 0/占位值固化下来）
+static BATTERY_TEMP_SCALE: OnceLock<BatteryTempScale> = OnceLock::new();
+
+/// 读一次电池温度原始值（不换算）
+pub fn read_battery_temp_raw() -> Option<f64> {
+    std::fs::read_to_string(find_battery_temp_path()?)
+        .ok()?
+        .trim()
+        .parse::<f64>()
+        .ok()
+}
+
+/// 预识别电池温度刻度：读一次原始值，按「唯一落进合理温度窗口」的解释定档；
+/// 多个解释同时合理时按内核标准优先（tenths > milli > Celsius）。
+/// 读数为 0（未初始化）或节点缺失返回 None（调用方下次重试）；
+/// 非 0 但三种解释都不合理（传感器异常/极端低温）时回退内核标准 tenths——
+/// 更离谱的值由热保护 `TempFilter` 的物理范围门丢弃，不会污染控制链。
+pub fn detect_battery_temp_scale() -> Option<BatteryTempScale> {
+    let raw = read_battery_temp_raw()?;
+    if raw == 0.0 {
+        return None;
+    }
+    [
+        BatteryTempScale::TenthsCelsius,
+        BatteryTempScale::MilliCelsius,
+        BatteryTempScale::Celsius,
+    ]
+    .into_iter()
+    .find(|s| {
+        let c = raw / s.divisor();
+        (BATT_TEMP_PLAUSIBLE_MIN_C..=BATT_TEMP_PLAUSIBLE_MAX_C).contains(&c)
+    })
+    .or(Some(BatteryTempScale::TenthsCelsius))
+}
+
+/// 取（必要时预识别并缓存）电池温度刻度；None = 无法确定（调用方退化为仅 CPU 温度）
+pub fn battery_temp_scale() -> Option<BatteryTempScale> {
+    if let Some(s) = BATTERY_TEMP_SCALE.get() {
+        return Some(*s);
+    }
+    let detected = detect_battery_temp_scale()?;
+    // 竞态下可能已被其它线程写入（值相同，忽略结果）
+    let _ = BATTERY_TEMP_SCALE.set(detected);
+    BATTERY_TEMP_SCALE.get().copied()
+}
+
+/// 电池温度原始读数的换算除数（供持有 (路径, 除数) 的调用方复用同一结论）
+pub fn battery_temp_divisor() -> Option<f64> {
+    battery_temp_scale().map(|s| s.divisor())
+}
+
+/// 读电池温度并按预识别刻度换算为 °C；节点缺失/读数异常返回 None
+pub fn read_battery_temp_celsius() -> Option<f32> {
+    let scale = battery_temp_scale()?;
+    Some((read_battery_temp_raw()? / scale.divisor()) as f32)
+}
+
+// [sys_path]
 pub struct SysPathExist {
     pub qcom_feas_exist: bool,
     pub mtk_feas_exist: bool,
@@ -188,9 +284,8 @@ impl SysPathExist {
     }
 }
 
-// ════════════════════════════════════════════════════════════════
-//  FastWriter — 带去重 + unmount 的 sysfs 写入器
-// ════════════════════════════════════════════════════════════════
+// [fast_writer]
+// FastWriter — 带去重 + unmount 的 sysfs 写入器
 
 pub struct FastWriter {
     file: Option<File>,
@@ -342,10 +437,8 @@ impl FastWriter {
     }
 }
 
-// ════════════════════════════════════════════════════════════════
-//  通用跨模块工具函数
-// ════════════════════════════════════════════════════════════════
-
+// [misc]
+// 通用跨模块工具函数
 /// Serde 默认值辅助函数：始终返回 true
 pub fn default_true() -> bool {
     true

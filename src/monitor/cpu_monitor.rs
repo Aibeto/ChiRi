@@ -1,19 +1,4 @@
-/*
- * Copyright (C) 2026 yuki
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
- */
+//! cpu_monitor.rs: [consts] [helpers] [setup] [global-util] [fg-util] [telemetry] [interval] [tgid-util] [thread-util]
 
 use crate::common::DaemonEvent;
 use crate::utils::get_ktime_ns;
@@ -29,6 +14,7 @@ use tokio::sync::watch;
 use crate::fluent_args;
 use crate::i18n::{t, t_with_args};
 
+// [consts] 
 /// 常规采样周期由调用方（main.rs 按 SoC）传入：ChiRi 160ms / Yumi 200ms。
 /// 见 `start_cpu_loop` 的 `sample_ms_normal` 参数。
 /// 特调采样周期（ms）：明日方舟特调激活时缩短到 40ms，保证特调档位判定的响应度
@@ -38,6 +24,7 @@ const SAMPLE_MS_TUNED: u64 = 40;
 /// start_cpu_loop 入口按「ChiRi 且 FAS 配置可用」动态置位，Yumi 设备恒为 false（行为零变化）。
 static FAS_FG_UTIL_ENABLED: AtomicBool = AtomicBool::new(false);
 
+// [helpers] 
 /// 读取 PerCpuArray 计数 map 的全核总和（key 0 的所有 cpu 槽位累加）。
 /// map 缺失（None，eBPF 产物与 daemon 版本偏差时）返回 0，保持计数可选语义。
 fn percpu_total(map: Option<&PerCpuArray<&mut aya::maps::MapData, u64>>) -> u64 {
@@ -66,6 +53,7 @@ fn get_thread_tids(pid: u32) -> Vec<u32> {
     tids
 }
 
+// [setup] 
 pub async fn start_cpu_loop(
     tx: SyncSender<DaemonEvent>,
     rx_pid: watch::Receiver<u32>,
@@ -259,6 +247,7 @@ pub async fn start_cpu_loop(
 
             let mut core_utils = vec![0.0_f32; max_cpu_id + 1];
 
+            // [global-util] 
             // 1. 全局单核利用率计算（带有实时状态补偿）
             //    注意：core_utils 按「真实 CPU ID」索引（长度 max_cpu_id + 1），
             //    与 CLG 端 core_utils.get(cpu_id) 保持一致；若按在线列表顺序 push，
@@ -321,6 +310,7 @@ pub async fn start_cpu_loop(
                 last_busy_times[idx] = adj_busy;
             }
 
+            // [fg-util] 
             // 2. 前台应用利用率计算
             //    主路径: 使用 tgid_run_time map (TGID 级聚合)
             //    只需查询 1 个 key，不受 thread_run_time HASH 驱逐影响
@@ -424,6 +414,7 @@ pub async fn start_cpu_loop(
                 break;
             }
 
+            // [telemetry] 
             // ChiRi 遥测：读取扩展探针累计计数，按周期发送增量（探针未挂载时增量恒 0，
             // 事件照发保持下游 CSV 列对齐；watchdog 不消费该事件，不影响负载源判定）
             if chiri_telemetry && last_stats_check.elapsed() >= STATS_INTERVAL {
@@ -445,6 +436,7 @@ pub async fn start_cpu_loop(
                 }
             }
 
+            // [interval] 
             // 按特调状态动态切换采样周期：akmode 激活时 40ms 快速跟随负载，
             // 其余用传入的常规间隔（ChiRi 160ms / Yumi 200ms）。
             // interval 周期固定，切换时按新周期重建（相位以本轮处理完成为基准，采样点间隔精确）。
@@ -463,6 +455,7 @@ pub async fn start_cpu_loop(
     Ok(())
 }
 
+// [tgid-util] 
 /// 主路径: 使用 TGID 级聚合 map 计算前台进程的 CPU 利用率
 ///
 /// 优势:
@@ -546,6 +539,7 @@ fn compute_tgid_util(
     Some(util)
 }
 
+// [thread-util] 
 /// 降级路径: 逐 TID 遍历计算前台最重线程的利用率 (原始逻辑)
 /// 增加防驱逐保护：如果 map 返回值 < 上次记录值，跳过该 TID
 /// 仅在 FAS_FG_UTIL_ENABLED 置位（ChiRi 且 FAS 可用）且 TGID 主路径失败时被调用。

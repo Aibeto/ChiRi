@@ -1,4 +1,5 @@
 <script setup lang="ts">
+// HomeView.vue: [i18n] [modes-ro] [actions]
 import { onMounted, computed, ref } from 'vue';
 import { useSchedulerStore } from '@/stores/scheduler';
 import { useI18n } from 'vue-i18n';
@@ -9,6 +10,7 @@ import { Bridge } from '@/utils/bridge';
 const store = useSchedulerStore();
 const { t, locale } = useI18n();
 
+// [i18n] 
 // 语言切换逻辑
 const toggleLanguage = () => {
   const newLang = locale.value === 'zh' ? 'en' : 'zh';
@@ -16,7 +18,9 @@ const toggleLanguage = () => {
   localStorage.setItem('app_lang', newLang);
 };
 
-// 模式列表 (响应式翻译)
+// [modes-ro] 
+// 模式列表 (响应式翻译)：仅用于当前模式的只读展示，
+// 全局性能模式已禁止在 WebUI 修改（rules.yaml 只读，由模块维护）。
 const modes = computed(() => [
   { key: 'powersave', name: t('mode_powersave'), desc: t('desc_powersave'), icon: 'shield-o', color: '#4CAF50' },
   { key: 'balance', name: t('mode_balance'), desc: t('desc_balance'), icon: 'balance-o', color: '#2196F3' },
@@ -50,11 +54,7 @@ onMounted(() => {
   store.initData();
 });
 
-const handleModeSelect = async (modeKey: string) => {
-  await store.switchMode(modeKey);
-  // 删除了 Vant 的 showToast，底层 Bridge.setMode 已经自带了原生 toast 提示
-};
-
+// [actions] 
 // 点击复制 QQ 群号
 const copyQQGroup = async () => {
   try {
@@ -129,21 +129,7 @@ const handleStop = async () => {
       </div>
     </div>
 
-    <div class="section-title">{{ t('global_mode') }}</div>
-    <van-grid :column-num="2" :gutter="12" :border="false" class="mode-grid">
-      <van-grid-item v-for="mode in modes" :key="mode.key">
-        <div class="mode-card-content" :class="{ 'is-active': store.currentMode === mode.key }"
-          :style="store.currentMode === mode.key ? { backgroundColor: mode.color } : {}"
-          @click="handleModeSelect(mode.key)">
-          <van-icon :name="mode.icon" size="26" :color="store.currentMode === mode.key ? '#fff' : mode.color" />
-          <span class="mode-name" :style="{ color: store.currentMode === mode.key ? '#fff' : '#323233' }">{{ mode.name
-          }}</span>
-          <span class="mode-desc"
-            :style="{ color: store.currentMode === mode.key ? 'rgba(255,255,255,0.8)' : '#969799' }">{{ mode.desc
-            }}</span>
-        </div>
-      </van-grid-item>
-    </van-grid>
+    <!-- 全局性能模式已禁止在 WebUI 修改（rules.yaml 只读）：仅保留顶部状态卡只读展示当前模式 -->
 
     <!-- <div class="section-title">{{ t('about') }}</div>
     <div class="about-card">
@@ -281,43 +267,6 @@ const handleStop = async () => {
 :deep(.van-grid-item__content) {
   padding: 0 !important;
   background-color: transparent !important;
-}
-
-/* 模式卡片 */
-.mode-card-content {
-  width: 100%;
-  height: 96px;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  background-color: #fff;
-  border-radius: 12px;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
-  transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
-  box-sizing: border-box;
-  cursor: pointer;
-}
-
-.mode-card-content:active {
-  transform: scale(0.95);
-  opacity: 0.9;
-}
-
-.mode-card-content.is-active {
-  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.15);
-  transform: translateY(-2px);
-}
-
-.mode-name {
-  margin-top: 8px;
-  font-size: 14px;
-  font-weight: 600;
-}
-
-.mode-desc {
-  margin-top: 4px;
-  font-size: 11px;
 }
 
 /* 关于卡片修复自带阴影 */

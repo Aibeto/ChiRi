@@ -1,4 +1,7 @@
+// mock.ts: [mock-data] [mock-bridge]
 // src/utils/mock.ts
+
+// [mock-data] 
 const mockRules = {
   yumi_scheduler: true,
   dynamic_enabled: true,
@@ -47,27 +50,17 @@ const mockFasWhitelist: Record<string, string> = { 'com.hypergryph.endfield': 'e
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 let simulatedModeTxt = "balance";
 
+// [mock-bridge] 
 export const MockBridge = {
   async isDaemonRunning(): Promise<boolean> { await delay(100); return true; },
   async getCurrentMode(): Promise<string> { await delay(200); return simulatedModeTxt; },
   async isChiri(): Promise<boolean> { await delay(100); return true; }, // dev 演示特调能力
-  async setMode(mode: string): Promise<void> { await delay(200); mockRules.global_mode = mode; setTimeout(() => { simulatedModeTxt = mode; }, 800); },
   async getInstalledApps(): Promise<string[]> { await delay(500); return mockApps; },
   async getAppRules(): Promise<Record<string, string>> { await delay(300); return mockRules.app_modes; },
   async getSpecialTuned(): Promise<Record<string, { modes: string[]; fallback: string }>> { await delay(200); return { ...mockSpecialTuned }; },
   async getFasWhitelist(): Promise<Record<string, string>> { await delay(200); return { ...mockFasWhitelist }; },
-  async saveAppRule(pkg: string, mode: string): Promise<void> { 
-    await delay(200); 
-    
-    // 更新或删除应用模式
-    if (mode === '') {
-      delete (mockRules.app_modes as any)[pkg];
-    } else {
-      (mockRules.app_modes as any)[pkg] = mode; 
-    }
-  },
+  // rules.yaml 只读：WebUI 不再提供模式切换/应用规则写入，仅保留读取
   async getRulesConfig(): Promise<any> { await delay(300); return JSON.parse(JSON.stringify(mockRules)); },
-  async saveRulesConfig(config: any): Promise<void> { await delay(400); Object.assign(mockRules, config); },
   async getActiveConfigName(): Promise<string> { await delay(100); return '8550/config.yaml'; },
   async getConfigMeta(): Promise<Record<string, any>> { await delay(200); return { ...mockMeta }; },
   async setLogLevel(level: string): Promise<void> { await delay(200); mockMeta.loglevel = level; },

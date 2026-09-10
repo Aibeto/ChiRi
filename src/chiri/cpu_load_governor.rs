@@ -1,36 +1,4 @@
-/*
- * Copyright (C) 2026 yuki
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
- */
-
-/*
- * Copyright (C) 2026 ChiRi
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
- */
+//! cpu_load_governor.rs: [cluster] [touch_state] [worker] [worker_handle] [governor]
 
 use crate::chiri::config::CpuLoadGovernorConfig;
 use crate::utils::FastWriter;
@@ -44,9 +12,8 @@ use std::time::Duration;
 use crate::fluent_args;
 use crate::i18n::{t, t_with_args};
 
-// ════════════════════════════════════════════════════════════════
-//  PolicyRestore — CLG 接管前的系统状态快照，release 时恢复
-// ════════════════════════════════════════════════════════════════
+// [cluster] 
+// PolicyRestore — CLG 接管前的系统状态快照，release 时恢复
 
 struct PolicyRestore {
     /// cpufreq policy 编号
@@ -61,9 +28,7 @@ struct PolicyRestore {
     hw_max: u32,
 }
 
-// ════════════════════════════════════════════════════════════════
-//  ClusterState — 单 cluster 运行时状态
-// ════════════════════════════════════════════════════════════════
+// ClusterState — 单 cluster 运行时状态
 
 struct ClusterState {
     /// cpufreq policy 编号
@@ -225,14 +190,13 @@ impl ClusterState {
     }
 }
 
-// ════════════════════════════════════════════════════════════════
-//  AtomicTouchState — 跨线程共享的触摸升频状态
-// ════════════════════════════════════════════════════════════════
+// AtomicTouchState — 跨线程共享的触摸升频状态
 
 /// 跨线程共享的触摸升频状态，Worker 通过 `Arc<AtomicTouchState>` 读取当前窗口。
 /// f32 以 bit pattern 存入 AtomicU32（合法的原子操作，所有位组合都是合法 f32）。
 /// 使用 generation 计数器保证 set/get 一致性：Worker 读取时若 generation 不匹配
 /// 则视为写入中、返回 0.0（无升频），下次 tick 重试。
+// [touch_state] 
 struct AtomicTouchState {
     /// 触摸升频地板性能比（f32 的 bit pattern），0 表示无窗口
     floor_bits: AtomicU32,
@@ -294,10 +258,8 @@ impl AtomicTouchState {
     }
 }
 
-// ════════════════════════════════════════════════════════════════
-//  CoreGroupWorker — 每个核心组独立线程的调度 Worker
-// ════════════════════════════════════════════════════════════════
-
+// [worker] 
+// CoreGroupWorker — 每个核心组独立线程的调度 Worker
 /// 单核心组的独立调度 Worker：在专属线程内持有 ClusterState，
 /// 接收负载数据自主做升降频决策 + 写频，与其他核心组完全并行。
 struct CoreGroupWorker {
@@ -764,9 +726,8 @@ impl CoreGroupWorker {
     }
 }
 
-// ════════════════════════════════════════════════════════════════
-//  Worker 句柄（线程 + 负载通道发送端）
-// ════════════════════════════════════════════════════════════════
+// [worker_handle] 
+// Worker 句柄（线程 + 负载通道发送端）
 
 /// 每个 Worker 的控制句柄：持有负载通道发送端和线程 JoinHandle。
 struct WorkerHandle {
@@ -789,9 +750,8 @@ impl WorkerHandle {
     }
 }
 
-// ════════════════════════════════════════════════════════════════
-//  CpuLoadGovernor — 主控制器（Worker 线程管理器）
-// ════════════════════════════════════════════════════════════════
+// [governor] 
+// CpuLoadGovernor — 主控制器（Worker 线程管理器）
 
 pub struct CpuLoadGovernor {
     /// 当前生效的 CLG 配置（normalize 后的副本）

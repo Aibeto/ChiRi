@@ -1,19 +1,4 @@
-/*
- * Copyright (C) 2026 yuki
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
- */
+//! mod.rs: [consts] [mods] [policy] [thread] [cfgwatch] [ipc]
 
 use std::sync::{Arc, Mutex, RwLock, mpsc};
 use std::thread;
@@ -21,6 +6,7 @@ use std::time::{Duration, Instant};
 use std::fs;
 use anyhow::Result;
 
+// [consts] 
 // CLG 看门狗：SystemLoadUpdate 常规 120ms（Chiri 特调 40ms）投喂一次，若超过 CLG_STALE_MAX 时长
 // 未收到任何事件，视为负载源失效（eBPF 加载失败/探针崩溃/通道断开），主动 release()
 // 回滚到系统原生调频，避免 CPU 永久锁频在最后写入值上（8550 balance 等 perf_init=1.0
@@ -29,6 +15,7 @@ const CLG_STALE_MAX: Duration = Duration::from_secs(5);
 /// 看门狗巡检间隔：事件循环无事件时的轮询周期
 const CLG_STALE_POLL: Duration = Duration::from_secs(1);
 
+// [mods] 
 pub mod config;
 pub mod scheduler;
 // FAS（帧感知调度）引擎：ChiRi 侧经 crate::scheduler::fas::FasController 使用；
@@ -52,6 +39,7 @@ pub struct CpuPolicy {
     pub boost_frequencies: Vec<u32>,
 }
 
+// [policy] 
 // 动态获取系统中实际可用的 CPU Policy，并读取 boost 频率
 pub fn get_cpu_policies() -> Vec<CpuPolicy> {
     let mut policies = Vec::new();
@@ -116,6 +104,7 @@ pub(super) fn auto_compute_capacity_weights(policies: &[CpuPolicy]) -> Option<Ve
     }).collect())
 }
 
+// [thread] 
 pub fn start_scheduler_thread(
     rx: mpsc::Receiver<DaemonEvent>,
     shared_config: Arc<RwLock<Config>>,
@@ -129,10 +118,8 @@ pub fn start_scheduler_thread(
     // ModeChange（约 2 秒）前按错误的模式接管 CPU（8550 上 balance perf_init=1.0 会锁满频），
     // 且与用户配置的 global_mode 不一致。global_mode 未配置或不是已注册模式时回退 balance。
     let initial_mode = {
-        let rules = crate::utils::read_config::<crate::monitor::config::RulesConfig, _>(
-            crate::monitor::config::get_rules_path(),
-        )
-        .unwrap_or_default();
+        // 嵌入 rules.yaml 为唯一规则来源（编译期打包，防篡改；磁盘文件仅展示副本）
+        let rules = crate::common::embedded_rules();
         let m = rules.global_mode.clone();
         if m.is_empty() || shared_config.read().unwrap().get_mode(&m).is_none() {
             "balance".to_string()
@@ -144,9 +131,8 @@ pub fn start_scheduler_thread(
     let shared_mode_name = Arc::new(Mutex::new(initial_mode));
     let sys_path_exist = Arc::new(utils::SysPathExist::new());
 
-    // ==========================================
+    // [cfgwatch] 
     // Config Watcher 线程
-    // ==========================================
     let config_clone = shared_config.clone();
     let sys_path_clone = sys_path_exist.clone();
     
@@ -190,9 +176,8 @@ pub fn start_scheduler_thread(
     
     log::info!("{}", t("main-config-watch-thread-create"));
 
-    // ==========================================
+    // [ipc] 
     // IPC 监听主线程 (负责所有的状态机流转与调度干预)
-    // ==========================================
     let config_clone = shared_config.clone();
     let mode_clone = shared_mode_name.clone();
 
@@ -205,7 +190,7 @@ pub fn start_scheduler_thread(
             // 当前模式持久化文件：每次模式切换时写入，供外部（如 WebUI）读取当前状态。
             // 自愈：常态下每 5 秒重写一次（见循环内 MODE_FILE_REWRITE_INTERVAL 分支），
             // 防止文件被意外清空/删除后 WebUI 读不到当前状态（清空原因多非人为，但重写兜底人为误删）。
-            let mode_file_path = root.join("current_mode.txt");
+            let mode_file_path = root.join("current_mode.chr");
             const MODE_FILE_REWRITE_INTERVAL: Duration = Duration::from_secs(5);
             let mut last_mode_file_write = Instant::now();
             // 启动时先写一次初始模式，避免开机后文件缺失/被清空时 WebUI 显示未知状态

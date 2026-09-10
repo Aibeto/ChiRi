@@ -1,19 +1,4 @@
-/*
- * Copyright (C) 2026 ChiRi
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
- */
+//! akmode.rs: [restore] [governor] [init_release] [load_freq]
 
 use crate::chiri::config::SpecialTunedConfig;
 use crate::utils::FastWriter;
@@ -26,6 +11,7 @@ use std::time::Instant;
 use crate::fluent_args;
 use crate::i18n::{t, t_with_args};
 
+// [restore]
 /// 单个 policy 的 governor/min/max 快照：akmode 接管时保存，release 时恢复。
 struct PolicyRestore {
     policy_id: i32,
@@ -78,6 +64,7 @@ fn core_name_for(affected: &[usize]) -> Option<&'static str> {
 /// 替代原四档 core-count 阈值方案——后者在「少数线程高占用」负载（如明日方舟
 /// 资源校验：一两个线程吃满单核、组内其余核心空闲）下升频条件凑不齐、降频
 /// 条件持续满足，max 单边下探到最低频，校验速度严重劣化。
+// [governor]
 pub struct AkmodeGovernor {
     cfg: SpecialTunedConfig,
     /// 特调激活共享标志：Monitor 层（cpu_monitor）据此切换采样间隔（特调 40ms / 其余 120ms）
@@ -113,6 +100,7 @@ impl AkmodeGovernor {
     /// 4. 初始 max = 硬件最高（接管瞬间多为场景切换，先给满上限，由负载控制自然回落）。
     ///
     /// 返回 true 表示成功接管，false 表示无可用 cluster（配置错误或硬件不支持）。
+    // [init_release]
     pub fn init_policies(&mut self, cfg: &SpecialTunedConfig) -> bool {
         self.release();
         self.cfg = cfg.clone();
@@ -286,6 +274,7 @@ impl AkmodeGovernor {
     }
 
     /// 热重载：akmode.yaml 参数变化后更新控制参数（max 动态状态保持不变）。
+    // [load_freq]
     pub fn reload_config(&mut self, cfg: &SpecialTunedConfig) {
         self.cfg = cfg.clone();
         self.cfg.normalize();

@@ -1,19 +1,4 @@
-/*
- * Copyright (C) 2026 yuki
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
- */
+//! main.rs: [daemonize] [env_init] [soc_check] [config_path] [lang_logger] [channels] [scheduler_start] [monitor_start] [suspend]
 
 mod chiri;
 mod common;
@@ -35,6 +20,7 @@ use std::thread;
 use crate::scheduler::config::Config;
 
 fn main() -> Result<()> {
+    // [daemonize]
     // 0. 进程自保：脱离派生方的会话与管道。
     //    背景：模块热更新 / Action 按钮重启调度时，看门狗与 daemon 由管理器
     //    app（KSU 等）的 su 会话派生——管理器被关闭（从最近任务划掉/被系统
@@ -75,6 +61,7 @@ fn main() -> Result<()> {
         }
     }
 
+    // [env_init]
     // 1. 环境初始化
     let chdir_path = std::env::args().nth(1);
     if let Some(path) = &chdir_path {
@@ -121,9 +108,11 @@ fn main() -> Result<()> {
     // devimp 目录已随归档新建；此处仅做容量清理兜底（归档失败时旧文件仍在）
     logger::devimp_prepare();
 
+    // [soc_check]
     // 2. 判断是否启用 Chiri 专用调度器（检测到列表中的特定处理器时启用）
     let chiri_active = common::is_chiri_soc();
 
+    // [config_path]
     // 3. 解析配置文件路径：8550 等 Chiri 目标 SoC 优先加载处理器子目录 config/{soc}/config.yaml，
     //    其余机型回退到默认 config/config.yaml（两套调度仍共用同一份选中的文件）
     let config_path = common::get_config_path();
@@ -134,7 +123,7 @@ fn main() -> Result<()> {
         .unwrap_or(&config_path);
     // as_encoded_bytes 未稳定化（各 toolchain 均不可用），用 to_string_lossy 兼容
     let _ = utils::try_write_file(
-        root.join("active_config.txt"),
+        root.join("active_config.chr"),
         config_rel.to_string_lossy().as_bytes(),
     );
 
@@ -143,7 +132,12 @@ fn main() -> Result<()> {
     // 文件被篡改 → 还原调优参数（meta 保留用户选择）；文件缺失 → 重建。
     common::sync_config_snapshot(&config_path);
 
-    // 导出内部特调白名单（编译期嵌入 src/chiri/special_tuned.txt）供 WebUI 展示
+    // rules.yaml 快照复制：rules.yaml 同样编译期嵌入二进制（只读，运行时一律读嵌入值），
+    // 启动时把嵌入内容复制到模块根作对外展示副本（被篡改不影响调度行为，下次启动还原）。
+    // 写失败经重写兜底后直接跳过，绝不 panic（见 common::sync_rules_snapshot）。
+    common::sync_rules_snapshot(&root.join("rules.yaml"));
+
+    // 导出内部特调白名单（编译期嵌入 src/chiri/special_tuned.yaml）供 WebUI 展示
     // “特调”标签与专属选项：每行一条 `包名:特调模式列表(逗号分隔):优先回退模式`。
     // 只导出精确包名条目（正则条目无法按包名精确查找）；WebUI 只读该文件，不提供修改入口。
     // 仅在 Chiri 专属调度激活时导出——非 Chiri（Yumi）设备不生成该文件，WebUI 据此隐藏特调功能。
@@ -160,7 +154,7 @@ fn main() -> Result<()> {
             .map(|e| format!("{}:{}:{}\n", e.package, e.modes.join(","), e.fallback))
             .collect();
         let _ = utils::try_write_file(
-            root.join("special_tuned.txt"),
+            root.join("special_tuned.yaml"),
             special_tuned_content.as_bytes(),
         );
         exported_special = Some(exact.len());
@@ -170,11 +164,12 @@ fn main() -> Result<()> {
             .iter()
             .map(|(pkg, cfg)| format!("{pkg}:{cfg}\n"))
             .collect();
-        if utils::try_write_file(root.join("fas_whitelist.txt"), fas_content.as_bytes()).is_ok() {
+        if utils::try_write_file(root.join("fas_whitelist.yaml"), fas_content.as_bytes()).is_ok() {
             exported_fas = Some(common::fas_whitelist().len());
         }
     }
 
+    // [lang_logger]
     // 4. 立即加载语言与日志（两套 Config 的 meta 结构一致，先用它初始化）
     let (language, loglevel) = if chiri_active {
         let cfg = chiri::config::Config::load(config_path.to_str().unwrap()).unwrap_or_default();
@@ -285,6 +280,7 @@ fn main() -> Result<()> {
     );
     info!("{}", t("yumi-module-starting"));
 
+    // [channels]
     // 5. 创建通信通道（有界：容量 64，满时 send 阻塞形成背压，防止事件无限积压；
     //    足够承载 160ms（特调 40ms）负载事件与低频状态事件）
     let (tx, rx) = mpsc::sync_channel::<common::DaemonEvent>(64);
@@ -299,6 +295,7 @@ fn main() -> Result<()> {
     // 会话每帧白付一次探针开销）。由 main.rs 创建，monitor 与 chiri 各持克隆。
     let fas_active = Arc::new(AtomicBool::new(false));
 
+    // [scheduler_start]
     // 6. 按 SoC 启动对应的调度器（两套互斥，同一事件通道只被其中一个消费）
     let start_result = if chiri_active {
         log::info!("{}", t("main-chiri-scheduler-selected"));
@@ -325,6 +322,7 @@ fn main() -> Result<()> {
     }
     info!("{}", t("scheduler-module-started"));
 
+    // [monitor_start]
     // 7. 启动 Monitor
     // 常规采样间隔按 SoC 参数化：Chiri 160ms，Yumi 保持原有 200ms
     let sample_ms_normal: u64 = if chiri_active { 160 } else { 200 };
@@ -344,6 +342,7 @@ fn main() -> Result<()> {
 
     info!("{}", t("monitor-module-started"));
 
+    // [suspend]
     // 8. 挂起
     monitor_thread.join().unwrap();
 

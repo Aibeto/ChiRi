@@ -1,4 +1,5 @@
 <script setup lang="ts">
+// AppRulesView.vue: [state] [modes-ro] [scan] [filter]
 import { ref, onMounted, computed } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { Bridge } from '@/utils/bridge';
@@ -8,28 +9,17 @@ import { useSchedulerStore } from '@/stores/scheduler';
 const { t } = useI18n();
 const store = useSchedulerStore();
 
+// [state] 
 // pkg → appLabel 映射
 const appLabelMap = ref<Record<string, string>>({});
 const apps = ref<string[]>([]);
 const searchText = ref('');
-const showActionSheet = ref(false);
-const selectedPkg = ref('');
 // 扫描状态：扫描期间禁用按钮，防止多线程同时扫描（getInstalledApps 重复触发）
 const isScanning = ref(false);
 
-// 动作单：标准四档 + 删除规则。特调应用不再提供专属模式选项（内置特调只读标注）。
-// 注意：特调（akmode）为无档位负载直拉，app_modes / global_mode 不影响特调应用。
-const actions = computed(() => {
-  return [
-    { name: t('mode_powersave'), subname: t('desc_powersave'), color: '#4CAF50', modeKey: 'powersave' },
-    { name: t('mode_balance'), subname: t('desc_balance'), color: '#2196F3', modeKey: 'balance' },
-    { name: t('mode_performance'), subname: t('desc_performance'), color: '#FF9800', modeKey: 'performance' },
-    { name: t('mode_fast'), subname: t('desc_fast'), color: '#F44336', modeKey: 'fast' },
-    // { name: t('mode_fas'), subname: t('desc_fas'), color: '#E91E63', modeKey: 'fas' }, // FAS 暂禁用
-    { name: t('delete_rule'), color: '#FF0000', isDelete: true }
-  ];
-});
-
+// [modes-ro] 
+// 应用性能模式已禁止在 WebUI 指定/修改（rules.yaml 只读，由模块维护）。
+// 本页仅只读展示规则标签：特调 / FAS 白名单 + rules.yaml 现存 app_modes。
 const modeLabel = (modeKey: string) => {
   switch (modeKey) {
     case 'powersave': return t('mode_powersave');
@@ -48,6 +38,7 @@ const specialLabel = (pkg: string) => {
   return entry ? `${t('special_tuned')}：${entry.fallback}` : t('special_tuned');
 };
 
+// [scan] 
 const refreshAppList = async () => {
   const packages = await Bridge.getInstalledApps();
   apps.value = packages;
@@ -80,6 +71,7 @@ const onRescan = async () => {
   }
 };
 
+// [filter] 
 // 用应用名或包名都能搜到
 const filteredApps = computed(() => {
   const q = searchText.value.toLowerCase();
@@ -92,90 +84,66 @@ const filteredApps = computed(() => {
 
 // 优先显示应用名，缺失时降级为包名
 const getLabel = (pkg: string) => appLabelMap.value[pkg] || pkg;
-
-const openMenu = (pkg: string) => {
-  // FAS 白名单应用由守护进程 FAS 接管调度，不提供模式切换入口（与标签同口径：仅 ChiRi 设备）
-  if (store.isChiri && store.fasWhitelist[pkg]) return;
-  selectedPkg.value = pkg;
-  showActionSheet.value = true;
-};
-
-const onSelectAction = async (item: any) => {
-  showActionSheet.value = false;
-  if (item.isDelete) {
-    delete store.appRules[selectedPkg.value];
-    await Bridge.saveAppRule(selectedPkg.value, '');
-  } else {
-    store.appRules[selectedPkg.value] = item.modeKey;
-    await Bridge.saveAppRule(selectedPkg.value, item.modeKey);
-  }
-};
 </script>
 
 <template>
   <div class="app-rules">
     <van-nav-bar :title="t('app_management')" left-arrow @click-left="$router.back()" fixed placeholder>
       <template #right>
-        <span
-          class="rescan-btn"
-          :class="{ disabled: isScanning }"
-          @click="onRescan"
-        >{{ isScanning ? t('scanning') : t('rescan') }}</span>
+        <span class="rescan-btn" :class="{ disabled: isScanning }" @click="onRescan">{{ isScanning ? t('scanning') :
+          t('rescan') }}</span>
       </template>
     </van-nav-bar>
 
     <van-search v-model="searchText" :placeholder="t('search_apps')" />
 
     <van-list>
-      <van-cell
-        v-for="pkg in filteredApps"
-        :key="pkg"
-        :title="getLabel(pkg)"
-        :label="pkg"
-        center
-        clickable
-        :class="{ 'fas-locked': !!store.fasWhitelist[pkg] }"
-        @click="openMenu(pkg)"
-      >
+      <van-cell v-for="pkg in filteredApps" :key="pkg" :title="getLabel(pkg)" :label="pkg" center>
         <template #icon>
-          <img
-            :src="`ksu://icon/${pkg}`"
-            style="width: 40px; height: 40px; margin-right: 12px; border-radius: 8px;"
-            loading="lazy"
-          />
+          <img :src="`ksu://icon/${pkg}`" style="width: 40px; height: 40px; margin-right: 12px; border-radius: 8px;"
+            loading="lazy" />
         </template>
         <template #value>
           <div class="mode-tags">
-            <!-- 内部特调白名单（只读标注，仅 Chiri 设备）：常驻显示“特调”标签与内置模式，不可修改 -->
+            <!-- 内部特调白名单（只读标注，仅 Chiri 设备）：常驻显示"特调"标签与内置模式 -->
             <van-tag v-if="store.isChiri && store.specialTuned[pkg]" type="warning" size="medium" plain>
               {{ specialLabel(pkg) }}
             </van-tag>
-            <!-- FAS 白名单（只读标注，仅 Chiri 设备）：命中的应用由守护进程 FAS 接管，禁止切换模式 -->
+            <!-- FAS 白名单（只读标注，仅 Chiri 设备）：命中的应用由守护进程 FAS 接管 -->
             <van-tag v-if="store.isChiri && store.fasWhitelist[pkg]" type="primary" size="medium" plain>FAS</van-tag>
-            <!-- 用户自定义配置优先：显示自定义模式的原标签（与特调标签并存） -->
+            <!-- rules.yaml 现存 app_modes：只读展示，不提供修改入口 -->
             <van-tag v-if="store.appRules[pkg]" type="primary" size="medium">
               {{ modeLabel(store.appRules[pkg]) }}
             </van-tag>
-            <span v-if="!store.appRules[pkg] && !(store.isChiri && store.specialTuned[pkg]) && !store.fasWhitelist[pkg]" class="no-rule">{{ t('not_configured') }}</span>
+            <span v-if="!store.appRules[pkg] && !(store.isChiri && store.specialTuned[pkg]) && !store.fasWhitelist[pkg]"
+              class="no-rule">{{ t('not_configured') }}</span>
           </div>
         </template>
       </van-cell>
     </van-list>
-
-    <van-action-sheet
-      v-model:show="showActionSheet"
-      :actions="actions"
-      :description="`${t('select_mode_for')} ${getLabel(selectedPkg)}`"
-      :cancel-text="t('cancel')"
-      @select="onSelectAction"
-    />
   </div>
 </template>
 
 <style scoped>
-.no-rule { font-size: 12px; color: #bbb; }
-.mode-tags { display: flex; align-items: center; gap: 4px; }
-.rescan-btn { font-size: 14px; color: #1989fa; cursor: pointer; }
-.rescan-btn.disabled { color: #c8c9cc; pointer-events: none; }
-.fas-locked { pointer-events: none; opacity: 0.65; }
+.no-rule {
+  font-size: 12px;
+  color: #bbb;
+}
+
+.mode-tags {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.rescan-btn {
+  font-size: 14px;
+  color: #1989fa;
+  cursor: pointer;
+}
+
+.rescan-btn.disabled {
+  color: #c8c9cc;
+  pointer-events: none;
+}
 </style>

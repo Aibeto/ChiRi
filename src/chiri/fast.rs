@@ -1,19 +1,4 @@
-/*
- * Copyright (C) 2026 ChiRi
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
- */
+//! fast.rs: [types] [init] [release_tick]
 
 /// 极速模式（fast）专属锁频器：与 CLG 完全独立，不读 yaml 调频参数。
 /// 接管时把所有 cluster 的 scaling_min_freq / scaling_max_freq 都锁到硬件最高频
@@ -29,6 +14,7 @@ use crate::i18n::{t, t_with_args};
 /// 每 5 秒重写一次频率，防止外部篡改
 const REWRITE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 
+// [types]
 /// 接管前的系统状态快照，release 时恢复
 struct PolicySnapshot {
     policy_id: i32,
@@ -70,6 +56,7 @@ impl FastLock {
         self.active
     }
 
+    // [init]
     /// 接管全部 cpufreq policy：读取可用频率、快照原始状态、写 schedutil + 锁 hw_max。
     pub fn init(&mut self) {
         self.release();
@@ -195,6 +182,7 @@ impl FastLock {
         }
     }
 
+    // [release_tick]
     /// 释放接管：恢复系统原始 governor / min / max。
     pub fn release(&mut self) {
         if self.active {

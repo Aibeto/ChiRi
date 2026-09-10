@@ -1,39 +1,39 @@
-/*
- * Copyright (C) 2026 yuki
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
- */
+//! pid.rs: [struct] [pid] [utils]
 
+// [struct] 
+// PID 控制器状态
 pub(super) struct PidController {
     // 用户配置的基准系数 (基于 60fps 场景调优)
-    pub(super) base_kp: f32, pub(super) base_ki: f32, pub(super) base_kd: f32,
+    pub(super) base_kp: f32,
+    pub(super) base_ki: f32,
+    pub(super) base_kd: f32,
     // 运行时实际使用的动态系数 (根据 target_fps 和场景自动缩放)
-    kp: f32, ki: f32, kd: f32,
-    integral: f32, prev_error: f32,
+    kp: f32,
+    ki: f32,
+    kd: f32,
+    integral: f32,
+    prev_error: f32,
     filtered_deriv: f32,
     integral_limit: f32,
     // 缓存当前适配的目标帧率，避免重复计算
     adapted_fps: f32,
 }
 
+// [pid] 
+// PID 控制逻辑（系数自适应 + 单帧更新）
 impl PidController {
     pub(super) fn new(kp: f32, ki: f32, kd: f32) -> Self {
         Self {
-            base_kp: kp, base_ki: ki, base_kd: kd,
-            kp, ki, kd,
-            integral: 0.0, prev_error: 0.0,
-            filtered_deriv: 0.0, integral_limit: 0.15,
+            base_kp: kp,
+            base_ki: ki,
+            base_kd: kd,
+            kp,
+            ki,
+            kd,
+            integral: 0.0,
+            prev_error: 0.0,
+            filtered_deriv: 0.0,
+            integral_limit: 0.15,
             adapted_fps: 60.0,
         }
     }
@@ -47,8 +47,12 @@ impl PidController {
     /// 但缩放系数不同：P 最激进，D 最保守 (高刷噪声大)。
     pub(super) fn adapt_to_target_fps(&mut self, target_fps: f32) {
         // 防御非法 target_fps（0/负/NaN/Inf），避免 PID 系数与积分限幅被污染
-        if !target_fps.is_finite() || target_fps <= 0.0 { return; }
-        if (target_fps - self.adapted_fps).abs() < 0.5 { return; }
+        if !target_fps.is_finite() || target_fps <= 0.0 {
+            return;
+        }
+        if (target_fps - self.adapted_fps).abs() < 0.5 {
+            return;
+        }
         self.adapted_fps = target_fps;
 
         let ratio = target_fps / 60.0;
@@ -62,7 +66,9 @@ impl PidController {
         // 积分限幅：高刷下缩小，防止积分器饱和导致频率虚高
         self.integral_limit = 0.15 * (60.0 / target_fps.max(1.0)).sqrt();
         // 不 reset 积分器（保持连续性），只做 clamp
-        self.integral = self.integral.clamp(-self.integral_limit, self.integral_limit);
+        self.integral = self
+            .integral
+            .clamp(-self.integral_limit, self.integral_limit);
     }
 
     /// 带利用率感知的 PID 计算
@@ -96,7 +102,7 @@ impl PidController {
         // fg_util ∈ [0.30, 1.0] → CPU bound，正常增益
         // fg_util 无数据 (≤ 0.01) → 刚启动还没采样到，不衰减
         let util_gain = if fg_util > 0.01 && fg_util < 0.30 {
-            0.3 + fg_util * 2.3  // 0.3 ~ 0.99
+            0.3 + fg_util * 2.3 // 0.3 ~ 0.99
         } else {
             1.0
         };
@@ -109,14 +115,18 @@ impl PidController {
     }
 
     pub(super) fn reset(&mut self) {
-        self.integral = 0.0; self.prev_error = 0.0; self.filtered_deriv = 0.0;
+        self.integral = 0.0;
+        self.prev_error = 0.0;
+        self.filtered_deriv = 0.0;
     }
 
     /// 运行时更新 PID 基准系数（热重载预留能力；当前 per-app 配置为编译期嵌入，
     /// FasManager 复用路径走 reset_runtime + apply_freqs，本方法暂无调用方）
     #[allow(dead_code)]
     pub(super) fn update_coefficients(&mut self, kp: f32, ki: f32, kd: f32) {
-        self.base_kp = kp; self.base_ki = ki; self.base_kd = kd;
+        self.base_kp = kp;
+        self.base_ki = ki;
+        self.base_kd = kd;
         // 重新按当前 adapted_fps 缩放
         let fps = self.adapted_fps;
         self.adapted_fps = 0.0; // 强制刷新
@@ -125,9 +135,8 @@ impl PidController {
     }
 }
 
-// ════════════════════════════════════════════════════════════════
-//  工具函数
-// ════════════════════════════════════════════════════════════════
+// [utils] 
+// 工具函数
 
 #[inline]
 pub(super) fn fps_norm(target_fps: f32) -> f32 {

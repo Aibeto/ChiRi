@@ -1,20 +1,7 @@
-/*
- * Copyright (C) 2026 yuki
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
- */
+//! fps_window.rs: [window]
 
+// [window] 
+// 帧率滑动窗口统计（均值/方差/近期均值）
 const WINDOW_SIZE: usize = 120;
 
 pub(super) struct FpsWindow {
@@ -28,7 +15,14 @@ pub(super) struct FpsWindow {
 
 impl FpsWindow {
     pub(super) fn new() -> Self {
-        Self { buf: [0.0; WINDOW_SIZE], pos: 0, len: 0, sum: 0.0, sq_sum: 0.0, push_count: 0 }
+        Self {
+            buf: [0.0; WINDOW_SIZE],
+            pos: 0,
+            len: 0,
+            sum: 0.0,
+            sq_sum: 0.0,
+            push_count: 0,
+        }
     }
 
     pub(super) fn push(&mut self, fps: f32) {
@@ -58,13 +52,23 @@ impl FpsWindow {
         self.sq_sum = slice.iter().map(|x| x * x).sum();
     }
 
-    #[inline] pub(super) fn count(&self) -> usize { self.len }
-    #[inline] pub(super) fn mean(&self) -> f32 {
-        if self.len == 0 { 0.0 } else { self.sum / self.len as f32 }
+    #[inline]
+    pub(super) fn count(&self) -> usize {
+        self.len
+    }
+    #[inline]
+    pub(super) fn mean(&self) -> f32 {
+        if self.len == 0 {
+            0.0
+        } else {
+            self.sum / self.len as f32
+        }
     }
 
     pub(super) fn recent_mean(&self, n: usize) -> f32 {
-        if self.len == 0 { return 0.0; }
+        if self.len == 0 {
+            return 0.0;
+        }
         let count = n.min(self.len);
         let mut sum = 0.0;
         for i in 0..count {
@@ -75,7 +79,9 @@ impl FpsWindow {
     }
 
     pub(super) fn stddev(&self) -> f32 {
-        if self.len < 2 { return 0.0; }
+        if self.len < 2 {
+            return 0.0;
+        }
         let n = self.len as f32;
         let mean = self.sum / n;
         (self.sq_sum / n - mean * mean).max(0.0).sqrt()
@@ -83,7 +89,10 @@ impl FpsWindow {
 
     pub(super) fn clear(&mut self) {
         self.buf = [0.0; WINDOW_SIZE];
-        self.pos = 0; self.len = 0; self.sum = 0.0; self.sq_sum = 0.0;
+        self.pos = 0;
+        self.len = 0;
+        self.sum = 0.0;
+        self.sq_sum = 0.0;
         self.push_count = 0;
     }
 }

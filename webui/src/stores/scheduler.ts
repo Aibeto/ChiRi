@@ -1,8 +1,10 @@
+// scheduler.ts: [state] [actions]
 // src/stores/scheduler.ts
 import { defineStore } from 'pinia';
 import { Bridge } from '@/utils/bridge';
 
 export const useSchedulerStore = defineStore('scheduler', {
+  // [state] 
   state: () => ({
     currentMode: 'balance',
     appRules: {} as Record<string, string>,
@@ -15,6 +17,7 @@ export const useSchedulerStore = defineStore('scheduler', {
     isDaemonRunning: false, // 必须有这个初始状态
     loading: false
   }),
+  // [actions] 
   actions: {
     async initData() {
       this.loading = true;
@@ -37,10 +40,7 @@ export const useSchedulerStore = defineStore('scheduler', {
       } finally {
         this.loading = false;
       }
-    },
-    async switchMode(mode: string) {
-      await Bridge.setMode(mode);
-      this.currentMode = mode;
     }
+    // 全局模式 / 应用性能模式已禁止在 WebUI 修改（rules.yaml 只读），不再提供 switchMode 写操作
   }
 });

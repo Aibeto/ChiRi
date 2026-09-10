@@ -1,3 +1,4 @@
+# en.ftl: [main-monitor] [app-detect] [screen-detect] [monitors] [scheduler] [scheduler-config-watcher] [sysfs] [clg] [akmode] [touch] [fas] [fas-whitelist] [scheduler-settings] [fast-lock] [logger] [affinity] [corectl] [telemetry] [config-reload]
 # --- Main & Monitor ---
 yumi-module-starting = yumi-module Unified Starting...
 scheduler-module-started = Scheduler module started.
@@ -18,7 +19,7 @@ main-chdir = [Main] Changed working directory to: { $dir }
 main-module-root = [Main] Module root: { $path }
 main-config-loaded = [Main] Config loaded: { $path } (loglevel={ $loglevel }, language={ $language })
 main-chiri-scheduler-selected = [Main] Specific SoC detected, enabling Chiri scheduler
-main-special-tuned-exported = [Main] exported { $count } internal special-tuned whitelist entries to special_tuned.txt
+main-special-tuned-exported = [Main] exported { $count } internal special-tuned whitelist entries to special_tuned.yaml
 main-log-archive-submitted = [Main] previous logs archived, packing in background to logd/{ $zip }
 main-devimp-archive-submitted = [Main] previous devimp diagnostics archived, packing in background to logd/{ $zip }
 monitor-thread-start-screen = [Main] Starting screen state watcher thread...
@@ -116,6 +117,8 @@ scheduler-special-mode-active = [Scheduler] Special profile active: { $pkg } -> 
 scheduler-akmode-cooldown = [Scheduler] Special tuning takeover failed, entering { $secs }s cooldown; CLG takes over during cooldown
 scheduler-scene-mode-enter = [Scheduler] Screen off past threshold, switching to scenemode extreme power-saving.
 scheduler-scene-mode-exit-fas = [Scheduler] FAS re-activated, exiting scenemode early (all cores restored)
+scheduler-scene-mode-exit-switch = [Scheduler] scenemode_enabled disabled, exiting scenemode and restoring screen-off power-saving config
+scheduler-fas-switch-off = [Scheduler] fas_enabled disabled, deactivating all FAS instances and restoring scheduler takeover
 scheduler-scene-mode-saturation = [Scheduler] scenemode perf ceiling saturated (little util { $util }%), falling back to powersave with 300s cooldown
 
 # --- Scheduler: Config Watcher ---
@@ -152,6 +155,8 @@ clg-touch-boost = [CLG] Touch boost window open: big-core perf floor={ $floor } 
 clg-thermal-cap = [CLG] Thermal guard: battery={ $batt }°C / CPU={ $cpu }°C, perf ceiling capped to { $cap }% (>= { $free } exempt)
 clg-thermal-no-sensor = [CLG] Thermal guard: no CPU temperature sensor, CPU reference disabled
 clg-thermal-no-battery = [CLG] Thermal guard: battery temp node not found, CPU-only suppression
+battery-temp-scale = [Thermal] battery temp scale pre-detected: { $unit } (divisor { $divisor }); shared by CLG thermal guard and FAS temperature guard
+battery-temp-scale-unknown = [Thermal] battery temp scale pre-detection inconclusive (node missing or reading not ready); degrading to CPU-only this run
 clg-min-write-failed = [CLG] P{ $pid } failed to write scaling_min_freq={ $khz }MHz, idle floor may stay high
 
 # --- AKMode (Arknights special tuning) ---
@@ -196,7 +201,7 @@ fas-rules-reloaded = [FAS] rules hot-reloaded (margin={ $margin }, floor={ $floo
 fas-policy-writer-invalid = [FAS] P{ $pid } policy writer invalid (max_valid: { $max_valid }, min_valid: { $min_valid }), skipping.
 
 # --- FAS (whitelist / scheduler integration) ---
-main-fas-whitelist-exported = [Main] exported { $count } FAS whitelist entries to fas_whitelist.txt
+main-fas-whitelist-exported = [Main] exported { $count } FAS whitelist entries to fas_whitelist.yaml
 app-detect-fas-fallback = [AppDetect] foreground app hit FAS whitelist, entering FAS mode: { $pkg }
 app-detect-fas-rejected = [AppDetect] non-whitelisted app { $pkg } mapped to FAS mode { $mode }, rejected, falling back to global mode
 app-detect-fas-global-rejected = [AppDetect] global mode { $mode } is a FAS mode and does not apply to non-whitelisted app { $pkg }, falling back to balance

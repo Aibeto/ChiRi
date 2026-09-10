@@ -1,19 +1,4 @@
-/*
- * Copyright (C) 2026 yuki
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
- */
+//! frame_pipeline.rs: [phase1] [phase2] [ema] [decay] [thermal] [update-frame]
 
 use log::{debug, info};
 
@@ -25,9 +10,8 @@ use super::gear_state::GearDecision;
 use super::pid::scale_frames;
 
 impl FasController {
-    // ════════════════════════════════════════════════════════════
-    //  Phase 1: 冷启动 & 应用切换
-    // ════════════════════════════════════════════════════════════
+    // [phase1] 
+    // Phase 1: 冷启动 & 应用切换
 
     fn handle_early_exit(&mut self, actual_ms: f32) -> bool {
         if self.init_time.elapsed().as_millis() < self.cfg.cold_boot_ms as u128 {
@@ -61,9 +45,8 @@ impl FasController {
         false
     }
 
-    // ════════════════════════════════════════════════════════════
-    //  Phase 2: 加载检测
-    // ════════════════════════════════════════════════════════════
+    // [phase2] 
+    // Phase 2: 加载检测
 
     fn handle_loading(&mut self, actual_ms: f32, is_heavy: bool) -> bool {
         if is_heavy {
@@ -133,9 +116,8 @@ impl FasController {
         false
     }
 
-    // ════════════════════════════════════════════════════════════
-    //  Phase 4.5: EMA 更新
-    // ════════════════════════════════════════════════════════════
+    // [ema] 
+    // Phase 4.5: EMA 更新
 
     fn update_ema(&mut self, actual_ms: f32, avg_fps: f32) {
         // [动态 PID] 使用偏移后的目标 fps 计算 EMA baseline，
@@ -175,9 +157,8 @@ impl FasController {
         }
     }
 
-    // ════════════════════════════════════════════════════════════
-    //  Phase 6: 快速衰减
-    // ════════════════════════════════════════════════════════════
+    // [decay] 
+    // Phase 6: 快速衰减
 
     fn apply_fast_decay(&mut self, avg_fps: f32) {
         let floor = self.effective_perf_floor();
@@ -247,9 +228,8 @@ impl FasController {
         }
     }
 
-    // ════════════════════════════════════════════════════════════
-    //  Phase 2.5: 温度护栏（temp_threshold=0 禁用）
-    // ════════════════════════════════════════════════════════════
+    // [thermal] 
+    // Phase 2.5: 温度护栏（temp_threshold=0 禁用）
 
     /// 护栏锁存状态机：≥temp_threshold 进入、<temp_threshold-3℃ 退出
     /// （迟滞防阈值边缘振荡；温度源 3s 刷新，见 FasManager::refresh_temperature）
@@ -276,9 +256,8 @@ impl FasController {
         }
     }
 
-    // ════════════════════════════════════════════════════════════
-    //  update_frame — 主入口
-    // ════════════════════════════════════════════════════════════
+    // [update-frame] 
+    // update_frame — 主入口
 
     pub fn update_frame(&mut self, frame_delta_ns: u64) {
         if frame_delta_ns == 0 || self.policies.is_empty() {

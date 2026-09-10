@@ -1,3 +1,4 @@
+// index.ts: [create-i18n]
 // src/i18n/index.ts
 import { createI18n } from 'vue-i18n';
 import en from './locales/en';

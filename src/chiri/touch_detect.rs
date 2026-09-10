@@ -1,36 +1,4 @@
-/*
- * Copyright (C) 2026 yuki
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
- */
-
-/*
- * Copyright (C) 2026 ChiRi
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
- */
+//! touch_detect.rs: [consts] [monitor]
 
 use log::{debug, info, warn};
 use std::fs;
@@ -42,6 +10,7 @@ use std::time::Duration;
 use crate::fluent_args;
 use crate::i18n::{t, t_with_args};
 
+// [consts]
 // evdev 事件常量（linux/input-event-codes.h）
 const EV_KEY: u16 = 0x01;
 const EV_ABS: u16 = 0x03;
@@ -50,6 +19,7 @@ const ABS_MT_TRACKING_ID: u16 = 0x39; // 57
 /// 64 位 Android 下 struct input_event 长度：timeval(16) + type(2) + code(2) + value(4)
 const INPUT_EVENT_SIZE: usize = 24;
 
+// [monitor]
 /// 触摸检测线程：读取全部 /dev/input/event* 输入设备，检测触摸按下事件，
 /// 并把触摸事件通过 `tx` 发给 scheduler_ipc（事件驱动，即时触发 CLG 大核升频）。
 /// 阻塞运行（poll + 阻塞 read），随守护进程退出消亡。
@@ -110,8 +80,7 @@ pub fn monitor_touch(tx: SyncSender<()>) {
                         // 一次 read 可能包含多个 input_event，逐个解析
                         let mut off = 0;
                         while off + INPUT_EVENT_SIZE <= n {
-                            let etype =
-                                u16::from_ne_bytes([buf[off + 16], buf[off + 17]]);
+                            let etype = u16::from_ne_bytes([buf[off + 16], buf[off + 17]]);
                             let code = u16::from_ne_bytes([buf[off + 18], buf[off + 19]]);
                             let value = i32::from_ne_bytes([
                                 buf[off + 20],

@@ -1,10 +1,11 @@
 #!/system/bin/sh
+# customize.sh: [busybox] [i18n] [welcome] [hot-update-check] [mode-select] [hot-update-flow] [full-install]
 #
 # ChiRi Scheduler Installation Script
 
 
-# --- 模块路径和工具 ---
-# $MODPATH 是 Magisk 传入的模块安装路径
+# [busybox] 
+# 模块路径和工具：$MODPATH 是 Magisk 传入的模块安装路径
 
 # --- 自动检测 BusyBox ---
 if [ -x "/data/adb/magisk/busybox" ]; then
@@ -15,7 +16,8 @@ elif [ -x "/data/adb/ap/bin/busybox" ]; then
   BUSYBOX="/data/adb/ap/bin/busybox"
 fi
 
-# --- 语言定义 ---
+# [i18n] 
+# 语言定义
 CURRENT_LOCALE=$(/system/bin/getprop persist.sys.locale)
 if [ -z "$CURRENT_LOCALE" ]; then
     CURRENT_LOCALE=$(/system/bin/getprop ro.product.locale)
@@ -67,12 +69,14 @@ if echo "$CURRENT_LOCALE" | $BUSYBOX grep -qi "zh"; then
   MSG_HOT_UPDATE_ABORT="热更新已完成，如有报错请忽略。需要手动执行一次Action，否则调度可能会在管理器关闭后退出。"
 fi
 
-# --- 欢迎信息 ---
+# [welcome] 
+# 欢迎信息
 ui_print " "
 ui_print "$MSG_WELCOME"
 ui_print " "
 
-# --- 检查热更新标记文件 ---
+# [hot-update-check] 
+# 检查热更新标记文件
 # 检查zip内的allowHotUpdate文件
 ZIP_HOT_UPDATE_FLAG="$MODPATH/allowHotUpdate"
 # 检查已安装模块的allowHotUpdate文件
@@ -81,10 +85,12 @@ INSTALLED_HOT_UPDATE_FLAG="/data/adb/modules/chiri/allowHotUpdate"
 # 热更新可用条件：两个文件都存在且内容为1
 HOT_UPDATE_AVAILABLE=false
 if [ -f "$ZIP_HOT_UPDATE_FLAG" ] && [ "$(cat "$ZIP_HOT_UPDATE_FLAG")" = "1" ] && \
-   [ -f "$INSTALLED_HOT_UPDATE_FLAG" ] && [ "$(cat "$INSTALLED_HOT_UPDATE_FLAG")" = "1" ]; then
+  [ -f "$INSTALLED_HOT_UPDATE_FLAG" ] && [ "$(cat "$INSTALLED_HOT_UPDATE_FLAG")" = "1" ]; then
     HOT_UPDATE_AVAILABLE=true
 fi
 
+# [mode-select] 
+# 安装模式选择（音量键交互）
 if [ "$HOT_UPDATE_AVAILABLE" = "true" ]; then
     # 热更新模式可用，显示选择菜单
     ui_print "$MSG_SELECT_MODE"
@@ -192,6 +198,7 @@ if [ "$HOT_UPDATE_AVAILABLE" = "true" ]; then
         abort "$MSG_INSTALL_CANCELLED"
     fi
     
+# [hot-update-flow] 
     if [ $choice_result -eq 0 ]; then
         # 音量上键 - 完整安装
         ui_print "$MSG_SELECTED_UP"
@@ -290,7 +297,7 @@ if [ "$HOT_UPDATE_AVAILABLE" = "true" ]; then
         # service.sh/module.prop/allowHotUpdate/rules.yaml 任一缺失即判失败，
         # 走与二进制相同的回滚分支。
         for key_file in service.sh module.prop allowHotUpdate rules.yaml; do
-            [ -f "$MODDIR/$key_file" ] || UPDATE_OK=false
+           [ -f "$MODDIR/$key_file" ] || UPDATE_OK=false
         done
         if [ "$UPDATE_OK" = "false" ]; then
             if [ -f "$MODDIR/config/config.yaml.bak" ]; then
@@ -401,6 +408,7 @@ else
     ui_print " "
 fi
 
-# --- 完整安装流程（原逻辑） ---
+# [full-install] 
+# 完整安装流程（原逻辑）
 # 保留默认配置，不执行文件操作
 # 完整安装将由 Magisk 自动处理模块文件复制

@@ -1,3 +1,4 @@
+// index.d.ts: [exec] [spawn] [ui-apis] [packages] [exports]
 interface ExecOptions {
     cwd?: string,
     env?: { [key: string]: string }

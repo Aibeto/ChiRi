@@ -1,5 +1,7 @@
 #!/system/bin/sh
+# uninstall.sh: [stop-daemon] [restore-freq] [restore-vendor]
 
+# [stop-daemon] 
 # 先写卸载标记，让看门狗在下一次循环检查到后自行退出，不再拉起主进程。
 # 随后再强杀主进程与看门狗自身，确保卸载后不残留、不继续锁频。
 [ -z "$MODDIR" ] && MODDIR=${0%/*}
@@ -9,20 +11,22 @@ killall -9 yumi > /dev/null 2>&1
 rm -f "$MODDIR/logs/watchdog.pid" "$MODDIR/.uninstalling"
 sleep 1
 
+# [restore-freq] 
 # 恢复被锁的 CPU 频率：强杀时 governor 可能卡在 performance 锁频，
 # 放宽到硬件全档并退回 schedutil。
 for d in /sys/devices/system/cpu/cpufreq/policy*; do
-  [ -f "$d/scaling_available_frequencies" ] || continue
+ [ -f "$d/scaling_available_frequencies" ] || continue
   max_f=$(tr ' ' '\n' < "$d/scaling_available_frequencies" | sort -n | tail -1)
   min_f=$(tr ' ' '\n' < "$d/scaling_available_frequencies" | sort -n | head -1)
-  [ -n "$max_f" ] && echo "$max_f" > "$d/scaling_max_freq" 2>/dev/null
-  [ -n "$min_f" ] && echo "$min_f" > "$d/scaling_min_freq" 2>/dev/null
+ [ -n "$max_f" ] && echo "$max_f" > "$d/scaling_max_freq" 2>/dev/null
+ [ -n "$min_f" ] && echo "$min_f" > "$d/scaling_min_freq" 2>/dev/null
   if grep -q schedutil "$d/scaling_available_governors" 2>/dev/null; then
     echo schedutil > "$d/scaling_governor" 2>/dev/null
   fi
 done
 
-# 恢复 OPPO/OnePlus/Realme 的 Oiface
+# [restore-vendor] 
+# 恢复 OPPO/OnePlus/Realme 的 Oiface（当前注释停用）
 # if [ -n "$(getprop persist.sys.oiface.enable)" ]; then
 #   setprop persist.sys.oiface.enable 1
 # fi

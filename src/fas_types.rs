@@ -1,30 +1,14 @@
-/*
- * Copyright (C) 2026 yuki
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
- */
+//! fas_types.rs: [pid] [cluster] [per_app] [rules]
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-// ════════════════════════════════════════════════════════════════
-//  PID 系数 (60fps 基准值，运行时根据 target_fps 动态缩放)
+// [pid]
+// PID 系数 (60fps 基准值，运行时根据 target_fps 动态缩放)
 //
-//  kp: 比例增益 — 按 target_fps/60 线性缩放
-//  ki: 积分增益 — 按 sqrt(target_fps/60) 缩放（防高刷积分饱和）
-//  kd: 微分增益 — 按 (target_fps/60)^0.3 缩放（高刷噪声大）
-// ════════════════════════════════════════════════════════════════
+// kp: 比例增益 — 按 target_fps/60 线性缩放
+// ki: 积分增益 — 按 sqrt(target_fps/60) 缩放（防高刷积分饱和）
+// kd: 微分增益 — 按 (target_fps/60)^0.3 缩放（高刷噪声大）
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct PidCoefficients {
@@ -57,9 +41,8 @@ impl Default for PidCoefficients {
     }
 }
 
-// ════════════════════════════════════════════════════════════════
-//  Cluster 配置
-// ════════════════════════════════════════════════════════════════
+// [cluster]
+// Cluster 配置
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ClusterProfile {
@@ -93,9 +76,8 @@ pub fn default_cluster_profiles() -> Vec<ClusterProfile> {
     ]
 }
 
-// ════════════════════════════════════════════════════════════════
-//  Per-App 配置
-// ════════════════════════════════════════════════════════════════
+// [per_app]
+// Per-App 配置
 
 /// 每个游戏的配置档案
 ///
@@ -125,9 +107,8 @@ pub struct PerAppProfile {
     pub fps_margin: Option<f32>,
 }
 
-// ════════════════════════════════════════════════════════════════
-//  FAS Rules 配置
-// ════════════════════════════════════════════════════════════════
+// [rules]
+// FAS Rules 配置
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct FasRulesConfig {

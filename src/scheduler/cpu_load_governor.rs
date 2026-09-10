@@ -1,32 +1,15 @@
-/*
- * Copyright (C) 2026 yuki
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
- */
-
+//! cpu_load_governor.rs: [restore] [cluster] [governor] [release] [on-load]
 
 use crate::scheduler::config::CpuLoadGovernorConfig;
 use crate::utils::FastWriter;
-use log::{info, debug, warn};
+use log::{debug, info, warn};
 use std::fs;
 
-use crate::i18n::{t, t_with_args};
 use crate::fluent_args;
+use crate::i18n::{t, t_with_args};
 
-// ════════════════════════════════════════════════════════════════
-//  PolicyRestore — CLG 接管前的系统状态快照，release 时恢复
-// ════════════════════════════════════════════════════════════════
+// [restore]
+// PolicyRestore — CLG 接管前的系统状态快照，release 时恢复
 
 struct PolicyRestore {
     policy_id: i32,
@@ -38,9 +21,8 @@ struct PolicyRestore {
     hw_max: u32,
 }
 
-// ════════════════════════════════════════════════════════════════
-//  ClusterState — 单 cluster 运行时状态
-// ════════════════════════════════════════════════════════════════
+// [cluster]
+// ClusterState — 单 cluster 运行时状态
 
 struct ClusterState {
     policy_id: i32,
@@ -70,12 +52,18 @@ impl ClusterState {
             let hi = idx;
             if (self.cached_ratios[hi] - target_ratio).abs()
                 < (self.cached_ratios[lo] - target_ratio).abs()
-            { self.available_freqs[hi] } else { self.available_freqs[lo] }
+            {
+                self.available_freqs[hi]
+            } else {
+                self.available_freqs[lo]
+            }
         }
     }
 
     fn write_freq(&mut self, freq: u32) {
-        if freq == self.current_freq { return; }
+        if freq == self.current_freq {
+            return;
+        }
         let old_freq = self.current_freq;
         let ok = if freq >= self.current_freq {
             // 升频：先拉高 max 再拉高 min
@@ -91,31 +79,43 @@ impl ClusterState {
         // 仅在两端均写入成功时更新缓存，失败则下次 tick 自动重试
         if ok {
             self.current_freq = freq;
-            debug!("{}", t_with_args("clg-freq-set", &fluent_args!(
-                "pid" => self.policy_id.to_string(),
-                "old_khz" => (old_freq / 1000).to_string(),
-                "new_khz" => (freq / 1000).to_string()
-            )));
+            debug!(
+                "{}",
+                t_with_args(
+                    "clg-freq-set",
+                    &fluent_args!(
+                        "pid" => self.policy_id.to_string(),
+                        "old_khz" => (old_freq / 1000).to_string(),
+                        "new_khz" => (freq / 1000).to_string()
+                    )
+                )
+            );
         } else {
-            debug!("{}", t_with_args("clg-freq-write-failed-cached", &fluent_args!(
-                "pid" => self.policy_id.to_string(),
-                "target_khz" => (freq / 1000).to_string(),
-                "cached_khz" => (self.current_freq / 1000).to_string()
-            )));
+            debug!(
+                "{}",
+                t_with_args(
+                    "clg-freq-write-failed-cached",
+                    &fluent_args!(
+                        "pid" => self.policy_id.to_string(),
+                        "target_khz" => (freq / 1000).to_string(),
+                        "cached_khz" => (self.current_freq / 1000).to_string()
+                    )
+                )
+            );
         }
     }
 
     fn max_util(&self, core_utils: &[f32]) -> f32 {
-        self.affected_cpus.iter()
+        self.affected_cpus
+            .iter()
             .filter_map(|&cpu| core_utils.get(cpu))
             .copied()
             .fold(0.0_f32, f32::max)
     }
 }
 
-// ════════════════════════════════════════════════════════════════
-//  CpuLoadGovernor — 主控制器
-// ════════════════════════════════════════════════════════════════
+// [governor]
+// CpuLoadGovernor — 主控制器
 
 pub struct CpuLoadGovernor {
     clusters: Vec<ClusterState>,
@@ -151,20 +151,30 @@ impl CpuLoadGovernor {
         for policy in &clusters {
             let pid = policy.id;
             let gov_path = format!(
-                "/sys/devices/system/cpu/cpufreq/policy{}/scaling_governor", pid);
+                "/sys/devices/system/cpu/cpufreq/policy{}/scaling_governor",
+                pid
+            );
             let min_path = format!(
-                "/sys/devices/system/cpu/cpufreq/policy{}/scaling_min_freq", pid);
+                "/sys/devices/system/cpu/cpufreq/policy{}/scaling_min_freq",
+                pid
+            );
             let max_path = format!(
-                "/sys/devices/system/cpu/cpufreq/policy{}/scaling_max_freq", pid);
+                "/sys/devices/system/cpu/cpufreq/policy{}/scaling_max_freq",
+                pid
+            );
 
             let freq_path = format!(
-                "/sys/devices/system/cpu/cpufreq/policy{}/scaling_available_frequencies", pid);
+                "/sys/devices/system/cpu/cpufreq/policy{}/scaling_available_frequencies",
+                pid
+            );
             let mut freqs: Vec<u32> = fs::read_to_string(&freq_path)
                 .unwrap_or_default()
                 .split_whitespace()
                 .filter_map(|s| s.parse().ok())
                 .collect();
-            if freqs.is_empty() { continue; }
+            if freqs.is_empty() {
+                continue;
+            }
             freqs.sort_unstable();
             freqs.dedup();
 
@@ -176,38 +186,52 @@ impl CpuLoadGovernor {
             }
 
             let affected = Self::read_affected_cpus(pid);
-            if affected.is_empty() { continue; }
+            if affected.is_empty() {
+                continue;
+            }
 
             let fmin = *freqs.first().unwrap() as f32;
             let fmax = *freqs.last().unwrap() as f32;
             let range = (fmax - fmin).max(1.0);
-            let cached_ratios: Vec<f32> = freqs.iter()
-                .map(|&f| (f as f32 - fmin) / range)
-                .collect();
+            let cached_ratios: Vec<f32> =
+                freqs.iter().map(|&f| (f as f32 - fmin) / range).collect();
 
             let max_writer = FastWriter::new(format!(
-                "/sys/devices/system/cpu/cpufreq/policy{}/scaling_max_freq", pid));
+                "/sys/devices/system/cpu/cpufreq/policy{}/scaling_max_freq",
+                pid
+            ));
             let min_writer = FastWriter::new(format!(
-                "/sys/devices/system/cpu/cpufreq/policy{}/scaling_min_freq", pid));
+                "/sys/devices/system/cpu/cpufreq/policy{}/scaling_min_freq",
+                pid
+            ));
 
             if !max_writer.is_valid() || !min_writer.is_valid() {
-                warn!("{}", t_with_args("clg-writer-invalid", &fluent_args!(
-                    "pid" => pid.to_string(),
-                    "max_valid" => max_writer.is_valid().to_string(),
-                    "min_valid" => min_writer.is_valid().to_string()
-                )));
+                warn!(
+                    "{}",
+                    t_with_args(
+                        "clg-writer-invalid",
+                        &fluent_args!(
+                            "pid" => pid.to_string(),
+                            "max_valid" => max_writer.is_valid().to_string(),
+                            "min_valid" => min_writer.is_valid().to_string()
+                        )
+                    )
+                );
                 continue;
             }
 
             // 记录系统原始状态（每个将被接管的 policy 单独记录），release 时恢复。
             // 必须位于 governor 写入之前，确保 release 能还原所有被接管的 cluster。
             // 读取失败记录为 None：恢复时跳过对应字段，避免写退化值（如 0）。
-            let governor = fs::read_to_string(&gov_path).ok()
+            let governor = fs::read_to_string(&gov_path)
+                .ok()
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty());
-            let min_freq = fs::read_to_string(&min_path).ok()
+            let min_freq = fs::read_to_string(&min_path)
+                .ok()
                 .and_then(|s| s.trim().parse::<u32>().ok());
-            let max_freq = fs::read_to_string(&max_path).ok()
+            let max_freq = fs::read_to_string(&max_path)
+                .ok()
                 .and_then(|s| s.trim().parse::<u32>().ok());
             // 同 policy 只保留最新快照（覆盖上次恢复失败遗留的旧记录）
             self.restore.retain(|r| r.policy_id != pid);
@@ -221,7 +245,10 @@ impl CpuLoadGovernor {
 
             let _ = crate::utils::try_write_file(&gov_path, "performance");
 
-            let init_perf = self.cfg.perf_init.clamp(self.cfg.perf_floor, self.cfg.perf_ceil);
+            let init_perf = self
+                .cfg
+                .perf_init
+                .clamp(self.cfg.perf_floor, self.cfg.perf_ceil);
             let boost_max = policy.boost_frequencies.iter().copied().max().unwrap_or(0);
             let mut cluster = ClusterState {
                 policy_id: pid,
@@ -246,28 +273,43 @@ impl CpuLoadGovernor {
                 cluster.current_freq = init_freq;
             }
 
-            info!("{}", t_with_args("clg-init", &fluent_args!(
-                "pid" => pid.to_string(),
-                "cpus" => format!("{:?}", affected),
-                "fmin" => (fmin / 1000.0).to_string(),
-                "fmax" => (fmax / 1000.0).to_string(),
-                "perf" => format!("{:.2}", init_perf),
-                "freq" => (init_freq / 1000).to_string()
-            )));
+            info!(
+                "{}",
+                t_with_args(
+                    "clg-init",
+                    &fluent_args!(
+                        "pid" => pid.to_string(),
+                        "cpus" => format!("{:?}", affected),
+                        "fmin" => (fmin / 1000.0).to_string(),
+                        "fmax" => (fmax / 1000.0).to_string(),
+                        "perf" => format!("{:.2}", init_perf),
+                        "freq" => (init_freq / 1000).to_string()
+                    )
+                )
+            );
 
             self.clusters.push(cluster);
         }
 
         self.active = !self.clusters.is_empty();
         if self.active {
-            info!("{}", t_with_args("clg-activated", &fluent_args!("count" => self.clusters.len().to_string())));
+            info!(
+                "{}",
+                t_with_args(
+                    "clg-activated",
+                    &fluent_args!("count" => self.clusters.len().to_string())
+                )
+            );
         } else {
             warn!("{}", t("clg-no-clusters"));
         }
     }
 
+    // [release]
     pub fn release(&mut self) {
-        if self.active { info!("{}", t("clg-deactivated")); }
+        if self.active {
+            info!("{}", t("clg-deactivated"));
+        }
         // 恢复系统原始状态，避免 release 后 CPU 悬停在 CLG 最后写入的值上。
         // 恢复失败的条目保留，下次 release/init 时重试，避免静默漂移。
         self.restore.retain(|r| !Self::restore_policy(r));
@@ -279,12 +321,18 @@ impl CpuLoadGovernor {
     pub fn reload_config(&mut self, gov_cfg: &CpuLoadGovernorConfig) {
         self.cfg = gov_cfg.clone();
         self.normalize_cfg();
-        debug!("{}", t_with_args("clg-config-reloaded", &fluent_args!(
-            "up" => format!("{:.2}", self.cfg.up_threshold),
-            "down" => format!("{:.2}", self.cfg.down_threshold),
-            "floor" => format!("{:.2}", self.cfg.perf_floor),
-            "ceil" => format!("{:.2}", self.cfg.perf_ceil)
-        )));
+        debug!(
+            "{}",
+            t_with_args(
+                "clg-config-reloaded",
+                &fluent_args!(
+                    "up" => format!("{:.2}", self.cfg.up_threshold),
+                    "down" => format!("{:.2}", self.cfg.down_threshold),
+                    "floor" => format!("{:.2}", self.cfg.perf_floor),
+                    "ceil" => format!("{:.2}", self.cfg.perf_ceil)
+                )
+            )
+        );
     }
 
     /// 校验并规范化配置：防止 perf_floor > perf_ceil / NaN 导致 f32::clamp panic
@@ -292,10 +340,16 @@ impl CpuLoadGovernor {
         let floor = self.cfg.perf_floor;
         let ceil = self.cfg.perf_ceil;
         if floor.is_finite() && ceil.is_finite() && floor > ceil {
-            warn!("{}", t_with_args("clg-perf-clamped", &fluent_args!(
-                "floor" => format!("{:.2}", floor),
-                "ceil" => format!("{:.2}", ceil)
-            )));
+            warn!(
+                "{}",
+                t_with_args(
+                    "clg-perf-clamped",
+                    &fluent_args!(
+                        "floor" => format!("{:.2}", floor),
+                        "ceil" => format!("{:.2}", ceil)
+                    )
+                )
+            );
         }
         self.cfg.normalize();
     }
@@ -304,11 +358,17 @@ impl CpuLoadGovernor {
     /// 返回是否全部写入成功：失败时返回 false，调用方保留快照以便重试。
     fn restore_policy(r: &PolicyRestore) -> bool {
         let gov_path = format!(
-            "/sys/devices/system/cpu/cpufreq/policy{}/scaling_governor", r.policy_id);
+            "/sys/devices/system/cpu/cpufreq/policy{}/scaling_governor",
+            r.policy_id
+        );
         let min_path = format!(
-            "/sys/devices/system/cpu/cpufreq/policy{}/scaling_min_freq", r.policy_id);
+            "/sys/devices/system/cpu/cpufreq/policy{}/scaling_min_freq",
+            r.policy_id
+        );
         let max_path = format!(
-            "/sys/devices/system/cpu/cpufreq/policy{}/scaling_max_freq", r.policy_id);
+            "/sys/devices/system/cpu/cpufreq/policy{}/scaling_max_freq",
+            r.policy_id
+        );
 
         let mut all_ok = true;
         // 写序保证任意中间状态均满足 min <= max：
@@ -334,17 +394,26 @@ impl CpuLoadGovernor {
             }
         }
 
-        debug!("{}", t_with_args("clg-restore", &fluent_args!(
-            "pid" => r.policy_id.to_string(),
-            "governor" => r.governor.clone().unwrap_or_else(|| "<unread>".to_string()),
-            "min" => r.min_freq.map(|v| v.to_string()).unwrap_or_else(|| "<unread>".to_string()),
-            "max" => r.max_freq.map(|v| v.to_string()).unwrap_or_else(|| "<unread>".to_string())
-        )));
+        debug!(
+            "{}",
+            t_with_args(
+                "clg-restore",
+                &fluent_args!(
+                    "pid" => r.policy_id.to_string(),
+                    "governor" => r.governor.clone().unwrap_or_else(|| "<unread>".to_string()),
+                    "min" => r.min_freq.map(|v| v.to_string()).unwrap_or_else(|| "<unread>".to_string()),
+                    "max" => r.max_freq.map(|v| v.to_string()).unwrap_or_else(|| "<unread>".to_string())
+                )
+            )
+        );
         all_ok
     }
 
+    // [on-load]
     pub fn on_load_update(&mut self, core_utils: &[f32]) {
-        if !self.active { return; }
+        if !self.active {
+            return;
+        }
 
         for cluster in &mut self.clusters {
             let raw_util = cluster.max_util(core_utils);
@@ -369,8 +438,7 @@ impl CpuLoadGovernor {
                 1.0
             };
 
-            let target_perf = (util * headroom)
-                .clamp(self.cfg.perf_floor, self.cfg.perf_ceil);
+            let target_perf = (util * headroom).clamp(self.cfg.perf_floor, self.cfg.perf_ceil);
             let old_perf = cluster.current_perf;
 
             if target_perf > old_perf {
@@ -382,8 +450,8 @@ impl CpuLoadGovernor {
                     continue;
                 }
 
-                let is_high_load = util >= self.cfg.up_threshold; 
-                let is_significant_jump = target_perf > old_perf + self.cfg.up_jump_threshold; 
+                let is_high_load = util >= self.cfg.up_threshold;
+                let is_significant_jump = target_perf > old_perf + self.cfg.up_jump_threshold;
 
                 if is_high_load || is_significant_jump {
                     cluster.current_perf += (target_perf - old_perf) * self.cfg.smoothing_up;
@@ -395,7 +463,7 @@ impl CpuLoadGovernor {
                     let gap = ((util - self.cfg.down_threshold) / span).clamp(0.0, 1.0);
                     let speed = self.cfg.smoothing_up
                         * (self.cfg.slow_up_scale + (1.0 - self.cfg.slow_up_scale) * gap);
-                    cluster.current_perf += (target_perf - old_perf) * speed; 
+                    cluster.current_perf += (target_perf - old_perf) * speed;
                 }
             } else {
                 cluster.up_wait = 0;
@@ -420,7 +488,9 @@ impl CpuLoadGovernor {
                 }
             }
 
-            cluster.current_perf = cluster.current_perf.clamp(self.cfg.perf_floor, self.cfg.perf_ceil);
+            cluster.current_perf = cluster
+                .current_perf
+                .clamp(self.cfg.perf_floor, self.cfg.perf_ceil);
             let target_freq = cluster.find_nearest_freq(cluster.current_perf);
             cluster.write_freq(target_freq);
         }
@@ -428,20 +498,28 @@ impl CpuLoadGovernor {
         self.log_counter += 1;
         if self.log_counter % 25 == 0 {
             for c in &self.clusters {
-                debug!("{}", t_with_args("clg-tick-log", &fluent_args!(
-                    "pid" => c.policy_id.to_string(),
-                    "util" => format!("{:.0}", c.max_util(core_utils) * 100.0),
-                    "perf" => format!("{:.2}", c.current_perf),
-                    "freq" => (c.current_freq / 1000).to_string(),
-                    "boost" => format!("{:.0}", c.boost_max as f32 / 1000.0)
-                )));
+                debug!(
+                    "{}",
+                    t_with_args(
+                        "clg-tick-log",
+                        &fluent_args!(
+                            "pid" => c.policy_id.to_string(),
+                            "util" => format!("{:.0}", c.max_util(core_utils) * 100.0),
+                            "perf" => format!("{:.2}", c.current_perf),
+                            "freq" => (c.current_freq / 1000).to_string(),
+                            "boost" => format!("{:.0}", c.boost_max as f32 / 1000.0)
+                        )
+                    )
+                );
             }
         }
     }
 
     fn read_affected_cpus(policy_id: i32) -> Vec<usize> {
         let path = format!(
-            "/sys/devices/system/cpu/cpufreq/policy{}/affected_cpus", policy_id);
+            "/sys/devices/system/cpu/cpufreq/policy{}/affected_cpus",
+            policy_id
+        );
         fs::read_to_string(&path)
             .unwrap_or_default()
             .split_whitespace()

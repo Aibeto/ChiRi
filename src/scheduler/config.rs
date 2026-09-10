@@ -1,22 +1,8 @@
-/*
- * Copyright (C) 2026 yuki
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
- */
+//! config.rs: [meta] [clg-cfg] [clg-normalize] [mode-misc]
 
 use serde::Deserialize;
 
+// [meta]
 #[derive(Debug, Deserialize, Default)]
 pub struct Meta {
     #[serde(default = "default_loglevel", alias = "Loglevel")]
@@ -33,9 +19,8 @@ fn default_language() -> String {
     "en".to_string()
 }
 
-// ════════════════════════════════════════════════════════════════
-//  CPU Load Governor 配置
-// ════════════════════════════════════════════════════════════════
+// [clg-cfg]
+// CPU Load Governor 配置
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct CpuLoadGovernorConfig {
@@ -171,6 +156,7 @@ impl Default for CpuLoadGovernorConfig {
     }
 }
 
+// [clg-normalize]
 impl CpuLoadGovernorConfig {
     /// 校验并规范化配置：
     /// - 非有限值（NaN/±Inf，如 YAML 溢出值）回退默认，防止污染控制链
@@ -259,9 +245,8 @@ impl CpuLoadGovernorConfig {
     }
 }
 
-// ════════════════════════════════════════════════════════════════
-//  核心模式与杂项配置
-// ════════════════════════════════════════════════════════════════
+// [mode-misc]
+// 核心模式与杂项配置
 
 #[derive(Debug, Deserialize, Default, Clone)]
 pub struct Mode {

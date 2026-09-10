@@ -1,3 +1,4 @@
+# Cargo.toml: [workspace] [package] [dependencies] [profile.release]
 [workspace]
 # 注意：yumi-ebpf 是 bpfel-unknown-none 的 no_std 探针，无法用带 std 的目标（如
 # aarch64-linux-android 或 Windows host）编译/检查，故从根 workspace 摘除，

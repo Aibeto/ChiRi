@@ -1,14 +1,17 @@
 #!/system/bin/sh
+# service.sh: [boot-wait] [paths] [cleanup] [permissions] [watchdog-start]
 #
 # yumi 模块启动脚本 (service.sh)
 #
 
-# 1. 等待系统启动完成
+# [boot-wait] 
+# 等待系统启动完成
 until [ "$(getprop sys.boot_completed)" = "1" ]; do
   sleep 1
 done
 
-# 2. 定义路径
+# [paths] 
+# 定义路径
 [ -z "$MODDIR" ] && MODDIR=${0%/*}
 
 DAEMON_PATH="$MODDIR/core/bin/yumi"
@@ -33,7 +36,8 @@ mkdir -p "$LOG_DIR"
 #   echo "$(date): Joyose service disabled and data cleared." >> "$LOG_FILE"
 # fi
 
-# 3. 清理旧进程（含旧看门狗）：重新执行本脚本（模块热更新/管理器重载）时
+# [cleanup] 
+# 清理旧进程（含旧看门狗）：重新执行本脚本（模块热更新/管理器重载）时
 #    若只 killall yumi，旧看门狗仍存活并在 3s 后把 daemon 再拉起——与新看门狗
 #    形成双 daemon 实例，devimp/status/daemon 日志各写两份。先按 pid 文件终止
 #    旧看门狗再清 daemon。
@@ -49,13 +53,14 @@ if [ -f "$LOG_DIR/watchdog.pid" ]; then
 fi
 killall -9 yumi > /dev/null 2>&1
 
-# 4. 设置权限
+# [permissions] 
+# 设置权限
 chmod 755 "$DAEMON_PATH"
 if [ -d "$SCRIPTS_DIR" ]; then
   chmod -R 755 "$SCRIPTS_DIR"
 fi
 
-# 5. 调用禁用 boost 脚本
+# 调用禁用 boost 脚本（当前注释停用）
 # if [ -f "$SCRIPTS_DIR/disable_boost.sh" ]; then
 #   echo "$(date): Executing disable_boost.sh" >> "$LOG_FILE"
 #   "$SCRIPTS_DIR/disable_boost.sh"
@@ -63,7 +68,8 @@ fi
 #   echo "$(date): disable_boost.sh not found" >> "$LOG_FILE"
 # fi
 
-# 6. 启动 yumi 看门狗（崩溃自动重启，卸载时退出）
+# [watchdog-start] 
+# 启动 yumi 看门狗（崩溃自动重启，卸载时退出）
 # 看门狗记录自身 PID 到 logs/watchdog.pid，供 WebUI「关闭调度」定位并终止。
 # 退出条件：存在卸载标记 .uninstalling（卸载中）或主进程二进制被删除（卸载完成）。
 # 崩溃/异常退出不满足退出条件，3 秒后自动拉起。
@@ -83,8 +89,8 @@ WATCHDOG_CMD="sh -c '
   PIDFILE=\"\$1\"; DAEMON=\"\$2\"; FLAG=\"\$3\"
   echo \$\$ > \"\$PIDFILE\"
   while :; do
-    [ -f \"\$FLAG\" ] && break      # 卸载标记 → 退出，不残留
-    [ -f \"\$DAEMON\" ] || break    # 二进制被删 → 退出，不残留
+   [ -f \"\$FLAG\" ] && break      # 卸载标记 → 退出，不残留
+   [ -f \"\$DAEMON\" ] || break    # 二进制被删 → 退出，不残留
     \"\$DAEMON\"                    # 崩溃/退出后返回，sleep 后再拉起
     sleep 3
   done

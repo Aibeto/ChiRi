@@ -1,19 +1,4 @@
-/*
- * Copyright (C) 2026 yuki
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
- */
+//! app_detect.rs: [state] [cgroup] [mode] [rules] [cfgwatch] [loop]
 
 use inotify::{Inotify, WatchMask};
 use log::{debug, info, warn};
@@ -32,6 +17,7 @@ use crate::fluent_args;
 use crate::i18n::{t, t_with_args};
 use crate::utils;
 
+// [state]
 // 缓存有效的 Cgroup 路径索引，避免每次循环都去探测无效路径
 static VALID_CGROUP_IDX: AtomicUsize = AtomicUsize::new(usize::MAX);
 
@@ -96,7 +82,8 @@ fn set_current_package(pkg: &str, pid: i32) {
     CURRENT_PID.store(pid, Ordering::Relaxed);
 }
 
-// ==================== [核心：纯 Cgroup 检测逻辑] ====================
+// [cgroup]
+// 核心：纯 Cgroup 检测逻辑
 
 /// 判断是否为有效的用户应用包名
 fn is_valid_user_app(pkg: &str, ignored_apps: &[String]) -> bool {
@@ -190,7 +177,8 @@ fn get_focused_app_from_cgroup(ignored_apps: &[String]) -> Result<(String, i32),
     Err("No valid app found".into())
 }
 
-// ==================== [辅助函数] ====================
+// [mode]
+// 模式判定辅助函数
 
 fn determine_mode(config: &RulesConfig, current_package: &str) -> String {
     // 特调可用性：仅 Chiri SoC 且 akmode.yaml 成功加载时特调才生效。
@@ -322,17 +310,7 @@ fn determine_mode(config: &RulesConfig, current_package: &str) -> String {
     global
 }
 
-pub fn get_default_rules() -> RulesConfig {
-    RulesConfig {
-        yumi_scheduler: true,
-        dynamic_enabled: true,
-        global_mode: "balance".to_string(),
-        app_modes: HashMap::new(),
-        ignored_apps: Vec::new(),
-        fas_rules: super::config::FasRulesConfig::default(),
-    }
-}
-
+// [cfgwatch]
 pub fn watch_config_file(
     config_arc: Arc<Mutex<RulesConfig>>,
     force_refresh_arc: Arc<AtomicBool>,
@@ -341,11 +319,12 @@ pub fn watch_config_file(
     let mut inotify = Inotify::init()?;
     let rules_path = config::get_rules_path();
     if !rules_path.exists() {
-        let _ = utils::try_write_file(&rules_path, "");
+        // 兜底：快照缺失时直接用嵌入内容落盘（正常路径由 main.rs::sync_rules_snapshot 完成）
+        let _ = utils::try_write_file(&rules_path, crate::common::embedded_rules_str());
     }
     // 监听 rules.yaml 所在目录而非文件本身：WebUI 通过「临时文件 + 原子 mv」替换
     // rules.yaml 时，若 watch 挂在旧 inode 上会永久失效，只有目录级 watch 才能感知
-    // MOVED_TO；其余文件（active_config.txt 等）通过文件名过滤避免误触发重载。
+    // MOVED_TO；其余文件（active_config.chr 等）通过文件名过滤避免误触发重载。
     let rules_dir = rules_path.parent().ok_or("invalid rules.yaml path")?;
     inotify.watches().add(
         rules_dir,
@@ -376,17 +355,9 @@ pub fn watch_config_file(
             }
             info!("{}", t("app-detect-reloading"));
 
-            let new_config = crate::utils::read_config::<RulesConfig, _>(&rules_path)
-                .unwrap_or_else(|e| {
-                    warn!(
-                        "{}",
-                        t_with_args(
-                            "app-detect-load-failed",
-                            &fluent_args!("error" => e.to_string())
-                        )
-                    );
-                    get_default_rules()
-                });
+            // rules.yaml 运行时一律读嵌入内容（编译期打包，防篡改）：磁盘文件仅是
+            // 启动时复制出的展示副本，即使被改写，重载结果也与嵌入内容一致
+            let new_config = crate::common::embedded_rules();
 
             *config_arc.lock().unwrap() = new_config.clone();
 
@@ -400,6 +371,7 @@ pub fn watch_config_file(
     }
 }
 
+// [loop]
 pub fn app_detection_loop(
     config_arc: Arc<Mutex<RulesConfig>>,
     screen_state_arc: Arc<Mutex<bool>>,

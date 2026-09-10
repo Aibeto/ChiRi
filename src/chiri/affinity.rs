@@ -1,19 +1,4 @@
-/*
- * Copyright (C) 2026 ChiRi
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
- */
+//! affinity.rs: [consts] [cpuset_io] [reserve_core] [sys_probe] [manager] [rebalance] [fg_promote]
 
 /// CPU 亲和与线程迁移控制器（ChiRi 专属，按核心粒度放置，低开销版）。
 ///
@@ -47,7 +32,7 @@
 /// 关键线程不走 score 选核——组绑定交给内核调度；score 只服务单核钉定的
 /// 普通线程与后台 promoted 线程。
 ///
-/// 黑名单：affinity_blacklist.txt 编译嵌入 + 空 cmdline/`/` 开头内置兜底；
+/// 黑名单：affinity_blacklist.yaml 编译嵌入 + 空 cmdline/`/` 开头内置兜底；
 /// 线程 comm 命中不迁移；后台 promote 前读一次进程 cmdline 校验并缓存。
 use crate::chiri::config::AffinityConfig;
 use crate::utils::SysPathExist;
@@ -59,9 +44,24 @@ use std::time::{Duration, Instant};
 use crate::fluent_args;
 use crate::i18n::{t, t_with_args};
 
+// [consts]
 const KIND_NONE: u8 = 0;
 const KIND_BOOST: u8 = 1;
 const KIND_NORMAL: u8 = 2;
+
+/// 线程被绑到性能核组（big∪prime）的原因；None = 未绑定。
+/// 用单一枚举替代原先 `group_pinned + busy_bound` 两个必须手工同步的布尔量——
+/// 两布尔量要求所有绑定/释放路径同时改一对方可保持一致，漏改一处会让线程停在
+/// 「已标记忙但未绑定」的矛盾态而静默失效
+#[derive(Clone, Copy, PartialEq)]
+enum GroupBind {
+    /// 未绑定（全核掩码）
+    None,
+    /// 关键线程：boost 组掩码兜底 / balance 小核高水位 normal_press
+    Key,
+    /// balance 小核高水位下因「忙」绑定（normal_busy），空闲后单独释放
+    Busy,
+}
 
 const GROUP_TOP_APP: &str = "top-app";
 const GROUP_FOREGROUND: &str = "foreground";
@@ -117,6 +117,19 @@ const PROMOTE_UTIL_PCT: f32 = 25.0;
 const LITTLE_HIGH_WATER: f32 = 0.70;
 /// balance 模式关键线程组绑定的解除水位（迟滞下沿，防乒乓）
 const KEY_BIND_RELEASE_WATER: f32 = 0.50;
+/// balance 小核高水位时，非关键前台线程「忙」判定阈值（%）：窗口 util 连续
+/// 两窗达此值即抬到 big∪prime。8550 实测 little 常有一颗核被单个非关键前台
+/// 线程打满（util 0.70~0.95）而 big 平均有 3+ 核空闲、prime 近空转——仅绑关键
+/// 线程不足以解除小核饱和
+const FG_BUSY_UTIL_PCT: f32 = 30.0;
+/// 压力窗口内每轮最多采样 util 的非关键前台线程数（游标轮转）：限制新增文件
+/// IO——前台线程可达数十，逐轮全量读 stat 会退化回「逐线程每轮读 stat」的高开销
+const FG_SCAN_WINDOW: usize = 32;
+/// normal_busy 的释放水位（%）：绑定后 util 持续低于此值才回落全核。
+/// 与绑定水位 FG_BUSY_UTIL_PCT 构成滞回，避免阈值边缘反复绑/放；若沿用
+/// DEMOTE_UTIL_PCT(5%) 作释放水位，5~30% 的中等负载线程会长期滞留在性能核，
+/// little 高水位持续期间能耗反而上升（与调优目标相悖）
+const FG_BUSY_RELEASE_UTIL_PCT: f32 = 15.0;
 const LITTLE_PROMOTE_UTIL_PCT: f32 = 10.0;
 const BIG_HIGH_WATER: f32 = 0.90;
 const DEMOTE_UTIL_PCT: f32 = 5.0;
@@ -131,6 +144,7 @@ const KEY_THREAD_COMMS: [&str; 5] = [
     "UnityGfxDeviceW",
 ];
 
+// [cpuset_io]
 fn is_key_thread(tid: i32, main_tid: i32, comm: &str) -> bool {
     tid == main_tid || KEY_THREAD_COMMS.iter().any(|k| *k == comm)
 }
@@ -179,9 +193,7 @@ fn read_cpuset_tasks(group: &str) -> Vec<i32> {
         .collect()
 }
 
-// ════════════════════════════════════════════════════════════════
-//  专用核独占（scenemode）：把一颗小核完全留给调度服务
-// ════════════════════════════════════════════════════════════════
+// 专用核独占（scenemode）：把一颗小核完全留给调度服务
 //
 // 仅 sched_setaffinity 自钉是不排他的——其他进程仍可被调度到该核。
 // 真正独占 = 把该核从全部业务 cpuset 组（top-app/foreground/background/
@@ -192,6 +204,7 @@ fn read_cpuset_tasks(group: &str) -> Vec<i32> {
 // magiskd 等常驻守护进程（空闲驻留，无周期性负载）——排除是实践意义上的
 // 完全独占。
 
+// [reserve_core]
 /// scenemode 期间被独占核排除的业务 cpuset 组（与 apply 的组口径一致）
 const RESERVED_EXCLUDE_GROUPS: [&str; 5] = [
     "top-app",
@@ -347,6 +360,7 @@ pub(crate) fn set_tid_affinity(tid: i32, cpu_ids: &[usize]) -> bool {
     ret == 0
 }
 
+// [sys_probe]
 fn kernel_version() -> Option<(u32, u32, u32)> {
     let s = std::fs::read_to_string("/proc/sys/kernel/osrelease").ok()?;
     let head = s.trim().split(['-', '+', ' ']).next()?;
@@ -468,9 +482,8 @@ struct ThreadState {
     last_move: Instant,
     /// 最近一次被看到时刻（失联清理）
     last_seen: Instant,
-    /// boost 下已写入 prime∪big 组掩码（cpuset 不可用时的关键线程兜底，
-    /// 不占单核钉定计数，恢复时直接回全核掩码）
-    group_pinned: bool,
+    /// 性能核组绑定状态（None/Key/Busy），替代两个易失同步的布尔量
+    group_bind: GroupBind,
     /// 最近一次迁离的核心（反跳回冷却用）；-1 = 无迁离记录
     prev_home: i16,
     /// 迁离时刻（配合 RETURN_COOLDOWN）
@@ -479,6 +492,29 @@ struct ThreadState {
     last_hold_log: Instant,
 }
 
+/// 「持续忙」两窗判定（前台 normal_busy 与后台 promote 共用）：
+/// - util >= busy_pct：记忙窗，返回上次采样是否也忙（连续两窗为真）；
+/// - util < release_pct：清忙标记，返回 false；
+/// - 两者之间（滞回带）：保持上次忙标记，返回其值。
+/// 不依赖采样间隔——分片下同一线程两次被采到可能相隔很久，故不按时间窗判定。
+/// 只维护 `last_busy`，`low_streak` 等其余状态由调用方按各自语义处理。
+fn busy_window_update(
+    st: &mut ThreadState,
+    util: f32,
+    now: Instant,
+    busy_pct: f32,
+    release_pct: f32,
+) -> bool {
+    let was_busy = st.last_busy.is_some();
+    if util >= busy_pct {
+        st.last_busy = Some(now);
+    } else if util < release_pct {
+        st.last_busy = None;
+    }
+    was_busy && util >= busy_pct
+}
+
+// [manager]
 pub struct AffinityManager {
     sys: Arc<SysPathExist>,
     snapshot: Option<Vec<(String, String)>>,
@@ -504,10 +540,15 @@ pub struct AffinityManager {
     /// balance（非 boost）little 高水位的迟滞锁存：>HIGH_WATER 激活、
     /// <RELEASE_WATER 解除，防阈值边缘绑定/恢复乒乓
     key_bind_active: bool,
-    /// FAS 激活前的 top-app uclamp.max 值快照（None = 未接管）。
-    /// 激活期写 100 消除 boost 配置值（85）对 EAS prime 放置的钳制偏置，
-    /// 去激活时还原；boost 退出链（restore_uclamp_max）负责最终归位
-    fas_uclamp_prev: Option<String>,
+    /// 非关键前台线程升核（normal_busy）采样的轮转游标：压力窗口内每轮只扫
+    /// FG_SCAN_WINDOW 个，避免逐轮全量读 stat
+    fg_cursor: usize,
+    /// boost 期 top-app uclamp.max 放开（写 100）前的值快照（None = 未接管）。
+    /// FAS 激活与特调（akmode）激活共用：boost 进入时按机型写入的 85 会压低
+    /// EAS 对 top-app 重线程的 capacity 视图（85%×1024≈870 恰在 big 容量内），
+    /// 抑制 prime 放置——FAS/特调都希望 prime 承接负载，且 akmode 用 schedutil
+    /// 动态上限、85 对调频只有负效应，故激活期写 100，退出时还原
+    boost_uclamp_prev: Option<String>,
     /// 上次 place 快照签名（tid:home 串），配合 last_place_dump 做变更检测
     last_place_sig: String,
     /// 上次 place 快照输出时刻
@@ -536,7 +577,8 @@ impl AffinityManager {
             self_pid: std::process::id(),
             fg_cmdline: String::new(),
             key_bind_active: false,
-            fas_uclamp_prev: None,
+            fg_cursor: 0,
+            boost_uclamp_prev: None,
             last_place_sig: String::new(),
             last_place_dump: Instant::now() - PLACE_DUMP_MIN_INTERVAL,
         }
@@ -574,6 +616,17 @@ impl AffinityManager {
         );
     }
 
+    /// 应用布局（cgroup 收窄/uclamp）并按需再平衡线程。
+    ///
+    /// `boost_uclamp_override` 是 top-app uclamp.max 的归属开关（三态）：
+    /// - `Some(true)`：本调用负责「放开为 100」（特调 akmode 走此路，见调用点）；
+    /// - `Some(false)`：本调用负责还原，保证离开特调后不残留 100；
+    /// - `None`：本调用不干预（fas 走此路——FAS 激活/去激活由 fas_affinity_hook
+    ///   在各自的时机显式调用 `set_boost_uclamp_override`，`apply` 每 2s 的周期调用
+    ///   与它时序未必对齐，故显式让出管理权，避免把 85/100 写错顺序）。
+    ///
+    /// 所有权协议（改这块前务必遵守）：boost 进入由 `apply_uclamp_max` 写机型值（85），
+    /// 需要 prime 放置的场景再抬到 100；释放统一走 boost 退出链的 `restore_uclamp_max`。
     pub fn apply(
         &mut self,
         screen_on: bool,
@@ -581,6 +634,7 @@ impl AffinityManager {
         cfg: &AffinityConfig,
         boost: bool,
         core_utils: &[f32],
+        boost_uclamp_override: Option<bool>,
     ) {
         if !cfg.enabled {
             self.release();
@@ -629,6 +683,13 @@ impl AffinityManager {
             self.applied_kind = KIND_NORMAL;
         }
 
+        // boost 类模式的 top-app uclamp.max 放开：特调（akmode）传 Some(true)
+        // 让重线程可被 EAS 放到 prime；fas 传 None（由 fas_affinity_hook 管理）；
+        // 其余模式传 Some(false) 保证不使用时不残留 100
+        if let Some(want) = boost_uclamp_override {
+            self.set_boost_uclamp_override(boost && want);
+        }
+
         let force = fg_pid != self.last_fg_pid || boost != self.last_boost;
         if cfg.pin_foreground_threads
             && (force || self.last_rebalance.elapsed() >= REBALANCE_INTERVAL)
@@ -640,7 +701,7 @@ impl AffinityManager {
         }
     }
 
-    // ==================== 工具 ====================
+    //  工具
 
     fn cluster_of(&self, cpu: usize) -> &'static str {
         let ranges = crate::common::chiri_core_ranges();
@@ -777,13 +838,13 @@ impl AffinityManager {
             .is_ok()
     }
 
-    /// 关键线程组掩码兜底的还原：恢复全核掩码并清 group_pinned。
+    /// 关键线程组掩码兜底的还原：恢复全核掩码并清 group_bind。
     /// 不触碰单核钉定计数（组绑定从未占用）。线程未做组绑定时为无操作
     fn restore_group_mask(&mut self, tid: i32, pid: i32, pkg: &str) {
         let pinned = self
             .threads
             .get(&tid)
-            .map(|st| st.group_pinned)
+            .map(|st| st.group_bind != GroupBind::None)
             .unwrap_or(false);
         if !pinned {
             return;
@@ -795,7 +856,8 @@ impl AffinityManager {
         let all: Vec<usize> = (0..max_cpu).collect();
         if set_tid_affinity(tid, &all) {
             if let Some(st) = self.threads.get_mut(&tid) {
-                st.group_pinned = false;
+                // Key/Busy 统一归位；单枚举保证不会出现「绑定位与忙标记不一致」
+                st.group_bind = GroupBind::None;
             }
             crate::logger::devimp_aff(
                 "restore",
@@ -829,8 +891,7 @@ impl AffinityManager {
         self.threads.remove(&tid);
     }
 
-    // ==================== 再平衡 ====================
-
+    // [rebalance]
     fn rebalance(&mut self, screen_on: bool, fg_pid: i32, boost: bool) {
         let now = Instant::now();
         self.tick = self.tick.wrapping_add(1);
@@ -907,6 +968,8 @@ impl AffinityManager {
                 match std::fs::read_dir(&task_dir) {
                     Ok(rd) => {
                         let mut seen = HashSet::new();
+                        // balance 小核高水位下待升核的非关键前台线程（本轮限量采样）
+                        let mut scan_pool: Vec<i32> = Vec::new();
                         for entry in rd.flatten() {
                             let tid: i32 =
                                 match entry.file_name().to_str().and_then(|s| s.parse().ok()) {
@@ -929,7 +992,7 @@ impl AffinityManager {
                                 last_sample: now,
                                 last_move: now - MIN_MIGRATE_INTERVAL,
                                 last_seen: now,
-                                group_pinned: false,
+                                group_bind: GroupBind::None,
                                 prev_home: -1,
                                 prev_home_at: now,
                                 last_hold_log: now - HOLD_LOG_COOLDOWN,
@@ -941,7 +1004,7 @@ impl AffinityManager {
                                 st.home = -1;
                                 st.promoted = false;
                                 st.moved_group = false;
-                                st.group_pinned = false;
+                                st.group_bind = GroupBind::None;
                                 st.prev_home = -1;
                                 st.last_move = now - MIN_MIGRATE_INTERVAL;
                                 // ticks 基准一并作废：否则下方「fresh 或 last_ticks==0
@@ -961,8 +1024,16 @@ impl AffinityManager {
                                     st.last_sample = now;
                                 }
                             }
-                            let (home, is_key, group_pinned) =
-                                (st.home, st.is_key, st.group_pinned);
+                            let (home, is_key, group_bind) = (st.home, st.is_key, st.group_bind);
+                            // 非关键前台线程的升核候选：未绑定的，或已因「忙」绑定的
+                            // （后者需复查以便空闲时释放）
+                            if key_pressure
+                                && !is_key
+                                && home < 0
+                                && matches!(group_bind, GroupBind::None | GroupBind::Busy)
+                            {
+                                scan_pool.push(tid);
+                            }
                             if pin_fg {
                                 if is_key {
                                     // 关键线程核组绑定（AppOptR 式）：不钉单核。
@@ -971,11 +1042,13 @@ impl AffinityManager {
                                     // 不会被过载重钉挤到单颗大核，也不存在
                                     // prime↔big 迁移。cpuset 不可用时写一次组掩码
                                     // 兜底（getaffinity 短路去重，不占钉核计数）
-                                    if !group_pinned && !self.sys.cpuset_top_app_exist {
+                                    if group_bind == GroupBind::None
+                                        && !self.sys.cpuset_top_app_exist
+                                    {
                                         let perf = perf_pool.clone();
                                         if set_tid_affinity(tid, &perf) {
                                             if let Some(st) = self.threads.get_mut(&tid) {
-                                                st.group_pinned = true;
+                                                st.group_bind = GroupBind::Key;
                                             }
                                             crate::logger::devimp_aff(
                                                 "pin", fg_pid, &pkg, tid, "-", "-", "group", "-",
@@ -1070,9 +1143,10 @@ impl AffinityManager {
                                 }
                             } else if home >= 0 {
                                 self.unpin_core(tid, home, fg_pid, &pkg);
-                            } else if group_pinned {
+                            } else if group_bind != GroupBind::None {
                                 // 组掩码兜底恢复：boost 退出，或 balance 压力
-                                // 解除/息屏（key_pressure 活跃时保持绑定）
+                                // 解除/息屏（key_pressure 活跃时保持绑定；
+                                // Busy 绑定的空闲回落由下方采样块单独处理）
                                 if !key_pressure {
                                     self.restore_group_mask(tid, fg_pid, &pkg);
                                 }
@@ -1084,7 +1158,7 @@ impl AffinityManager {
                                 let perf = perf_pool.clone();
                                 if set_tid_affinity(tid, &perf) {
                                     if let Some(st) = self.threads.get_mut(&tid) {
-                                        st.group_pinned = true;
+                                        st.group_bind = GroupBind::Key;
                                     }
                                     crate::logger::devimp_aff(
                                         "pin",
@@ -1109,6 +1183,13 @@ impl AffinityManager {
                             .collect();
                         for tid in gone {
                             self.cleanup_thread(tid);
+                        }
+
+                        // —— balance 小核高水位：非关键前台线程升核（限量采样） ——
+                        // 对应 8550 实测「单颗小核被一个非关键前台线程打满、big 3+ 核
+                        // 空闲、prime 近空转」——只绑关键线程不足以解除小核饱和
+                        if key_pressure && !scan_pool.is_empty() {
+                            self.promote_busy_foreground(&scan_pool, &perf_pool, fg_pid, now);
                         }
                     }
                     Err(_) => {
@@ -1301,7 +1382,7 @@ impl AffinityManager {
                                         last_sample: now,
                                         last_move: now - MIN_MIGRATE_INTERVAL,
                                         last_seen: now,
-                                        group_pinned: false,
+                                        group_bind: GroupBind::None,
                                         prev_home: -1,
                                         prev_home_at: now,
                                         last_hold_log: now - HOLD_LOG_COOLDOWN,
@@ -1323,14 +1404,15 @@ impl AffinityManager {
                                 // 两窗防抖（不依赖采样间隔——分片下同线程两次被采到可能
                                 // 相隔很久）：本次忙且上次采样忙 → promote；期间采到低负载
                                 // 则清除忙标记，防止瞬时忙/抖动被 promote。
-                                let was_busy = st.last_busy.is_some();
-                                if util >= promote_thresh {
-                                    st.last_busy = Some(now);
-                                } else if util < DEMOTE_UTIL_PCT {
-                                    st.last_busy = None;
-                                }
-                                // 滞回带（demote..promote 之间）保持上次忙标记不变
-                                if was_busy && util >= promote_thresh && !big_pressure {
+                                // 与前台 normal_busy 共用同一判定（阈值各自传入）
+                                let sustained_busy = busy_window_update(
+                                    st,
+                                    util,
+                                    now,
+                                    promote_thresh,
+                                    DEMOTE_UTIL_PCT,
+                                );
+                                if sustained_busy && !big_pressure {
                                     Some(util)
                                 } else {
                                     None
@@ -1437,6 +1519,75 @@ impl AffinityManager {
         }
     }
 
+    /// balance 小核高水位下的非关键前台线程升核（normal_busy）。
+    /// 仅在压力窗口内调用（窗口外零采样、零写入）；每轮最多采样 FG_SCAN_WINDOW 个
+    /// （游标轮转）以限制新增文件 IO。判定复用共享的 `busy_window_update`（两窗防抖），
+    /// 绑定后 util 跌到 FG_BUSY_RELEASE_UTIL_PCT 以下连续 DEMOTE_STREAK 轮才回落全核——
+    /// 与绑定水位构成滞回，避免中等负载线程长期滞留在性能核抬高功耗。
+    // [fg_promote]
+    fn promote_busy_foreground(
+        &mut self,
+        scan_pool: &[i32],
+        perf_pool: &[usize],
+        fg_pid: i32,
+        now: Instant,
+    ) {
+        let clk = clk_tck();
+        let n = scan_pool.len();
+        self.fg_cursor %= n;
+        let end = (self.fg_cursor + FG_SCAN_WINDOW).min(n);
+        let pkg = self.fg_cmdline.clone();
+        for idx in self.fg_cursor..end {
+            let tid = scan_pool[idx];
+            let Some(s) = sample_one_tid(tid) else {
+                continue;
+            };
+            let util = self.window_util(tid, s.ticks, now, clk).unwrap_or(0.0);
+            let (sustained, bound, low) = match self.threads.get_mut(&tid) {
+                Some(st) => {
+                    let sustained = busy_window_update(
+                        st,
+                        util,
+                        now,
+                        FG_BUSY_UTIL_PCT,
+                        FG_BUSY_RELEASE_UTIL_PCT,
+                    );
+                    if util < FG_BUSY_RELEASE_UTIL_PCT {
+                        st.low_streak = st.low_streak.saturating_add(1);
+                    } else {
+                        st.low_streak = 0;
+                    }
+                    (sustained, st.group_bind == GroupBind::Busy, st.low_streak)
+                }
+                None => continue,
+            };
+            if sustained && !bound {
+                // 抬到性能核组（不钉单核，组内交给 EAS 自调度）
+                let perf = perf_pool.to_vec();
+                if set_tid_affinity(tid, &perf) {
+                    if let Some(st) = self.threads.get_mut(&tid) {
+                        st.group_bind = GroupBind::Busy;
+                    }
+                    crate::logger::devimp_aff(
+                        "pin",
+                        fg_pid,
+                        &pkg,
+                        tid,
+                        "-",
+                        "-",
+                        "group",
+                        "-",
+                        "normal_busy",
+                    );
+                }
+            } else if bound && low >= DEMOTE_STREAK {
+                // 空闲回落：恢复全核掩码（restore 内清 group_bind）
+                self.restore_group_mask(tid, fg_pid, &pkg);
+            }
+        }
+        self.fg_cursor = if end < n { end } else { 0 };
+    }
+
     /// 窗口 util%（ticks 增量 / 上次采样至今秒 / CLK_TCK × 100）；首见返回 None
     fn window_util(&mut self, tid: i32, ticks: u64, now: Instant, clk: f32) -> Option<f32> {
         self.threads.get_mut(&tid).map(|st| {
@@ -1469,7 +1620,7 @@ impl AffinityManager {
         );
     }
 
-    // ==================== cgroup 布局 / uclamp / 释放 ====================
+    //  cgroup 布局 / uclamp / 释放
 
     fn pin_background(&self, little_list: &str) {
         for group in BACKGROUND_GROUPS {
@@ -1572,17 +1723,17 @@ impl AffinityManager {
         }
     }
 
-    /// FAS 激活期放开 top-app uclamp.max（fas_affinity_hook 调用）。
+    /// boost 期放开 top-app uclamp.max 为 100（fas_affinity_hook 与特调激活路径调用）。
     /// boost 进入时 apply_uclamp_max 已按机型配置写入（8475/8550=85），
     /// 该钳制压低 EAS 对 top-app 重线程的 capacity 视图（85%×1024≈870
-    /// 恰在 big 容量内），抑制 prime 放置——与 FAS 让 prime 承接负载的
-    /// 目标相悖；FAS 激活期 min=max 锁频绕过 schedutil，85 对调频无效，
-    /// 仅剩放置负效应，故激活期写 100。首次激活快照当前值，去激活还原。
+    /// 恰在 big 容量内），抑制 prime 放置——与 FAS/特调让 prime 承接负载的目标
+    /// 相悖；激活期 min=max 锁频（FAS）或 schedutil 动态上限（akmode）都不需要
+    /// 85 的钳制，仅剩放置负效应，故激活期写 100。首次激活快照当前值，去激活还原。
     /// 时序保证：激活调用点均在 boost 进入（写 85）之后；去激活时若 boost
     /// 已退出则跳过写入（restore_uclamp_max 链已归位到 boost 前原值，
     /// 避免把 boost 配置值泄漏到 normal）。息屏释放路径不调本方法（无
     /// hook(false)），由 boost 退出链兜底还原，重新激活时快照仍有效。
-    pub fn set_fas_uclamp_override(&mut self, active: bool) {
+    pub fn set_boost_uclamp_override(&mut self, active: bool) {
         if active {
             if self.uclamp_max_support == UclampSupport::Unsupported {
                 return;
@@ -1598,13 +1749,15 @@ impl AffinityManager {
                 }
                 self.uclamp_max_support = UclampSupport::Ok;
             }
-            if self.fas_uclamp_prev.is_none() {
-                self.fas_uclamp_prev = std::fs::read_to_string(UCLAMP_MAX_PATH)
+            if self.boost_uclamp_prev.is_none() {
+                self.boost_uclamp_prev = std::fs::read_to_string(UCLAMP_MAX_PATH)
                     .ok()
                     .map(|s| s.trim().to_string());
             }
+            // 每轮重写（非幂等短路）：与 mode file/fast_lock 的周期重写同口径，
+            // 兼作防外部守护进程篡改的再断言——特调期间每 2s 收敛回 100
             let _ = crate::utils::try_write_file(UCLAMP_MAX_PATH, "100.00");
-        } else if let Some(prev) = self.fas_uclamp_prev.take() {
+        } else if let Some(prev) = self.boost_uclamp_prev.take() {
             if self.applied_kind == KIND_BOOST && !prev.is_empty() {
                 let _ = crate::utils::try_write_file(UCLAMP_MAX_PATH, &prev);
             }

@@ -1,3 +1,7 @@
+// index.js: [exec] [process-emitter] [spawn] [apis]
+// KernelSU WebView JS 桥：封装 ksu.* 原生注入 API
+
+// [exec] 
 let callbackCounter = 0;
 function getUniqueCallbackName(prefix) {
   return `${prefix}_callback_${Date.now()}_${callbackCounter++}`;
@@ -31,81 +35,86 @@ export function exec(command, options) {
   });
 }
 
+// [process-emitter] 
+// 事件发射器：Stdio 数据流与 ChildProcess 退出/错误事件
 function Stdio() {
-    this.listeners = {};
-  }
-  
-  Stdio.prototype.on = function (event, listener) {
-    if (!this.listeners[event]) {
-      this.listeners[event] = [];
-    }
-    this.listeners[event].push(listener);
-  };
-  
-  Stdio.prototype.emit = function (event, ...args) {
-    if (this.listeners[event]) {
-      this.listeners[event].forEach((listener) => listener(...args));
-    }
-  };
-  
-  function ChildProcess() {
-    this.listeners = {};
-    this.stdin = new Stdio();
-    this.stdout = new Stdio();
-    this.stderr = new Stdio();
-  }
-  
-  ChildProcess.prototype.on = function (event, listener) {
-    if (!this.listeners[event]) {
-      this.listeners[event] = [];
-    }
-    this.listeners[event].push(listener);
-  };
-  
-  ChildProcess.prototype.emit = function (event, ...args) {
-    if (this.listeners[event]) {
-      this.listeners[event].forEach((listener) => listener(...args));
-    }
-  };
-  
-  export function spawn(command, args, options) {
-    if (typeof args === "undefined") {
-      args = [];
-    } else if (!(args instanceof Array)) {
-        // allow for (command, options) signature
-        options = args;
-    }
-    
-    if (typeof options === "undefined") {
-      options = {};
-    }
-  
-    const child = new ChildProcess();
-    const childCallbackName = getUniqueCallbackName("spawn");
-    window[childCallbackName] = child;
-  
-    function cleanup(name) {
-      delete window[name];
-    }
+  this.listeners = {};
+}
 
-    child.on("exit", code => {
-        cleanup(childCallbackName);
-    });
+Stdio.prototype.on = function (event, listener) {
+  if (!this.listeners[event]) {
+    this.listeners[event] = [];
+  }
+  this.listeners[event].push(listener);
+};
 
-    try {
-      ksu.spawn(
-        command,
-        JSON.stringify(args),
-        JSON.stringify(options),
-        childCallbackName
-      );
-    } catch (error) {
-      child.emit("error", error);
-      cleanup(childCallbackName);
-    }
-    return child;
+Stdio.prototype.emit = function (event, ...args) {
+  if (this.listeners[event]) {
+    this.listeners[event].forEach((listener) => listener(...args));
+  }
+};
+
+function ChildProcess() {
+  this.listeners = {};
+  this.stdin = new Stdio();
+  this.stdout = new Stdio();
+  this.stderr = new Stdio();
+}
+
+ChildProcess.prototype.on = function (event, listener) {
+  if (!this.listeners[event]) {
+    this.listeners[event] = [];
+  }
+  this.listeners[event].push(listener);
+};
+
+ChildProcess.prototype.emit = function (event, ...args) {
+  if (this.listeners[event]) {
+    this.listeners[event].forEach((listener) => listener(...args));
+  }
+};
+
+// [spawn] 
+export function spawn(command, args, options) {
+  if (typeof args === "undefined") {
+    args = [];
+  } else if (!(args instanceof Array)) {
+    // allow for (command, options) signature
+    options = args;
   }
 
+  if (typeof options === "undefined") {
+    options = {};
+  }
+
+  const child = new ChildProcess();
+  const childCallbackName = getUniqueCallbackName("spawn");
+  window[childCallbackName] = child;
+
+  function cleanup(name) {
+    delete window[name];
+  }
+
+  child.on("exit", code => {
+    cleanup(childCallbackName);
+  });
+
+  try {
+    ksu.spawn(
+      command,
+      JSON.stringify(args),
+      JSON.stringify(options),
+      childCallbackName
+    );
+  } catch (error) {
+    child.emit("error", error);
+    cleanup(childCallbackName);
+  }
+  return child;
+}
+
+// [apis] 
+// UI 与模块信息等直通 API
 export function fullScreen(isFullScreen) {
   ksu.fullScreen(isFullScreen);
 }

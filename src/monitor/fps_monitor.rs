@@ -1,19 +1,4 @@
-/*
- * Copyright (C) 2026 yuki
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
- */
+//! fps_monitor.rs: [consts] [probe] [manager] [loop] [gate] [pid-switch] [poll]
 
 use std::collections::{HashMap, VecDeque};
 use std::mem::size_of;
@@ -37,7 +22,7 @@ use crate::common::DaemonEvent;
 use crate::fluent_args;
 use crate::i18n::{t, t_with_args};
 
-// ─── 常量 ────────────────────────────────────────────────
+// [consts] 
 
 /// uprobe 符号名（短签名）
 const SYMBOL_SHORT: &str = "_ZN7android7Surface11queueBufferEP19ANativeWindowBufferi";
@@ -57,7 +42,8 @@ const MIN_FRAME_NS: u64 = 1_000_000;
 const MAX_FRAME_NS: u64 = 200_000_000;
 const FRAMETIME_WINDOW: usize = 144;
 
-// ─── ProbeState：单个 PID 的帧统计 ─────────────────────
+// [probe] 
+// ProbeState：单个 PID 的帧统计
 
 struct ProbeState {
     last_ktime_ns: Option<u64>,
@@ -96,7 +82,8 @@ impl ProbeState {
     }
 }
 
-// ─── FpsManager：单 eBPF 实例，多 PID attach ─────────────
+// [manager] 
+// FpsManager：单 eBPF 实例，多 PID attach
 
 struct FpsManager {
     bpf: Ebpf,
@@ -261,7 +248,8 @@ impl FpsManager {
     }
 }
 
-// ─── 主入口 ──────────────────────────────────────────────
+// [loop] 
+// 主入口
 
 pub async fn start_fps_loop(
     tx: SyncSender<DaemonEvent>,
@@ -353,7 +341,8 @@ pub async fn start_fps_loop(
             }
 
             loop {
-                // ── FAS 激活门控（反偷跑核心）──
+                // [gate] 
+                // FAS 激活门控（反偷跑核心）
                 // fas_active=false：不做任何 PID 消费/帧投喂，仅 500ms 周期
                 // 检查标志；若上一会话的 uprobe 仍挂着，先 detach 回到零开销
                 // 待机。置位后补挂当前前台 PID——桥接任务只转发 PID **变化**，
@@ -383,7 +372,8 @@ pub async fn start_fps_loop(
                     }
                 }
 
-                // ── PID 变化（tokio 订阅任务桥接的共享前台 PID 广播）──
+                // [pid-switch] 
+                // PID 变化（tokio 订阅任务桥接的共享前台 PID 广播）
                 while let Ok(new_pid) = pid_rx.try_recv() {
                     // 无需重新注册 Poll——RingBuf fd 不变
                     if let Err(e) = manager.switch_pid(new_pid) {
@@ -397,7 +387,8 @@ pub async fn start_fps_loop(
                     }
                 }
 
-                // ── 轮询 ──
+                // [poll] 
+                // 轮询
                 let timeout = if manager.has_active_probe() {
                     Some(Duration::from_millis(100))
                 } else {

@@ -1,19 +1,4 @@
-/*
- * Copyright (C) 2026 yuki
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
- */
+//! logger.rs: [buffer] [level] [appender] [init] [status] [devimp_state] [devrow] [devimp_writer] [devimp_api] [archive]
 
 use crate::common;
 use crate::fluent_args;
@@ -36,6 +21,7 @@ use std::time::{Duration, Instant};
 
 /// 适配 `log4rs::encode::Write` 的内存写入器：`PatternEncoder` 编码时写入
 /// 该缓冲，`append` 再把字节落盘（`set_style` 走默认空实现，无需着色）。
+// [buffer]
 struct BufferWriter(Vec<u8>);
 
 impl std::io::Write for BufferWriter {
@@ -50,6 +36,7 @@ impl std::io::Write for BufferWriter {
 
 impl log4rs::encode::Write for BufferWriter {}
 
+// [level]
 static LOG_HANDLE: OnceCell<Mutex<Handle>> = OnceCell::new();
 
 fn parse_level(level_str: &str) -> LevelFilter {
@@ -84,6 +71,7 @@ const LOG_KEEP_BACKUPS: u32 = 3;
 ///   2. **循环轮转全程无 panic**：所有重命名/删除都吞掉错误，杜绝 `unwrap`；
 ///   3. **锁毒化也不崩**：`Mutex` 上锁失败时剥除 poison 继续使用，日志线程不 panic。
 /// 单项编码失败仅丢弃该条日志，不影响进程存活。
+// [appender]
 #[derive(Debug)]
 struct SelfHealingAppender {
     path: PathBuf,
@@ -161,6 +149,7 @@ impl Append for SelfHealingAppender {
     fn flush(&self) {}
 }
 
+// [init]
 fn build_config(level: LevelFilter) -> Result<Config> {
     let root = common::get_module_root();
     let log_path = root.join(LOG_REL_PATH);
@@ -215,9 +204,7 @@ pub fn update_level(level_str: &str) {
     }
 }
 
-// ════════════════════════════════════════════════════════════════
-//  状态日志（logs/status.csv，CSV 宽表）：daemon.log 之外的唯一状态文件
-// ════════════════════════════════════════════════════════════════
+// 状态日志（logs/status.csv，CSV 宽表）：daemon.log 之外的唯一状态文件
 //
 // 整合原 foreground / power / telemetry 三个独立 CSV。仅一种行类型：
 // - snap 行（1s 一条，chiri 调度线程）：遥测 + 热保护 + 模式状态 + 前台包名
@@ -229,6 +216,7 @@ pub fn update_level(level_str: &str) {
 // - 每 256 行巡检一次：轮转（8MB）+ 被删自愈（外部删除 status.csv 后自动重建）；
 // - 写失败重开重试一次，全程不 unwrap、不阻塞调度线程。
 
+// [status]
 /// 状态日志路径（CSV 宽表）
 const STATUS_LOG_REL: &str = "logs/status.csv";
 /// 单文件上限 8MB，保留 1 份备份；1s 一条约 250B，轮转周期约 6 小时
@@ -393,9 +381,7 @@ fn format_now() -> String {
     format!("{:02}:{:02}:{:02}.{:03}", h, m, s, now.subsec_millis())
 }
 
-// ════════════════════════════════════════════════════════════════
-//  开发诊断日志（devimp/devimp_<前台包名>_<毫秒时间戳>.log）
-// ════════════════════════════════════════════════════════════════
+// 开发诊断日志（devimp/devimp_<前台包名>_<毫秒时间戳>.log）
 //
 // 供离线分析改善调度的按核诊断数据，与 status.csv 分离：
 // - 独立目录 `devimp/`（模块根，与 logs/ 平级），**启动时随 logs/ 一起归档**到
@@ -430,6 +416,7 @@ fn format_now() -> String {
 // - event：decision(事件名)/reason —— 模式/屏幕/热/配置/触摸等状态变化
 
 /// 开发记录总开关（scheduler_ipc 按 Config.meta.dev_record 同步）
+// [devimp_state]
 static DEVIMP_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 /// 当前生效模式名（scheduler_ipc 在启动/模式切换/周期刷新时同步），
@@ -548,6 +535,7 @@ fn devimp_tick_state_clear() {
 
 /// CSV 表头（列序由 devimp_tick / devimp_snap / devimp_place / devimp_aff /
 /// devimp_core / devimp_event 的写入保证对齐，共 40 列）
+// [devrow]
 const DEVIMP_HEADER: &str = "ts,type,mode,screen_on,pid,package,tid,comm,cluster,core,from_core,to_core,util_pct,max_util,over_cores,under_cores,cur_perf,tgt_perf,cur_freq_khz,max_freq_khz,decision,deb_up,deb_down,reason,pinned,thermal_cap_pct,touch,psi_cpu,psi_io,psi_mem,gpu_busy,batt_v,batt_i,batt_p,wakeups,migrations,freq_trans,batt_temp,cpu_temp,clg_active";
 
 // 列索引常量（DevRow.set 用，调用方按列语义取用）
@@ -645,6 +633,7 @@ impl DevRow {
 ///    完成，两段之间无重叠。
 /// 违反上述任一条都会引入死锁风险（如未来某线程反向先取 WRITER 再取
 /// FG_PKG）。
+// [devimp_writer]
 struct DevimpWriter {
     file: Option<fs::File>,
     /// 当前文件名（含包名段与文件创建时间戳）
@@ -702,11 +691,8 @@ fn devimp_meta() -> &'static String {
     META.get_or_init(|| {
         let root = common::get_module_root();
         // module.prop：name / version / versionCode
-        let (mut m_name, mut m_ver, mut m_code) = (
-            String::from("-"),
-            String::from("-"),
-            String::from("-"),
-        );
+        let (mut m_name, mut m_ver, mut m_code) =
+            (String::from("-"), String::from("-"), String::from("-"));
         if let Ok(text) = fs::read_to_string(root.join("module.prop")) {
             for line in text.lines() {
                 if let Some(v) = line.strip_prefix("name=") {
@@ -916,6 +902,7 @@ fn devimp_write_line(row: DevRow) {
 /// 排序，超出从旧到新删除）。main.rs 启动时调用一次；正常路径下 devimp/ 已被
 /// 启动归档整体 rename 走并新建为空目录，此函数仅作为归档 rename 失败时的
 /// 兜底（旧文件保留在原目录时防止无限堆积）。
+// [devimp_api]
 pub fn devimp_prepare() {
     let dir = common::get_module_root().join(DEVIMP_DIR_REL);
     let _ = fs::create_dir_all(&dir);
@@ -1124,10 +1111,8 @@ pub fn devimp_event(kind: &str, pkg: &str, reason: &str) {
     devimp_write_line(r);
 }
 
-// ════════════════════════════════════════════════════════════════
-//  启动归档：logs/ → logd/ziped_<毫秒时间戳>.zip、devimp/ → logd/devimp_<ts>.zip
-//  （一次性子线程串行打包），打包完成后执行 logd+devimp 预算清理
-// ════════════════════════════════════════════════════════════════
+// 启动归档：logs/ → logd/ziped_<毫秒时间戳>.zip、devimp/ → logd/devimp_<ts>.zip
+// （一次性子线程串行打包），打包完成后执行 logd+devimp 预算清理
 //
 // 流程（由 main.rs 在 logger::init 之前调用，保证新旧日志文件分离）：
 // 1. 把整个 logs/ 与 devimp/ 分别原子重命名为同级 `ziped_<ts>` / `ziped_devimp_<ts>`
@@ -1142,6 +1127,7 @@ pub fn devimp_event(kind: &str, pkg: &str, reason: &str) {
 //    LOGD_DEVIMP_MAX_BYTES 时从最旧文件删除到低于 LOGD_DEVIMP_TARGET_BYTES；
 // 5. rename 失败或原目录为空时跳过对应归档，不影响启动。
 
+// [archive]
 /// logd/ + devimp/ 总大小预算：超过后从最旧文件开始清理（用户约定 128MB）
 const LOGD_DEVIMP_MAX_BYTES: u64 = 128 * 1024 * 1024;
 /// 预算清理目标：从最旧文件逐个删除，直到两目录总大小低于该值（96MB）

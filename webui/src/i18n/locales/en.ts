@@ -1,3 +1,4 @@
+// en.ts: [messages-en] 扁平键值字典，键名即区块语义，无内部分区
 export default {
   welcome: 'Welcome to ChiRi scheduler',
   daemon_running: 'Daemon is running',
@@ -14,7 +15,6 @@ export default {
   desc_performance: 'Full Power',
   desc_fast: 'Break Limits',
   desc_fas: 'Frame Adaptive Scheduling',
-  global_mode: 'Global Mode Selection',
   about: 'About',
   qq_group: 'QQ Group',
   tg_group: 'Telegram Group',
@@ -36,8 +36,6 @@ export default {
   dev_record_updated: 'Dev recording updated (hot reload)',
   config_info_hint: 'Other settings are not supported.',
   loglevel_updated: 'Log level updated',
-  app_rules_saved: 'App rules saved',
-  switch_success: 'Requested switch to: {mode}',
   view_log: 'Daemon Log',
   stop_daemon: 'Stop Scheduler',
   stop_title: 'Confirm Stop',
@@ -60,8 +58,6 @@ export default {
   scanning: 'Scanning...',
   rescan_done: 'Scan complete',
   rescan_failed: 'Scan failed',
-  delete_rule: 'Delete rule',
-  select_mode_for: 'Select mode for',
   cancel: 'Cancel',
   loglevel_off: 'Off',
   loglevel_error: 'Error',

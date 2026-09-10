@@ -1,6 +1,5 @@
-# ════════════════════════════════════════════════════════════════
+# fas-example.yaml: [usage] [whitelist] [app-template] [fas-rules]
 #  FAS（帧感知调度）配置完整字段说明书
-# ════════════════════════════════════════════════════════════════
 #  ⚠ 本文件仅作文档参考，不参与编译嵌入、不被任何代码加载
 #    （daemon 只加载 fas.yaml 白名单与 fas/<配置名>.yaml 每应用配置）
 #
@@ -16,9 +15,8 @@
 #    - 帧事件驱动 per-policy 锁频（min=max）+ 容量加权分频 + PID/Jank
 #    - 息屏释放（频率与 governor 恢复），降载交由 CLG doze / scenemode，
 #      亮屏后 ModeChange / 1s 兜底重新激活（实例保留 60s 复用）
-# ════════════════════════════════════════════════════════════════
 
-# ── 白名单（fas.yaml 的结构参考）──────────────────────────────
+# [whitelist]  fas.yaml 的结构参考
 # 精确包名 → 配置名映射；配置名对应 module/config/normal/fas/<配置名>.yaml
 # 支持多个条目（每个 FAS 游戏独立实例，fas→fas 切换走 PackageSwitch 热替换）
 #
@@ -26,7 +24,7 @@
 #   apps:
 #     com.hypergryph.endfield: endfield
 
-# ── 每应用配置模板（fas/<配置名>.yaml 的结构）──────────────────
+# [app-template]  fas/<配置名>.yaml 的结构
 # 顶层固定为 fas_rules: 段；下方全部字段均带默认值，可按需裁剪
 
 fas_rules:

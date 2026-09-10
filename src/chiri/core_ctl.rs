@@ -1,19 +1,4 @@
-/*
- * Copyright (C) 2026 ChiRi
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
- */
+//! core_ctl.rs: [types] [helpers] [state] [scenemode] [restore]
 
 /// 核心在线控制器接管（ChiRi 专属）。
 ///
@@ -45,6 +30,7 @@ use std::fs;
 use crate::fluent_args;
 use crate::i18n::{t, t_with_args};
 
+// [types]
 /// 状态：无接管
 const STATE_NONE: u8 = 0;
 /// 状态：boost（min_cpus 全组常在线）
@@ -82,6 +68,7 @@ pub struct CoreCtlManager {
     self_cpuset_group: Option<String>,
 }
 
+// [helpers]
 /// 枚举守护进程自身全部线程 TID（/proc/self/task）
 fn self_tids() -> Vec<i32> {
     let mut out = Vec::new();
@@ -107,6 +94,7 @@ fn scenemode_targets() -> Vec<u32> {
     targets
 }
 
+// [state]
 impl CoreCtlManager {
     pub fn new() -> Self {
         Self {
@@ -247,6 +235,7 @@ impl CoreCtlManager {
     /// 随后**独占一颗小核给调度服务**：选编号最大的小核，从全部业务 cpuset
     /// 组移除（其他进程不可调度到该核）+ 自身线程移入根组 + 全线程自钉，
     /// 保证后台任务堵塞不了调度服务（设备无 cpuset 时降级为仅自钉）。
+    // [scenemode]
     fn offline_cores(&mut self) {
         for cpu in scenemode_targets() {
             // 防重复：上轮恢复失败的残留核（已在 offlined 中）跳过重复登记
@@ -287,10 +276,7 @@ impl CoreCtlManager {
         // 组移除 + 自身线程移入根组（钉定才不会被组掩码二次过滤）
         let ranges = crate::common::chiri_core_ranges();
         if let Some(core) = ranges.little.clone().last() {
-            crate::chiri::affinity::exclude_core_from_cpusets(
-                core,
-                &mut self.reserved_cpusets,
-            );
+            crate::chiri::affinity::exclude_core_from_cpusets(core, &mut self.reserved_cpusets);
             self.self_cpuset_group = crate::chiri::affinity::move_self_to_cpuset_root();
             self.reserved_core = Some(core);
         }
@@ -361,10 +347,7 @@ impl CoreCtlManager {
             }
         }
         if let Some(core) = self.reserved_core {
-            crate::chiri::affinity::exclude_core_from_cpusets(
-                core,
-                &mut self.reserved_cpusets,
-            );
+            crate::chiri::affinity::exclude_core_from_cpusets(core, &mut self.reserved_cpusets);
         }
     }
 
@@ -438,6 +421,7 @@ impl CoreCtlManager {
     /// 枚举不到该集群，永久失去 worker），且核本身永久离线。调度线程启动
     /// 阶段在任何 governor 接管之前调用，把调度范围内的核全部写 online=1，
     /// 同时清空 offlined 残留快照（快照对应的恢复语义已由本调用替代）。
+    // [restore]
     pub fn force_online_all(&mut self) {
         let ranges = crate::common::chiri_core_ranges();
         let write_back = |path: &str| {

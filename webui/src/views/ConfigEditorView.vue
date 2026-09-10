@@ -1,4 +1,5 @@
 <script setup lang="ts">
+// ConfigEditorView.vue: [state] [loglevel] [dev-record] [lang] [load]
 import { ref, onMounted, computed } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { Bridge } from '@/utils/bridge';
@@ -6,6 +7,7 @@ import { toast } from '@/kernelsu';
 
 const { t } = useI18n();
 
+// [state] 
 const loading = ref(false);
 // 生效配置文件的 meta 段（抬头信息）：配置名/作者/日志语言/日志等级，仅展示
 const meta = ref<Record<string, any>>({});
@@ -14,6 +16,7 @@ const activeConfig = ref('config.yaml');
 
 const showLoglevelSheet = ref(false);
 
+// [loglevel] 
 const loglevelActions = computed(() => [
   { name: t('loglevel_off'), level: 'OFF' },
   { name: t('loglevel_error'), level: 'ERROR' },
@@ -30,6 +33,7 @@ const loglevelLabel = computed(() => {
   return hit ? hit.name : lv;
 });
 
+// [dev-record] 
 // 开发记录开关（meta.dev_record）：开启后守护进程向 devimp/ 写按核调度诊断日志
 const devRecord = ref(Boolean(meta.value.dev_record));
 
@@ -43,6 +47,7 @@ const onDevRecordChange = async (on: boolean) => {
   }
 };
 
+// [lang] 
 // 日志语言标签（en/zh → 本地化文案）
 const languageLabel = computed(() => {
   const lang = String(meta.value.language || '').toLowerCase();
@@ -51,6 +56,8 @@ const languageLabel = computed(() => {
   return meta.value.language || '-';
 });
 
+// [load] 
+// 数据加载 + 日志等级写入（onSelectLoglevel）
 const loadData = async () => {
   loading.value = true;
   try {

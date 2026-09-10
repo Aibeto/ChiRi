@@ -1,19 +1,4 @@
-/*
- * Copyright (C) 2026 yuki
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
- */
+//! mod.rs: [mods] [start] [init] [watchers] [ebpf] [detect]
 
 use log::error;
 use std::error::Error;
@@ -22,6 +7,7 @@ use std::sync::mpsc::SyncSender;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
+// [mods] 
 pub mod app_detect;
 pub mod config;
 pub mod cpu_monitor;
@@ -33,7 +19,7 @@ use crate::common::DaemonEvent;
 use crate::fluent_args;
 use crate::i18n::{t, t_with_args};
 
-// 启动函数
+// [start] 
 /// `ak_active` 为特调（akmode）激活共享标志：cpu_monitor 据此在常规与 40ms 采样间切换。
 /// `sample_ms_normal` 为常规采样间隔（由 main.rs 按 SoC 传入：ChiRi 160ms / Yumi 200ms）。
 /// `fas_active` 为 FAS 前台激活共享标志：fps_monitor 据此门控 eBPF 探针加载与
@@ -46,7 +32,8 @@ pub fn start_monitor(
 ) -> Result<(), Box<dyn Error>> {
     log::debug!("{}", t("monitor-starting"));
 
-    // ===== 解除内核 eBPF Map 内存锁定限制 =====
+    // [init] 
+    // 解除内核 eBPF Map 内存锁定限制
     unsafe {
         let rlim = libc::rlimit {
             rlim_cur: libc::RLIM_INFINITY,
@@ -57,20 +44,10 @@ pub fn start_monitor(
         }
     }
 
-    // --- 初始化共享配置 ---
-    let rules_path = config::get_rules_path();
-
     // --- 初始化配置 ---
-    let initial_config = crate::utils::read_config(&rules_path).unwrap_or_else(|e| {
-        log::warn!(
-            "{}",
-            t_with_args(
-                "monitor-initial-config-failed",
-                &fluent_args!("error" => e.to_string())
-            )
-        );
-        app_detect::get_default_rules()
-    });
+    // 嵌入 rules.yaml 为唯一规则来源（编译期打包，防篡改）；磁盘 rules.yaml 仅是
+    // 启动时复制出的展示副本（main.rs::sync_rules_snapshot），不参与运行时读取
+    let initial_config = crate::common::embedded_rules();
 
     let config_arc = Arc::new(Mutex::new(initial_config));
     let config_arc_clone_for_watcher = Arc::clone(&config_arc);
@@ -84,6 +61,7 @@ pub fn start_monitor(
     let force_refresh_arc = Arc::new(AtomicBool::new(false));
     let force_refresh_clone_for_watcher = Arc::clone(&force_refresh_arc);
 
+    // [watchers] 
     // 3. 启动屏幕状态监控线程
     log::debug!("{}", t("monitor-thread-start-screen"));
     // uevent 线程直推 ScreenStateChange 事件：亮屏感知零轮询延迟，
@@ -157,6 +135,7 @@ pub fn start_monitor(
             }
         })?;
 
+    // [ebpf] 
     // 6. 启动 eBPF FPS 监控线程 (带有独立的 Tokio 运行时)
     //    FAS 帧事件源：FPS 帧监控仅服务于 FAS 调频，仅 ChiRi 且 FAS 配置可用时启动
     //    （FpsManager 空 uprobe attach + RingBuf 轮询对 Yumi 设备是纯开销），
@@ -236,6 +215,7 @@ pub fn start_monitor(
             .spawn(telemetry::telemetry_loop)?;
     }
 
+    // [detect] 
     // 8. 启动应用检测主循环 (阻塞)
     log::debug!("{}", t("monitor-thread-start-app-detect"));
     app_detect::app_detection_loop(

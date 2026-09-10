@@ -1,36 +1,4 @@
-/*
- * Copyright (C) 2026 yuki
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
- */
-
-/*
- * Copyright (C) 2026 ChiRi
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
- */
+//! common.rs: [events] [paths] [soc_detect] [core_ranges] [special_tuned] [fas_whitelist] [aff_blacklist] [embedded] [external_meta]
 
 use crate::monitor::config::RulesConfig;
 use serde::Deserialize;
@@ -40,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+// [events]
 /// 守护进程全局事件总线
 #[derive(Debug, Clone)]
 pub enum DaemonEvent {
@@ -83,6 +52,7 @@ pub enum DaemonEvent {
     },
 }
 
+// [paths]
 /// 获取模块根目录的绝对路径
 pub fn get_module_root() -> PathBuf {
     // 获取当前执行文件的绝对路径
@@ -111,6 +81,7 @@ fn read_first_line(path: &str) -> String {
 /// 探测到任一命中即启用 Chiri 调度器；新增机型只需在此追加片段，不要绑定单一型号。
 /// 例：SM8550（骁龙 8 Gen 2）含 "8550"，SM8475（骁龙 8+ Gen 1）含 "8475"，
 /// MSM8998（骁龙 835）含 "8998"。片段须能互相区分（8550 不含 8475，反之亦然）。
+// [soc_detect]
 const CHIRI_SOC_HINTS: &[&str] = &["8550", "8475", "8998"];
 
 /// 读取单个 Android 系统属性（getprop key），失败/为空返回空串
@@ -190,6 +161,7 @@ fn matched_soc_config_dir() -> Option<PathBuf> {
 /// 处理器核心组区间（little/big/prime 的 CPU ID 区间，左闭右开）。
 /// akmode 按组统计忙/闲核心数、CLG 触摸升频判定大核簇时使用；
 /// 各 SoC 簇布局不同，按命中片段区分（未命中时回退 8550 布局兜底）。
+// [core_ranges]
 #[derive(Debug, Clone)]
 pub struct CoreGroupRanges {
     /// 小核组
@@ -240,6 +212,32 @@ pub fn set_akmode_available(available: bool) {
     AKMODE_AVAILABLE.store(available, Ordering::Release);
 }
 
+// 功能总开关（fas_enabled / scenemode_enabled，config.yaml meta 段，缺省 true）：
+// Config::load（启动 + config_watcher 热重载）时同步到进程级原子标志，
+// 高频路径（fas_available / scenemode 进入判定）只读原子量，不触碰磁盘与锁。
+static FAS_ENABLED: AtomicBool = AtomicBool::new(true);
+static SCENEMODE_ENABLED: AtomicBool = AtomicBool::new(true);
+
+/// 设置 FAS 总开关（config.yaml meta.fas_enabled，Config::load 时调用）。
+pub fn set_fas_enabled(enabled: bool) {
+    FAS_ENABLED.store(enabled, Ordering::Release);
+}
+
+/// 设置 scenemode 总开关（config.yaml meta.scenemode_enabled，Config::load 时调用）。
+pub fn set_scenemode_enabled(enabled: bool) {
+    SCENEMODE_ENABLED.store(enabled, Ordering::Release);
+}
+
+/// FAS 总开关是否开启（config.yaml meta.fas_enabled，缺省 true）。
+pub fn fas_enabled() -> bool {
+    FAS_ENABLED.load(Ordering::Acquire)
+}
+
+/// scenemode 总开关是否开启（config.yaml meta.scenemode_enabled，缺省 true）。
+pub fn scenemode_enabled() -> bool {
+    SCENEMODE_ENABLED.load(Ordering::Acquire)
+}
+
 /// 返回当前应加载的配置文件路径：
 /// - 命中 Chiri 目标 SoC 且存在处理器子目录 `config/{命中片段}/config.yaml` 时，使用该文件
 /// - 否则回退到默认 `config/config.yaml`
@@ -252,12 +250,10 @@ pub fn get_config_path() -> PathBuf {
         .unwrap_or_else(|| get_module_root().join("config").join("config.yaml"))
 }
 
-// ════════════════════════════════════════════════════════════════
-//  内部特调白名单（编译期嵌入，见 src/chiri/special_tuned.txt）
-// ════════════════════════════════════════════════════════════════
-
-/// 特调白名单条目（由 src/chiri/special_tuned.txt 编译期嵌入并解析）。
-/// 用户 / WebUI 均不可修改；磁盘上的 special_tuned.txt 只是运行时导出快照。
+// [special_tuned]
+// 内部特调白名单（编译期嵌入，见 src/chiri/special_tuned.yaml）
+/// 特调白名单条目（由 src/chiri/special_tuned.yaml 编译期嵌入并解析）。
+/// 用户 / WebUI 均不可修改；磁盘上的 special_tuned.yaml 只是运行时导出快照。
 pub struct SpecialTunedEntry {
     /// 匹配器原文：精确包名，或 "re:" 前缀的正则表达式
     pub package: String,
@@ -280,7 +276,7 @@ impl SpecialTunedEntry {
 }
 
 /// 嵌入的白名单原文（include_str! 相对 src/common.rs）
-const SPECIAL_TUNED_TEXT: &str = include_str!("chiri/special_tuned.txt");
+const SPECIAL_TUNED_TEXT: &str = include_str!("chiri/special_tuned.yaml");
 
 /// 解析结果只算一次，之后全部走缓存
 static SPECIAL_TUNED: OnceLock<Vec<SpecialTunedEntry>> = OnceLock::new();
@@ -334,7 +330,7 @@ fn parse_special_tuned(text: &str) -> Vec<SpecialTunedEntry> {
 }
 
 /// 全部白名单条目（精确 + 正则，按文件顺序）。
-/// main.rs 导出 special_tuned.txt 时只取 regex.is_none() 的精确条目。
+/// main.rs 导出 special_tuned.yaml 时只取 regex.is_none() 的精确条目。
 pub fn special_tuned_entries() -> &'static [SpecialTunedEntry] {
     SPECIAL_TUNED.get_or_init(|| parse_special_tuned(SPECIAL_TUNED_TEXT))
 }
@@ -367,11 +363,10 @@ pub fn is_special_mode_allowed(pkg: &str, mode: &str) -> bool {
         .unwrap_or(false)
 }
 
-// ════════════════════════════════════════════════════════════════
-//  FAS（帧感知调度）白名单与每应用配置（编译期嵌入）
-//  白名单运行时导出到模块根 fas_whitelist.txt 供 WebUI 只读展示；
-//  每应用配置不导出。用户/WebUI 不可修改。
-// ════════════════════════════════════════════════════════════════
+// [fas_whitelist]
+// FAS（帧感知调度）白名单与每应用配置（编译期嵌入）
+// 白名单运行时导出到模块根 fas_whitelist.yaml 供 WebUI 只读展示；
+// 每应用配置不导出。用户/WebUI 不可修改。
 
 const FAS_WHITELIST_TEXT: &str = include_str!("../module/config/normal/fas.yaml");
 const FAS_APP_ENDFIELD_TEXT: &str = include_str!("../module/config/normal/fas/endfield.yaml");
@@ -452,8 +447,11 @@ pub fn fas_app_config(name: &str) -> Option<&'static crate::fas_types::FasRulesC
         .get(name)
 }
 
-/// FAS 是否可用：白名单非空且至少一个应用配置解析成功。
+/// FAS 是否可用：总开关开启（rules.yaml fas_enabled）、白名单非空且至少一个应用配置解析成功。
 pub fn fas_available() -> bool {
+    if !fas_enabled() {
+        return false;
+    }
     if fas_whitelist().is_empty() {
         return false;
     }
@@ -469,13 +467,12 @@ pub fn is_fas_mode(mode: &str) -> bool {
     mode == "fas"
 }
 
-// ════════════════════════════════════════════════════════════════
-//  线程亲和黑名单（src/chiri/affinity_blacklist.txt，编译期嵌入）
-// ════════════════════════════════════════════════════════════════
+// 线程亲和黑名单（src/chiri/affinity_blacklist.yaml，编译期嵌入）
 //
 // 命中黑名单的进程：全部线程保持全核运行，AffinityManager 不做任何迁移与亲和。
 // 数据编译进二进制（用户/WebUI 不可修改），但独立成文件便于维护与调整。
 
+// [aff_blacklist]
 /// 黑名单条目：精确进程名/包名，或 "re:" 前缀的正则（同特调白名单格式）
 pub struct AffinityBlacklistEntry {
     pub pattern: String,
@@ -491,7 +488,7 @@ impl AffinityBlacklistEntry {
     }
 }
 
-const AFFINITY_BLACKLIST_TEXT: &str = include_str!("chiri/affinity_blacklist.txt");
+const AFFINITY_BLACKLIST_TEXT: &str = include_str!("chiri/affinity_blacklist.yaml");
 
 static AFFINITY_BLACKLIST: OnceLock<Vec<AffinityBlacklistEntry>> = OnceLock::new();
 
@@ -539,14 +536,13 @@ pub fn is_affinity_blacklisted(cmdline: &str) -> bool {
         .any(|e| e.matches(cmdline))
 }
 
-// ════════════════════════════════════════════════════════════════
-//  编译期嵌入的配置（include_str!，防篡改）
-// ════════════════════════════════════════════════════════════════
+// 编译期嵌入的配置（include_str!，防篡改）
 //
 // 调优配置一律以二进制内嵌内容为准；磁盘上的同名 yaml 只是「自愈快照 +
 // meta 覆盖入口」：daemon 启动/重载时会把嵌入内容还原到磁盘（快照自愈），
 // 只有 meta.loglevel 允许被外部修改（WebUI 日志等级切换），其余内容固定。
 
+// [embedded]
 /// 嵌入的 config.yaml：按命中的处理器取对应内容，非 ChiRi SoC 用默认配置
 pub fn embedded_config_str() -> &'static str {
     match matched_soc_hint() {
@@ -560,6 +556,25 @@ pub fn embedded_config_str() -> &'static str {
 /// 嵌入的 akmode.yaml（config/normal/，嵌入后特调始终可用）
 pub fn embedded_akmode_str() -> &'static str {
     include_str!("../module/config/normal/akmode.yaml")
+}
+
+/// 嵌入的 rules.yaml（模块根，编译期打包进二进制）：与其他只读文件（akmode/scenemode/
+/// fas 配置）同口径——运行时一律读嵌入内容，磁盘文件仅作对外展示副本（启动时复制出去，
+/// 被篡改不影响调度行为）。
+pub fn embedded_rules_str() -> &'static str {
+    include_str!("../module/rules.yaml")
+}
+
+/// 解析嵌入的 rules.yaml（运行时唯一规则来源；磁盘 rules.yaml 仅是启动时复制出的
+/// 展示副本，被篡改不影响调度行为）。解析失败回退 Default 并告警，绝不 panic。
+pub fn embedded_rules() -> crate::monitor::config::RulesConfig {
+    match serde_yaml::from_str(embedded_rules_str()) {
+        Ok(r) => r,
+        Err(e) => {
+            log::warn!("[Rules] Embedded rules parse failed: {e}. Default.");
+            crate::monitor::config::RulesConfig::default()
+        }
+    }
 }
 
 /// 嵌入的 scenemode.yaml（config/normal/）
@@ -578,9 +593,11 @@ pub fn embedded_ftl_str(lang: &str) -> &'static str {
 
 /// 磁盘配置文件的 meta 覆盖结构：只反序列化 meta 段，其余字段全部忽略
 /// （调优字段即使被篡改也不会被读入，从根本上防篡改）。
-/// **允许外部修改的字段只有两个**：meta.loglevel（WebUI 日志等级切换）、
-/// meta.dev_record（WebUI 开发记录开关，控制 devimp/ 诊断日志写入）；
+/// **允许外部修改的字段只有四个**：meta.loglevel（WebUI 日志等级切换）、
+/// meta.dev_record（WebUI 开发记录开关）、meta.fas_enabled / meta.scenemode_enabled
+/// （功能总开关，手改 config.yaml 后热重载生效）；
 /// language 等其余 meta 字段不在此列——配置内容一律以二进制内嵌值为准。
+// [external_meta]
 #[derive(Deserialize, Default)]
 struct ExternalMetaSection {
     #[serde(default, alias = "Loglevel")]
@@ -588,6 +605,10 @@ struct ExternalMetaSection {
     /// 缺省 None = 磁盘未提供该字段（不覆盖嵌入值）
     #[serde(default, alias = "DevRecord")]
     dev_record: Option<bool>,
+    #[serde(default, alias = "FasEnabled")]
+    fas_enabled: Option<bool>,
+    #[serde(default, alias = "ScenemodeEnabled")]
+    scenemode_enabled: Option<bool>,
 }
 
 #[derive(Deserialize, Default)]
@@ -601,9 +622,12 @@ struct ExternalMetaFile {
 pub struct ExternalMetaOverrides {
     pub loglevel: Option<String>,
     pub dev_record: Option<bool>,
+    pub fas_enabled: Option<bool>,
+    pub scenemode_enabled: Option<bool>,
 }
 
-/// 读磁盘配置文件的 meta 覆盖值（仅 loglevel + dev_record 两个允许外部修改的字段）。
+/// 读磁盘配置文件的 meta 覆盖值（仅 loglevel / dev_record / fas_enabled /
+/// scenemode_enabled 四个允许外部修改的字段）。
 /// 文件缺失或解析失败返回 None：文件损坏时回退嵌入默认值，绝不让坏文件拖垮配置加载。
 pub fn read_external_meta(path: &Path) -> Option<ExternalMetaOverrides> {
     let text = std::fs::read_to_string(path).ok()?;
@@ -611,6 +635,8 @@ pub fn read_external_meta(path: &Path) -> Option<ExternalMetaOverrides> {
     Some(ExternalMetaOverrides {
         loglevel: Some(file.meta.loglevel).filter(|v| !v.is_empty()),
         dev_record: file.meta.dev_record,
+        fas_enabled: file.meta.fas_enabled,
+        scenemode_enabled: file.meta.scenemode_enabled,
     })
 }
 
@@ -664,7 +690,8 @@ fn replace_yaml_scalar_raw(content: &str, key: &str, value: &str) -> String {
 /// main.rs 启动时与两套 config_watcher 热重载后调用。
 /// 返回是否实际写入。
 pub fn sync_config_snapshot(path: &Path) -> bool {
-    // 嵌入内容为唯一基准；外部仅 loglevel / dev_record 两项覆盖（语言等其余内容固定）
+    // 嵌入内容为唯一基准；外部仅 loglevel / dev_record / fas_enabled /
+    // scenemode_enabled 覆盖（语言等其余内容固定）
     let mut content = embedded_config_str().to_string();
     let meta = read_external_meta(path);
     if let Some(m) = &meta {
@@ -674,6 +701,17 @@ pub fn sync_config_snapshot(path: &Path) -> bool {
         if let Some(v) = m.dev_record {
             content =
                 replace_yaml_scalar_raw(&content, "dev_record", if v { "true" } else { "false" });
+        }
+        if let Some(v) = m.fas_enabled {
+            content =
+                replace_yaml_scalar_raw(&content, "fas_enabled", if v { "true" } else { "false" });
+        }
+        if let Some(v) = m.scenemode_enabled {
+            content = replace_yaml_scalar_raw(
+                &content,
+                "scenemode_enabled",
+                if v { "true" } else { "false" },
+            );
         }
     }
     // 内容一致就跳过：watcher 重载后再次写入会再次触发 inotify，必须防环
@@ -702,4 +740,53 @@ pub fn sync_config_snapshot(path: &Path) -> bool {
     }
     let _ = std::fs::remove_file(&tmp_path);
     crate::utils::try_write_file(path, content.as_bytes()).is_ok()
+}
+
+/// rules.yaml 快照复制：把编译期嵌入的 rules.yaml 向外复制到模块根（与 config.yaml
+/// 快照自愈同口径——嵌入内容为唯一基准，磁盘副本仅供展示/备份，运行时一律读嵌入值，
+/// 被篡改不影响调度行为）。内容一致时跳过写入。
+///
+/// **防 panic 约定**：对外写文件失败绝不 panic——同口径原子写失败后重写一次
+/// （rename 失败时回退 try_write_file 兜底），重写仍无效则记 warn 并直接跳过，
+/// 不影响守护进程启动与运行。
+pub fn sync_rules_snapshot(path: &Path) -> bool {
+    let content = embedded_rules_str();
+    // 内容一致就跳过：防止 config_watcher/inotify 事件循环
+    if std::fs::read_to_string(path).ok().as_deref() == Some(content) {
+        return false;
+    }
+    if write_file_no_panic(path, content.as_bytes()) {
+        return true;
+    }
+    // 第一次写入失败（目录缺失/权限/IO 抖动）：补建父目录后重写一次
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if write_file_no_panic(path, content.as_bytes()) {
+        log::warn!("[Rules] Snapshot rewrite recovered: {}", path.display());
+        return true;
+    }
+    // 重写仍无效：跳过（磁盘副本保持原样），绝不 panic
+    log::warn!(
+        "[Rules] Snapshot write failed, skip (embedded content stays authoritative): {}",
+        path.display()
+    );
+    false
+}
+
+/// 无 panic 的原子文件写：tmp + rename 失败时回退 try_write_file，全程不 panic。
+/// 供快照复制使用（调用方自行决定失败后的跳过策略）。
+fn write_file_no_panic(path: &Path, bytes: &[u8]) -> bool {
+    let file_name = path
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "rules".to_string());
+    let tmp_path = path.with_file_name(format!("{}.tmp", file_name));
+    let atomic_ok =
+        std::fs::write(&tmp_path, bytes).is_ok() && std::fs::rename(&tmp_path, path).is_ok();
+    if !atomic_ok {
+        let _ = std::fs::remove_file(&tmp_path);
+    }
+    atomic_ok || crate::utils::try_write_file(path, bytes).is_ok()
 }

@@ -1,19 +1,4 @@
-/*
- * Copyright (C) 2026 ChiRi
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
- */
+//! telemetry.rs: [data] [parse] [loop]
 
 /// 遥测数据源（ChiRi 专属，1s 轮询）：
 /// - PSI 压力信息（/proc/pressure/{cpu,io,memory} 的 some avg10，无 PSI 的设备恒为 0）
@@ -25,6 +10,7 @@
 /// 线程仅在 ChiRi SoC 上由 monitor/mod.rs 启动，Yumi 设备零开销。
 use std::sync::atomic::{AtomicI32, AtomicU32, Ordering};
 
+// [data] 
 /// 电池电流/电压的「不可用」哨兵值
 const UNAVAIL: i32 = i32::MIN;
 
@@ -98,6 +84,7 @@ impl Telemetry {
     }
 }
 
+// [parse] 
 /// 解析 PSI 文本的 some avg10（如 "some avg10=12.34 avg60=..."），无 some 行返回 0
 fn psi_some_avg10(text: &str) -> f32 {
     for line in text.lines() {
@@ -167,6 +154,7 @@ fn read_oplus_bcc() -> Option<(i32, i32)> {
     Some((v_uv as i32, i_ua as i32))
 }
 
+// [loop] 
 /// 遥测线程主循环：1s 轮询刷新共享快照。GPU 路径探测成功后缓存，避免每轮扫描。
 pub fn telemetry_loop() {
     // GPU 利用率候选节点：高通 Adreno → MTK GED（按存在性取首个可读者）

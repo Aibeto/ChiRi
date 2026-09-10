@@ -1,19 +1,4 @@
-/*
- * Copyright (C) 2026 yuki
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
- */
+//! screen_detect.rs: [update] [source] [select] [switch] [read] [verify] [uevent]
 
 use kobject_uevent::{ActionType, UEvent};
 use log::{debug, error, info, warn};
@@ -32,6 +17,7 @@ use crate::common::DaemonEvent;
 use crate::fluent_args;
 use crate::i18n::{t, t_with_args};
 
+// [update] 
 /// 更新共享屏幕状态；返回是否发生状态变化。
 /// 变化时由调用方决定是否转发 `DaemonEvent::ScreenStateChange`：
 /// uevent 线程直推（零轮询延迟），verify_screen_state 自愈路径的变化
@@ -118,6 +104,7 @@ fn update_state_if_changed(state_arc: &Arc<Mutex<bool>>, new_state: bool, source
     }
 }
 
+// [source] 
 /// 屏幕状态检测源类别：不同机型暴露的屏幕状态节点不同（QCOM/通用内核走
 /// backlight class；MTK 等仅以 leds class 暴露背光；老内核可读 fbdev blank），
 /// 按可靠性优先级依次探测，找到第一个可用源即锁定缓存。
@@ -186,6 +173,7 @@ static INCONSISTENT_SINCE: Mutex<Option<Instant>> = Mutex::new(None);
 /// fb0/blank 节点路径（fbdev 旧接口，FB_BLANK 权威灭屏信号；0 = unblank 亮）
 const FB0_BLANK: &str = "/sys/class/graphics/fb0/blank";
 
+// [select] 
 /// 按可靠性优先级枚举全部候选屏幕状态节点（有序）：
 /// 1. `/sys/class/backlight`（QCOM/通用内核）——具备状态节点（bl_power 或
 ///    actual_brightness）的设备；
@@ -261,6 +249,7 @@ fn inconsistency_due_for_switch() -> bool {
     }
 }
 
+// [switch] 
 /// 进入恒亮屏模式：全部候选节点耗尽（不正确或矛盾）——不再检测息屏，屏幕
 /// 状态永久按亮屏处理。error 打点一次（比 warn 高一级，提示所有节点均不正确
 /// 或矛盾）。若当前 arc 为 OFF，校正为 ON——app_detect 主循环会把该变化转发
@@ -327,6 +316,7 @@ fn retire_primary_and_switch(state_arc: &Arc<Mutex<bool>>) {
     }
 }
 
+// [read] 
 /// 亮屏否决探测：扫描全部已知屏幕状态节点（fb0/blank、全部 backlight 节点、
 /// 全部背光类 leds 节点），任一节点读到「亮」即返回 Some(节点描述)。
 ///
@@ -426,6 +416,7 @@ fn read_backlight_state(dev: &Path) -> Option<bool> {
     }
 }
 
+// [verify] 
 /// 屏幕状态自愈校验：uevent 可能漏报（开机早期 sysfs 未就绪、长时间息屏后
 /// 唤醒、netlink 缓冲溢出，或机型根本不广播屏幕类 uevent——现代内核已无
 /// early_suspend/late_resume power uevent，leds/backlight 亮度变化多数驱动
@@ -536,6 +527,7 @@ pub fn verify_screen_state(state_arc: &Arc<Mutex<bool>>) {
     }
 }
 
+// [uevent] 
 pub fn monitor_screen_state_uevent(
     state_arc: Arc<Mutex<bool>>,
     tx: SyncSender<DaemonEvent>,

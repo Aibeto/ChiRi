@@ -1,3 +1,4 @@
+// zh.ts: [messages-zh] 扁平键值字典，键名即区块语义，无内部分区
 export default {
   welcome: '欢迎使用 ChiRi 调度',
   daemon_running: '调度正在运行',
@@ -14,7 +15,6 @@ export default {
   desc_performance: '火力全开',
   desc_fast: '突破限制',
   desc_fas: '帧率自适应调度',
-  global_mode: '全局模式选择',
   about: '关于与反馈',
   qq_group: 'QQ 交流群',
   tg_group: 'Telegram 群组',
@@ -36,8 +36,6 @@ export default {
   dev_record_updated: '开发记录已更新，热重载生效',
   config_info_hint: '其他参数暂不支持修改',
   loglevel_updated: '日志等级已更新',
-  app_rules_saved: '应用规则已保存',
-  switch_success: '已请求切换到: {mode}',
   view_log: '运行日志',
   stop_daemon: '关闭调度',
   stop_title: '确认关闭调度',
@@ -60,8 +58,6 @@ export default {
   scanning: '扫描中...',
   rescan_done: '扫描完成',
   rescan_failed: '扫描失败',
-  delete_rule: '删除规则',
-  select_mode_for: '为以下应用选择模式',
   cancel: '取消',
   loglevel_off: '关闭',
   loglevel_error: '错误',

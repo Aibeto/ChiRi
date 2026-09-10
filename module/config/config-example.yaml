@@ -1,6 +1,5 @@
-# ============================================================
+# config-example.yaml: [meta] [function] [io-settings] [cpu-idle] [scene-delay] [affinity] [corectl] [thermal] [modes]
 # config.yaml 完整字段模板
-# ============================================================
 # 本文件不参与加载（daemon 只认 config.yaml / {soc}/config.yaml），
 # 纯粹当字段说明书用。复制成 config.yaml 再改。
 #
@@ -9,9 +8,8 @@
 # 写回磁盘，篡改会被还原。允许外部修改的字段只有两个：
 # meta.loglevel 与 meta.dev_record（WebUI 日志等级/开发记录开关落点）。
 # 改调优参数要改这份模板源文件再重新编译。
-# ============================================================
 
-# ── 元数据 ──────────────────────────────────────────────────
+# [meta]
 # 允许外部修改的字段：loglevel + dev_record（WebUI 热重载生效）
 # language 等其余 meta 字段固定，外部修改无效且被快照自愈还原
 meta:
@@ -25,15 +23,23 @@ meta:
   # 布尔值必须裸写（serde_yaml 把带引号的
   # "true" 解析为字符串而非 bool）。允许外部修改（WebUI 开关 + 热重载）
   dev_record: false
+  # ── 功能总开关（缺省 true，允许外部修改：手改后热重载即时生效；布尔值必须裸写）──
+  # fas_enabled：FAS 帧感知调度总闸。false 后 fas_available() 恒为 false——
+  #   determine_mode 不再产生 fas 模式、FAS 监测线程不启动、运行中 FAS 实例立即
+  #   注销并按屏幕状态恢复 balance/doze 接管。
+  fas_enabled: true
+  # scenemode_enabled：息屏场景模式总闸。false 后息屏不再进入 scenemode；
+  # 已激活的下个负载 tick 自动退出并恢复 affinity/core_ctl 快照 + doze 配置。
+  scenemode_enabled: true
 
-# ── 功能开关 ────────────────────────────────────────────────
+# [function]
 function:
   # cpuidle governor 切换：true 时把 CpuIdle.current_governor 写入 sysfs
   CpuIdleScalingGovernor: false
   # IO 优化：true 时写入 I/O 调度器、预读、合并策略
   IOOptimization: true
 
-# ── IO 优化 ─────────────────────────────────────────────────
+# [io-settings]
 IO_Settings:
   # I/O 调度器（写入 /sys/block/*/queue/scheduler）
   # "none"（NVMe/UFS 默认）、"mq-deadline"、"cfq"，空串不切换
@@ -45,28 +51,30 @@ IO_Settings:
   # IO 统计：0=关（省开销）、1=开（调试时用）
   iostats: "0"
 
-# ── CPU 空闲调度器 ──────────────────────────────────────────
+# [cpu-idle]
 CpuIdle:
   # 写入 /sys/devices/system/cpu/cpuidle/current_governor
   # "menu"（交互设备默认，按预期空闲时长选最深 C 状态）、"ladder"、"teo"
   # 空串不切换，且 CpuIdleScalingGovernor 须为 true 才生效
   current_governor: ""
 
-# ── 息屏省电（已暂停）───────────────────────────────────────
+# [scene-delay]
+# 息屏省电（已暂停）
 # [已暂停] 息屏节电（doze + scenemode）触发点在调度器内注释（src/chiri/mod.rs
 # 搜 "PAUSED"），屏幕状态不再驱动调度；字段保留供日后恢复。
 # 恢复后语义：屏幕熄灭超过该秒数后切到 scenemode 低功耗配置，亮屏恢复原模式。
 # 默认 300（5 分钟）。
 scene_mode_delay_secs: 300
 
-# ── CPU 亲和与线程迁移（ChiRi 专属）──────────────────────────
+# [affinity]
+# CPU 亲和与线程迁移（ChiRi 专属）
 # boost 模式（performance/fast/特调/fas）下收窄 top-app/foreground cpuset
 # 到大核+超大核、后台分组压小核；线程层按核心粒度做 sched_setaffinity
 # 单核放置（前台关键线程→prime、普通→big；后台繁忙线程动态 promote，
 # 空闲 demote；选核排除离线核）。
 # [已暂停] 息屏不再切换 normal/doze 布局（屏幕状态不驱动调度），亲和按亮屏
 # 口径常态生效；布局切换代码保留（affinity::apply 的 screen_on 参数）。
-# 黑名单在 src/chiri/affinity_blacklist.txt（编译嵌入，不外透）。
+# 黑名单在 src/chiri/affinity_blacklist.yaml（编译嵌入，不外透）。
 Affinity:
   # 总开关：false 时全量恢复系统布局，不做任何写入
   enabled: true
@@ -80,7 +88,8 @@ Affinity:
   # 线程层总开关：前台线程按核钉定 + 后台动态 promote/demote（仅亮屏）
   pin_foreground_threads: true
 
-# ── core_ctl 核心在线接管（ChiRi 专属）───────────────────────
+# [corectl]
+# core_ctl 核心在线接管（ChiRi 专属）
 # boost 模式把各 cluster 的 min_cpus 抬到全组常在线，防厂商热插拔
 # 与 ChiRi 调频打架；退出 boost 恢复快照。只动 min_cpus。
 CoreCtl:
@@ -98,7 +107,8 @@ CoreCtl:
   # 8550/8475 建议 true；8998（内核 4.4 热插拔质量未知）建议 false。
   scenemode_offline: true
 
-# ── 热保护 ──────────────────────────────────────────────────
+# [thermal]
+# 热保护
 # 电池温度是主参考（壳体发热由电池主导，温升慢但持续）；
 # CPU 温度只在极端热时参与（内核 95°C 温控才是主力）。
 # 豁免档 free_above：当前性能比已高于该值时不压制——高负载不挡路。
@@ -127,9 +137,8 @@ Thermal:
   # 回滞（°C）：温度降到 软限 - hysteresis 以下才解除压制
   hysteresis_c: 3
 
-# ═══════════════════════════════════════════════════════════
-#  性能模式（CLG 调频参数）
-# ═══════════════════════════════════════════════════════════
+# [modes]
+# 性能模式（CLG 调频参数）
 #
 # 四档模式：powersave / balance / performance / fast。
 # 每档独立一组 cpu_load_governor 参数，结构完全相同。
@@ -144,7 +153,6 @@ Thermal:
 #   实际空闲频率由 schedutil 自己决定。
 #
 # fast 模式不走 CLG：min=max=硬件最高频硬锁，见 src/chiri/fast.rs。
-# ═══════════════════════════════════════════════════════════
 
 # 替换成 powersave / balance / performance
 powersave:

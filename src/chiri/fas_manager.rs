@@ -1,4 +1,5 @@
 //! FAS（帧感知调度）实例管理器 —— ChiRi 专属。
+//! 区块索引: [types] [activate] [deactivate] [events] [helpers]
 //!
 //! 解耦多实例架构：每个 FAS 白名单应用对应一个独立 FasInstance（逻辑 FAS 进程），
 //! 应用进入前台时立即创建/复用（C1），失去激活时立即恢复频率但保留实例 60 秒（C2/C3），
@@ -34,6 +35,7 @@ const FAS_INSTANCE_TTL: Duration = Duration::from_secs(60);
 /// 活跃实例温度刷新周期（喂给 FAS 引擎内部限温逻辑，core_temp_threshold=0 时无效）
 const FAS_TEMP_REFRESH: Duration = Duration::from_secs(3);
 
+// [types]
 struct FasInstance {
     package: String,
     controller: FasController,
@@ -45,26 +47,27 @@ pub struct FasManager {
     active_pkg: Option<String>,
     last_temp: f64,
     last_temp_read: Instant,
-    /// (温度节点路径, 读数换算除数)。电池温度 0.1℃ → 除数 10.0；
-    /// None = 无温度源（引擎侧护栏失效，不影响其余功能）
-    temp_source: Option<(PathBuf, f64)>,
+    /// FAS 温度源节点路径。原始读数刻度因内核而异，除数不在此固化——
+    /// 每次刷新经 `utils::battery_temp_divisor()` 取全局预识别结论（CLG 热保护
+    /// 同源），避免两处口径漂移；None = 无温度源（引擎侧护栏失效，不影响其余功能）
+    temp_path: Option<PathBuf>,
     /// FAS 前台激活共享标志（monitor 层 fps_monitor 消费）：activate 置位、
     /// deactivate 清零——fps_monitor 据此推迟/摘除 eBPF uprobe（反偷跑门控）
     fas_active_flag: Arc<AtomicBool>,
 }
 
 impl FasManager {
-    /// temp_source：FAS 专用温度源。温度看电池不看处理器——电池温度是
+    /// temp_path：FAS 专用温度源节点。温度看电池不看处理器——电池温度是
     /// 热安全边界（阈值按 ℃ 配置），处理器长期 95℃ 属正常工作区，不作为
     /// 降频依据。None = 无温度源（内部限温关闭，不影响其余功能）。
     /// fas_active_flag 由 main.rs 创建、monitor 与 chiri 两层共享。
-    pub fn new(temp_source: Option<(PathBuf, f64)>, fas_active_flag: Arc<AtomicBool>) -> Self {
+    pub fn new(temp_path: Option<PathBuf>, fas_active_flag: Arc<AtomicBool>) -> Self {
         Self {
             instances: Vec::new(),
             active_pkg: None,
             last_temp: 0.0,
             last_temp_read: Instant::now(),
-            temp_source,
+            temp_path,
             fas_active_flag,
         }
     }
@@ -82,6 +85,7 @@ impl FasManager {
     /// 随后 set_game(pid, pkg) + set_temperature(last_temp) + set_temp_threshold(rules.core_temp_threshold)，
     /// active_pkg = Some(pkg)，info 打点 scheduler-fas-activate（fluent 参数 pkg、pid）
     /// + devimp event("fas", pkg, "activate")。
+    // [activate]
     pub fn activate(&mut self, pkg: &str, pid: i32) -> bool {
         // 白名单复查：包名 → 白名单配置名 → FAS 规则（'static，normalize 已在缓存时完成）
         let Some(rules) = crate::common::fas_whitelist_entry(pkg)
@@ -178,6 +182,7 @@ impl FasManager {
     /// fas_active 共享标志（fps_monitor 摘除 uprobe 回到零开销待机）。
     /// 无活跃实例时为无操作。
     /// info 打点 scheduler-fas-deactivate（pkg）+ devimp event("fas", pkg, "deactivate")。
+    // [deactivate]
     pub fn deactivate_active(&mut self) {
         let Some(pkg) = self.active_pkg.take() else {
             return;
@@ -221,7 +226,8 @@ impl FasManager {
     }
 
     /// C6：帧事件（仅活跃实例）。内部每 FAS_TEMP_REFRESH 读一次 temp_path
-    /// （毫摄氏度 /1000.0 存 last_temp 并 set_temperature）。
+    /// （按全局预识别刻度换算后存 last_temp 并 set_temperature）。
+    // [events]
     pub fn on_frame(&mut self, delta_ns: u64) {
         if !self.is_active() {
             return;
@@ -273,16 +279,17 @@ impl FasManager {
         }
     }
 
+    // [helpers]
     fn active_instance_mut(&mut self) -> Option<&mut FasInstance> {
         let pkg = self.active_pkg.as_ref()?;
         self.instances.iter_mut().find(|i| &i.package == pkg)
     }
 
-    /// 每 FAS_TEMP_REFRESH 读一次温度源（按 temp_source 除数换算为 ℃），
+    /// 每 FAS_TEMP_REFRESH 读一次温度源（按全局预识别的刻度换算为 ℃），
     /// 缓存 last_temp 并喂给活跃实例的引擎内部限温逻辑
     /// （core_temp_threshold=0 时引擎侧无效，此处照常喂）。
     fn refresh_temperature(&mut self) {
-        let Some((path, divisor)) = self.temp_source.as_ref() else {
+        let Some(path) = self.temp_path.as_ref() else {
             return;
         };
         if self.last_temp_read.elapsed() < FAS_TEMP_REFRESH {
@@ -292,6 +299,8 @@ impl FasManager {
         let Ok(raw) = crate::utils::read_f64_from_file(&path.to_string_lossy()) else {
             return;
         };
+        // 刻度取全局预识别结论（与 CLG 热保护同源）；无法确定时按内核标准 0.1°C 兜底
+        let divisor = crate::utils::battery_temp_divisor().unwrap_or(10.0);
         let temp = raw / divisor;
         self.last_temp = temp;
         if let Some(inst) = self.active_instance_mut() {

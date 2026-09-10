@@ -1,3 +1,5 @@
+//! zip_ext.rs: [zip-create] [path-helpers]
+
 use std::{
     fs::File,
     io::{Read, Write},
@@ -9,6 +11,8 @@ use zip::{
     result::ZipResult,
     write::{FileOptionExtension, FileOptions},
 };
+
+// [zip-create] 
 
 /// Creates a zip archive that contains the files and directories from the specified directory, uses the specified compression level.
 pub fn zip_create_from_directory_with_options<F, T>(
@@ -64,6 +68,8 @@ where
     zip_writer.finish()?;
     Ok(())
 }
+
+// [path-helpers] 
 
 fn make_relative_path(root: &Path, current: &Path) -> PathBuf {
     let mut result = PathBuf::new();

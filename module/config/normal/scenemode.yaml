@@ -1,3 +1,4 @@
+# scenemode.yaml: [scenemode]
 # 息屏场景模式（scenemode）：息屏超过 scene_mode_delay_secs 后切换，压低功耗拉长续航。
 # 需要关闭时把 enabled 改为 false
 scenemode:
@@ -21,4 +22,3 @@ scenemode:
     touch_boost_enabled: false
     touch_boost_ms: 0
     touch_boost_tiers: 1
-    
