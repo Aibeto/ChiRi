@@ -8,9 +8,9 @@
 /// 数据写入进程级共享原子量（monitor 层写、chiri 调度层读），不占用事件通道容量；
 /// 消费端为 chiri scheduler_ipc 的 2s 热循环：telemetry.log CSV 落盘 + 周期 debug 摘要。
 /// 线程仅在 ChiRi SoC 上由 monitor/mod.rs 启动，Yumi 设备零开销。
-use std::sync::atomic::{AtomicI32, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 
-// [data] 
+// [data]
 /// 电池电流/电压的「不可用」哨兵值
 const UNAVAIL: i32 = i32::MIN;
 
@@ -38,6 +38,9 @@ static TELEMETRY: Telemetry = Telemetry {
     batt_current_ua: AtomicI32::new(UNAVAIL),
     batt_voltage_uv: AtomicI32::new(UNAVAIL),
 };
+
+/// BCC 字段不可用告警去重（一次运行一条，避免 1s 轮询刷屏）
+static BCC_UNUSABLE_WARNED: AtomicBool = AtomicBool::new(false);
 
 /// 取进程级遥测快照
 pub fn telemetry() -> &'static Telemetry {
@@ -84,7 +87,7 @@ impl Telemetry {
     }
 }
 
-// [parse] 
+// [parse]
 /// 解析 PSI 文本的 some avg10（如 "some avg10=12.34 avg60=..."），无 some 行返回 0
 fn psi_some_avg10(text: &str) -> f32 {
     for line in text.lines() {
@@ -120,8 +123,14 @@ const OPLUS_BCC_PARMS: &str = "/sys/class/oplus_chg/battery/bcc_parms";
 fn read_oplus_bcc() -> Option<(i32, i32)> {
     let text = std::fs::read_to_string(OPLUS_BCC_PARMS).ok()?;
     let f: Vec<&str> = text.split(',').map(str::trim).collect();
-    let v0: i64 = f.get(6)?.parse().ok()?;
-    let cur: i64 = f.get(8)?.parse().ok()?;
+    let v0: i64 = match f.get(6).and_then(|s| s.parse().ok()) {
+        Some(v) => v,
+        None => return bcc_unusable(),
+    };
+    let cur: i64 = match f.get(8).and_then(|s| s.parse().ok()) {
+        Some(v) => v,
+        None => return bcc_unusable(),
+    };
     if v0 == 0 && cur == 0 {
         return None;
     }
@@ -154,7 +163,16 @@ fn read_oplus_bcc() -> Option<(i32, i32)> {
     Some((v_uv as i32, i_ua as i32))
 }
 
-// [loop] 
+/// 电压/电流字段不可用：告警一次并返回 None（调用方回退标准 power_supply 节点）。
+/// 无此打点时「BCC 其实一直没生效、功耗列一直来自 10s 缓存节点」完全不可见。
+fn bcc_unusable() -> Option<(i32, i32)> {
+    if !BCC_UNUSABLE_WARNED.swap(true, Ordering::Relaxed) {
+        log::warn!("{}", crate::i18n::t("telemetry-bcc-unusable"));
+    }
+    None
+}
+
+// [loop]
 /// 遥测线程主循环：1s 轮询刷新共享快照。GPU 路径探测成功后缓存，避免每轮扫描。
 pub fn telemetry_loop() {
     // GPU 利用率候选节点：高通 Adreno → MTK GED（按存在性取首个可读者）

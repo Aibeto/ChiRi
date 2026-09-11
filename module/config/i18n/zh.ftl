@@ -257,6 +257,7 @@ corectl-write-failed = [CoreCtl] core_ctl 写入失败: { $path }
 # --- Telemetry（遥测）---
 monitor-thread-start-telemetry = [Main] 启动遥测监控线程（PSI/GPU/电池）...
 telemetry-oplus-bcc = [Telemetry] 检测到 OPlus 私有节点 bcc_parms，功耗读取走 BCC 实时数据（规避标准 power_supply 节点 10s 缓存）
+telemetry-bcc-unusable = [Telemetry] bcc_parms 下标 6/8（电压/电流）缺失或非整数，BCC 实时功耗不可用，已回退标准 power_supply 节点（约 10s 缓存；其电流单位可能与 µA 假设不一致，功耗列量纲请自行核对）
 telemetry-probe-attached = [CPU Monitor] eBPF 扩展探针已挂载: { $name }
 telemetry-probe-failed = [CPU Monitor] eBPF 扩展探针 { $name } 挂载失败（内核可能无该 tracepoint）: { $error }
 telemetry-map-missing = [CPU Monitor] eBPF 产物中缺少映射 { $name }（产物与守护进程版本偏差），对应计数保持为 0

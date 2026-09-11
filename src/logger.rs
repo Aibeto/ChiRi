@@ -369,16 +369,43 @@ pub fn status_log_snapshot(
     ]);
 }
 
-/// HH:MM:SS.mmm 格式本地时间（避免引入 chrono 依赖）
+/// HH:MM:SS.mmm 格式**设备本地时间**（避免引入 chrono 依赖）。
+/// 时区统一（2026-09）：status.csv / devimp / daemon.log 全部为本地时间——
+/// 此前本函数按 `as_secs() % 86400` 输出 UTC，而 daemon.log 与 devimp 文件名
+/// 是本地时间，两路日志相差时区，离线对齐必须人工换算（8550 整夜功耗分析踩坑）。
+/// 经 libc localtime_r 走系统时区；不可用时回退 UTC 原口径（仅丢时区正确性）。
 fn format_now() -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();
-    let total_sec = now.as_secs() % 86400;
-    let h = total_sec / 3600;
-    let m = (total_sec % 3600) / 60;
-    let s = total_sec % 60;
+    let (h, m, s) = local_hms(now.as_secs() as i64).unwrap_or_else(|| {
+        let total = now.as_secs() % 86400;
+        (
+            (total / 3600) as u32,
+            ((total % 3600) / 60) as u32,
+            (total % 60) as u32,
+        )
+    });
     format!("{:02}:{:02}:{:02}.{:03}", h, m, s, now.subsec_millis())
+}
+
+/// epoch 秒 → 本地 (时, 分, 秒)。仅 unix（bionic/glibc 均有 localtime_r）；
+/// 非 unix 主机恒 None（回退 UTC），不影响 Android 目标。
+#[cfg(unix)]
+fn local_hms(epoch: i64) -> Option<(u32, u32, u32)> {
+    unsafe {
+        let mut tm: libc::tm = std::mem::zeroed();
+        let t: libc::time_t = epoch as libc::time_t;
+        if libc::localtime_r(&t, &mut tm).is_null() {
+            return None;
+        }
+        Some((tm.tm_hour as u32, tm.tm_min as u32, tm.tm_sec as u32))
+    }
+}
+
+#[cfg(not(unix))]
+fn local_hms(_epoch: i64) -> Option<(u32, u32, u32)> {
+    None
 }
 
 // 开发诊断日志（devimp/devimp_<前台包名>_<毫秒时间戳>.log）
@@ -533,8 +560,10 @@ fn devimp_tick_state_clear() {
         .clear();
 }
 
-/// CSV 表头（列序由 devimp_tick / devimp_snap / devimp_place / devimp_aff /
-/// devimp_core / devimp_event 的写入保证对齐，共 40 列）
+/// CSV 表头（列 schema，40 列定长，行类型无关——tgtop/place/aff 等只是 type
+/// 列的取值，各自写既有列的子集、其余留 "-"，禁止按行类型增删列）。
+/// 列序由 devimp_tick / devimp_snap / devimp_place / devimp_aff /
+/// devimp_core / devimp_tgtop / devimp_event 的写入保证对齐
 // [devrow]
 const DEVIMP_HEADER: &str = "ts,type,mode,screen_on,pid,package,tid,comm,cluster,core,from_core,to_core,util_pct,max_util,over_cores,under_cores,cur_perf,tgt_perf,cur_freq_khz,max_freq_khz,decision,deb_up,deb_down,reason,pinned,thermal_cap_pct,touch,psi_cpu,psi_io,psi_mem,gpu_busy,batt_v,batt_i,batt_p,wakeups,migrations,freq_trans,batt_temp,cpu_temp,clg_active";
 
@@ -732,7 +761,7 @@ fn devimp_meta() -> &'static String {
             "# module={m_name} {m_ver} (versionCode {m_code})\n\
              # soc={soc} board={board} model={model}\n\
              # android={release} (sdk {sdk}) kernel={kernel}\n\
-             # ts-column=UTC format_now\n"
+             # ts-column=local format_now\n"
         )
     })
 }
@@ -1099,6 +1128,22 @@ pub fn devimp_core(cluster: &str, core: usize, util: &str, pinned: u32) {
         .set(D_CORE, core.to_string())
         .set(D_MAXUTIL, util)
         .set(D_PINNED, pinned.to_string());
+    devimp_write_line(r);
+}
+
+/// tgtop 行：全系统 top 消耗者快照（30s 一轮 × 每进程一行，最多 5 行/轮）。
+/// 用途：定位待机期「小核 util 长期 60%+」的元凶进程（8550 整夜功耗分析遗留
+/// 盲区——place 行只记前台应用线程，后台消耗者完全不可见）。
+/// 列语义复用：pid/tid = TGID，comm = 进程名（cmdline 首段优先），
+/// util_pct = 该窗口运行时间占比（多核并行可 >100%，如 320% ≈ 3.2 核满载），
+/// max_util = 窗口内运行时长增量（ms）。
+pub fn devimp_tgtop(tgid: u32, comm: &str, util_pct: &str, delta_ms: &str) {
+    let mut r = DevRow::new("tgtop");
+    r.set(D_PID, tgid.to_string())
+        .set(D_TID, tgid.to_string())
+        .set(D_COMM, comm)
+        .set(D_UTIL, util_pct)
+        .set(D_MAXUTIL, delta_ms);
     devimp_write_line(r);
 }
 

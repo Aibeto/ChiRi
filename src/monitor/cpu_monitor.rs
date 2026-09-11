@@ -14,7 +14,7 @@ use tokio::sync::watch;
 use crate::fluent_args;
 use crate::i18n::{t, t_with_args};
 
-// [consts] 
+// [consts]
 /// 常规采样周期由调用方（main.rs 按 SoC）传入：ChiRi 160ms / Yumi 200ms。
 /// 见 `start_cpu_loop` 的 `sample_ms_normal` 参数。
 /// 特调采样周期（ms）：明日方舟特调激活时缩短到 40ms，保证特调档位判定的响应度
@@ -24,7 +24,7 @@ const SAMPLE_MS_TUNED: u64 = 40;
 /// start_cpu_loop 入口按「ChiRi 且 FAS 配置可用」动态置位，Yumi 设备恒为 false（行为零变化）。
 static FAS_FG_UTIL_ENABLED: AtomicBool = AtomicBool::new(false);
 
-// [helpers] 
+// [helpers]
 /// 读取 PerCpuArray 计数 map 的全核总和（key 0 的所有 cpu 槽位累加）。
 /// map 缺失（None，eBPF 产物与 daemon 版本偏差时）返回 0，保持计数可选语义。
 fn percpu_total(map: Option<&PerCpuArray<&mut aya::maps::MapData, u64>>) -> u64 {
@@ -53,7 +53,7 @@ fn get_thread_tids(pid: u32) -> Vec<u32> {
     tids
 }
 
-// [setup] 
+// [setup]
 pub async fn start_cpu_loop(
     tx: SyncSender<DaemonEvent>,
     rx_pid: watch::Receiver<u32>,
@@ -221,6 +221,14 @@ pub async fn start_cpu_loop(
         let mut last_migrate_total: u64 = 0;
         let mut last_freq_total: u64 = 0;
 
+        // tgtop：30s 一轮全系统 top 消耗者快照（ChiRi 专属，devimp tgtop 行）。
+        // 基线 map 存各 TGID 上轮累计运行时间；首轮只建基线不出行。
+        const TGTOP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+        let mut last_tgtop_at = std::time::Instant::now();
+        let mut last_tgtop_snap: std::collections::HashMap<u32, u64> =
+            std::collections::HashMap::new();
+        let mut tgtop_have_base = false;
+
         let mut interval =
             tokio::time::interval(std::time::Duration::from_millis(sample_ms_normal));
 
@@ -247,7 +255,7 @@ pub async fn start_cpu_loop(
 
             let mut core_utils = vec![0.0_f32; max_cpu_id + 1];
 
-            // [global-util] 
+            // [global-util]
             // 1. 全局单核利用率计算（带有实时状态补偿）
             //    注意：core_utils 按「真实 CPU ID」索引（长度 max_cpu_id + 1），
             //    与 CLG 端 core_utils.get(cpu_id) 保持一致；若按在线列表顺序 push，
@@ -310,7 +318,7 @@ pub async fn start_cpu_loop(
                 last_busy_times[idx] = adj_busy;
             }
 
-            // [fg-util] 
+            // [fg-util]
             // 2. 前台应用利用率计算
             //    主路径: 使用 tgid_run_time map (TGID 级聚合)
             //    只需查询 1 个 key，不受 thread_run_time HASH 驱逐影响
@@ -414,7 +422,7 @@ pub async fn start_cpu_loop(
                 break;
             }
 
-            // [telemetry] 
+            // [telemetry]
             // ChiRi 遥测：读取扩展探针累计计数，按周期发送增量（探针未挂载时增量恒 0，
             // 事件照发保持下游 CSV 列对齐；watchdog 不消费该事件，不影响负载源判定）
             if chiri_telemetry && last_stats_check.elapsed() >= STATS_INTERVAL {
@@ -436,7 +444,51 @@ pub async fn start_cpu_loop(
                 }
             }
 
-            // [interval] 
+            // [tgtop]
+            // 待机消耗者快照（30s 一轮）：TGID_RUN_TIME 全 map 增量 top-5 写
+            // devimp tgtop 行。定位「待机期小核 util 长期 60%+」的元凶——place
+            // 行只覆盖前台应用线程，后台消耗者（同步/推送/常驻服务）此前完全
+            // 不可见。仅 ChiRi 且 dev_record 开启时有 IO；首轮只建基线不出行。
+            if chiri_telemetry
+                && crate::logger::devimp_active()
+                && last_tgtop_at.elapsed() >= TGTOP_INTERVAL
+            {
+                let now_in = std::time::Instant::now();
+                let win_ns = now_in.duration_since(last_tgtop_at).as_nanos() as u64;
+                let mut snap: Vec<(u32, u64)> = Vec::new();
+                // aya 0.14：keys() 直接返回 MapKeys 迭代器（逐项 Result）
+                for k in tgid_run_map.keys().flatten() {
+                    if let Ok(v) = tgid_run_map.get(&k, 0) {
+                        snap.push((k, v));
+                    }
+                }
+                if tgtop_have_base {
+                    let mut rows: Vec<(u32, u64)> = snap
+                        .iter()
+                        .filter_map(|(pid, t)| {
+                            let delta = t.saturating_sub(last_tgtop_snap.get(pid).copied()?);
+                            (delta > 0).then_some((*pid, delta))
+                        })
+                        .collect();
+                    rows.sort_by(|a, b| b.1.cmp(&a.1));
+                    for (pid, delta) in rows.into_iter().take(5) {
+                        // 多核并行可 >100%（320% ≈ 3.2 核满载），不 clamp 到 100
+                        let pct = delta as f64 / win_ns.max(1) as f64 * 100.0;
+                        crate::logger::devimp_tgtop(
+                            pid,
+                            &proc_name(pid),
+                            &format!("{:.1}", pct.min(9999.0)),
+                            &(delta / 1_000_000).to_string(),
+                        );
+                    }
+                }
+                // 基线滚动：整体重建，死进程条目随之清除
+                last_tgtop_snap = snap.into_iter().collect();
+                last_tgtop_at = now_in;
+                tgtop_have_base = true;
+            }
+
+            // [interval]
             // 按特调状态动态切换采样周期：akmode 激活时 40ms 快速跟随负载，
             // 其余用传入的常规间隔（ChiRi 160ms / Yumi 200ms）。
             // interval 周期固定，切换时按新周期重建（相位以本轮处理完成为基准，采样点间隔精确）。
@@ -455,7 +507,27 @@ pub async fn start_cpu_loop(
     Ok(())
 }
 
-// [tgid-util] 
+// [tgtop]
+/// 读进程名：cmdline 首段优先（应用即包名；native 路径取文件名段），
+/// 退化 /proc/<pid>/comm（15 字节截断），全失败给 "<pid>"。
+/// 仅供 tgtop top-5 行解析（每 30s 最多 5 次小文件读，开销可忽略）。
+fn proc_name(pid: u32) -> String {
+    if let Ok(s) = std::fs::read_to_string(format!("/proc/{pid}/cmdline")) {
+        if let Some(first) = s.split('\0').find(|s| !s.is_empty()) {
+            let seg = first.rsplit('/').next().unwrap_or(first);
+            if !seg.is_empty() {
+                return seg.to_string();
+            }
+        }
+    }
+    std::fs::read_to_string(format!("/proc/{pid}/comm"))
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| format!("<{pid}>"))
+}
+
+// [tgid-util]
 /// 主路径: 使用 TGID 级聚合 map 计算前台进程的 CPU 利用率
 ///
 /// 优势:
@@ -539,7 +611,7 @@ fn compute_tgid_util(
     Some(util)
 }
 
-// [thread-util] 
+// [thread-util]
 /// 降级路径: 逐 TID 遍历计算前台最重线程的利用率 (原始逻辑)
 /// 增加防驱逐保护：如果 map 返回值 < 上次记录值，跳过该 TID
 /// 仅在 FAS_FG_UTIL_ENABLED 置位（ChiRi 且 FAS 可用）且 TGID 主路径失败时被调用。

@@ -1604,7 +1604,16 @@ pub fn start_scheduler_thread(
                                             .chain(ranges.big.clone())
                                             .filter_map(|c| last_core_utils.get(c).copied())
                                             .fold(0.0_f32, f32::max);
-                                        if standby_max >= SCENEMODE_SAT_UTIL {
+                                        // 长息屏兜底：息屏时长远超进入延迟（≥4×）时不再受负载门槛
+                                        // 限制。门槛防的是「进→10s 饱和退出→300s 冷却」拉锯，但
+                                        // 实测后台常驻负载会让小核 util 长期停在 60-70%（峰值触顶
+                                        // 阈值 0.75），门槛足可把整夜待机永久挡在 scenemode 之外
+                                        // ——代价（大核/prime 整夜带电 + 小核上限全开）远大于偶发
+                                        // 拉锯。短息屏仍按原门槛防抖。
+                                        let long_off = screen_off_at.map_or(false, |off| {
+                                            off.elapsed().as_secs() >= delay.saturating_mul(4)
+                                        });
+                                        if standby_max >= SCENEMODE_SAT_UTIL && !long_off {
                                             if !scene_hold_logged {
                                                 scene_hold_logged = true;
                                                 crate::logger::devimp_event(

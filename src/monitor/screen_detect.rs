@@ -17,7 +17,7 @@ use crate::common::DaemonEvent;
 use crate::fluent_args;
 use crate::i18n::{t, t_with_args};
 
-// [update] 
+// [update]
 /// 更新共享屏幕状态；返回是否发生状态变化。
 /// 变化时由调用方决定是否转发 `DaemonEvent::ScreenStateChange`：
 /// uevent 线程直推（零轮询延迟），verify_screen_state 自愈路径的变化
@@ -59,13 +59,14 @@ fn update_state_if_changed(state_arc: &Arc<Mutex<bool>>, new_state: bool, source
             // 主节点报 OFF 却被其他节点驳回：读数矛盾。退役切换延迟 15s——
             // 单次不一致可能是瞬时毛刺，持续不一致才切换（见
             // INCONSISTENCY_SWITCH_DELAY）；期间息屏事件持续驳回
-            if inconsistency_due_for_switch() {
+            if inconsistency_due_for_switch() || veto_episode_due_for_switch() {
                 retire_primary_and_switch(state_arc);
             }
             return false;
         }
-        // 全节点一致 OFF：接受息屏，一致性恢复，清不一致计时
+        // 全节点一致 OFF：接受息屏，一致性恢复，清不一致计时与驳回计数
         INCONSISTENT_SINCE.lock().unwrap().take();
+        reset_veto_episodes();
     } else {
         VETO_WARNED.store(false, Ordering::Relaxed);
     }
@@ -104,7 +105,7 @@ fn update_state_if_changed(state_arc: &Arc<Mutex<bool>>, new_state: bool, source
     }
 }
 
-// [source] 
+// [source]
 /// 屏幕状态检测源类别：不同机型暴露的屏幕状态节点不同（QCOM/通用内核走
 /// backlight class；MTK 等仅以 leds class 暴露背光；老内核可读 fbdev blank），
 /// 按可靠性优先级依次探测，找到第一个可用源即锁定缓存。
@@ -169,11 +170,26 @@ const INCONSISTENCY_SWITCH_DELAY: Duration = Duration::from_secs(15);
 /// 持续不一致。清零时机：主节点读到 ON（verify）/ 息屏转换被全节点一致
 /// 接受 / 稳态复核全节点一致 OFF / 退役切换后（新主节点重新计时）
 static INCONSISTENT_SINCE: Mutex<Option<Instant>> = Mutex::new(None);
+/// 息屏「驳回 episode」计数器：与 INCONSISTENT_SINCE 互补。后者要求**连续**不一致
+/// 15s，但主节点自身每轮 verify 读到 ON 就会清它（见 verify_screen_state），
+/// 于是「报 OFF 却被判亮屏」的失真节点永远攒不满窗口、永不退役——屏幕状态整夜
+/// 钉死在 ON（实测：某 8550 面板 panel1-backlight 息屏仍报亮，整夜 0 条 screen,off
+/// 事件、scenemode 从未进入 → 大核带电 + 小核上限全开）。本计数只按「息屏尝试
+/// 被驳回」的次数累加，ON 读数不清零，只在**全节点一致 OFF**（节点被证可信）时复位。
+static VETO_EPISODES: AtomicU32 = AtomicU32::new(0);
+/// 上次计入 episode 的时刻（去重 + 窗口判定）
+static VETO_EPISODE_LAST: Mutex<Option<Instant>> = Mutex::new(None);
+/// 退役阈值：同一主节点累计该次数的息屏驳回即判定读数不可信，退役换下一个候选
+const VETO_RETIRE_EPISODES: u32 = 3;
+/// episode 计数窗口：距上次计入超过该时长则重新起算，避免跨天累计误退役
+const VETO_EPISODE_WINDOW: Duration = Duration::from_secs(1800);
+/// episode 最小间隔：一次息屏可能连发多个 uevent，短于该间隔不重复计数
+const VETO_EPISODE_MIN_GAP: Duration = Duration::from_secs(60);
 
 /// fb0/blank 节点路径（fbdev 旧接口，FB_BLANK 权威灭屏信号；0 = unblank 亮）
 const FB0_BLANK: &str = "/sys/class/graphics/fb0/blank";
 
-// [select] 
+// [select]
 /// 按可靠性优先级枚举全部候选屏幕状态节点（有序）：
 /// 1. `/sys/class/backlight`（QCOM/通用内核）——具备状态节点（bl_power 或
 ///    actual_brightness）的设备；
@@ -249,7 +265,34 @@ fn inconsistency_due_for_switch() -> bool {
     }
 }
 
-// [switch] 
+/// 登记一次「息屏尝试被驳回」episode，返回是否达到退役阈值。
+/// 与 inconsistency_due_for_switch 的差异见 VETO_EPISODES 注释：本计数不被主节点
+/// 的 ON 读数清除，因此能覆盖「节点持续失真 → verify 每轮清计时」的死锁场景。
+/// 最小间隔内重复调用不计数（同一次息屏的多个 uevent 只算一次）。
+fn veto_episode_due_for_switch() -> bool {
+    let mut last = VETO_EPISODE_LAST.lock().unwrap();
+    match *last {
+        Some(t) if t.elapsed() < VETO_EPISODE_MIN_GAP => return false,
+        Some(t) if t.elapsed() < VETO_EPISODE_WINDOW => {
+            VETO_EPISODES.fetch_add(1, Ordering::Relaxed);
+        }
+        _ => VETO_EPISODES.store(1, Ordering::Relaxed),
+    }
+    // 阈值判定与 `*last` 更新在 match 之外统一执行（上面两个分支都落到这里，
+    // 故计数每次递增后都会重新判定，非只有首计数才返回 true）。
+    // 勿改成在分支内 `return ... >= VETO_RETIRE_EPISODES`：那会跳过本行 `*last`
+    // 更新，MIN_GAP 去重随即失效（last 不前进 → 每次调用都计数 → 计数飞涨误退役）。
+    *last = Some(Instant::now());
+    VETO_EPISODES.load(Ordering::Relaxed) >= VETO_RETIRE_EPISODES
+}
+
+/// 复位 episode 计数：全节点一致 OFF（主节点读数被证实可信）时调用
+fn reset_veto_episodes() {
+    VETO_EPISODES.store(0, Ordering::Relaxed);
+    VETO_EPISODE_LAST.lock().unwrap().take();
+}
+
+// [switch]
 /// 进入恒亮屏模式：全部候选节点耗尽（不正确或矛盾）——不再检测息屏，屏幕
 /// 状态永久按亮屏处理。error 打点一次（比 warn 高一级，提示所有节点均不正确
 /// 或矛盾）。若当前 arc 为 OFF，校正为 ON——app_detect 主循环会把该变化转发
@@ -293,8 +336,10 @@ fn retire_primary_and_switch(state_arc: &Arc<Mutex<bool>>) {
         Some((next, kind)) => {
             *SCREEN_SOURCE.lock().unwrap() = Some((next.clone(), kind));
             SCREEN_READ_FAILS.store(0, Ordering::Relaxed);
-            // 新主节点重新计时（15s 不一致窗口重新开始）
+            // 新主节点重新计时（15s 不一致窗口重新开始）；驳回 episode 同时复位，
+            // 否则新节点会在第一次驳回就被旧计数连锁退役，逐个耗尽候选
             INCONSISTENT_SINCE.lock().unwrap().take();
+            reset_veto_episodes();
             warn!(
                 "{}",
                 t_with_args(
@@ -316,7 +361,7 @@ fn retire_primary_and_switch(state_arc: &Arc<Mutex<bool>>) {
     }
 }
 
-// [read] 
+// [read]
 /// 亮屏否决探测：扫描全部已知屏幕状态节点（fb0/blank、全部 backlight 节点、
 /// 全部背光类 leds 节点），任一节点读到「亮」即返回 Some(节点描述)。
 ///
@@ -416,7 +461,7 @@ fn read_backlight_state(dev: &Path) -> Option<bool> {
     }
 }
 
-// [verify] 
+// [verify]
 /// 屏幕状态自愈校验：uevent 可能漏报（开机早期 sysfs 未就绪、长时间息屏后
 /// 唤醒、netlink 缓冲溢出，或机型根本不广播屏幕类 uevent——现代内核已无
 /// early_suspend/late_resume power uevent，leds/backlight 亮度变化多数驱动
@@ -490,13 +535,14 @@ pub fn verify_screen_state(state_arc: &Arc<Mutex<bool>>) {
                                     )
                                 );
                             }
-                            if inconsistency_due_for_switch() {
+                            if inconsistency_due_for_switch() || veto_episode_due_for_switch() {
                                 retire_primary_and_switch(state_arc);
                             }
                             update_state_if_changed(state_arc, true, "steady-review");
                         } else {
-                            // 全节点一致 OFF：一致性恢复，清不一致计时
+                            // 全节点一致 OFF：一致性恢复，清不一致计时与驳回计数
                             INCONSISTENT_SINCE.lock().unwrap().take();
+                            reset_veto_episodes();
                         }
                     }
                 }
@@ -527,7 +573,7 @@ pub fn verify_screen_state(state_arc: &Arc<Mutex<bool>>) {
     }
 }
 
-// [uevent] 
+// [uevent]
 pub fn monitor_screen_state_uevent(
     state_arc: Arc<Mutex<bool>>,
     tx: SyncSender<DaemonEvent>,

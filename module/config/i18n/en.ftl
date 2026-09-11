@@ -258,6 +258,7 @@ corectl-write-failed = [CoreCtl] core_ctl write failed: { $path }
 # --- Telemetry ---
 monitor-thread-start-telemetry = [Main] starting telemetry monitor thread (PSI/GPU/battery)...
 telemetry-oplus-bcc = [Telemetry] OPlus private node bcc_parms detected, battery power reads use real-time BCC data (bypassing the 10s cache of standard power_supply nodes)
+telemetry-bcc-unusable = [Telemetry] bcc_parms fields 6/8 (voltage/current) are missing or non-integer; real-time BCC power is unavailable, so telemetry fell back to the standard power_supply node (~10s cache; its current unit may not match the uA assumption, so verify the power column scale)
 telemetry-probe-attached = [CPU Monitor] eBPF telemetry probe attached: { $name }
 telemetry-probe-failed = [CPU Monitor] eBPF telemetry probe { $name } attach failed (tracepoint may be missing): { $error }
 telemetry-map-missing = [CPU Monitor] map { $name } missing from eBPF binary (binary/daemon version skew), its counters stay 0

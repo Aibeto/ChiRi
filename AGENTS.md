@@ -1,6 +1,6 @@
 # AGENTS.md
 
-> 上次更新时间：2026-09-10
+> 上次更新时间：2026-09-11
 > 最后更新位于此 head 之后：fd9a71ab6c6b4636cb073bcffa96cb468c4993fd
 
 本文档为 AI 编程助手（Cursor / Claude Code / Trae 等）在本仓库工作时的指导文件。
@@ -107,6 +107,10 @@ cd webui && npm run type-check
 - 启动日志归档：main 在 `create_dir_all(logs)`/`logger::init` 之前调 `logger::archive_on_startup`——把上一轮整个 `logs/` 与 `devimp/` 分别原子 rename 为同级 `ziped_<MMDD-HHmmss>` / `ziped_devimp_<MMDD-HHmmss>` 临时目录，交同一个一次性子线程 `log_archiver` 串行打包为 `logd/ziped_<MMDD-HHmmss>.zip` 与 `logd/devimp_<MMDD-HHmmss>.zip`（归档命名一律本地时间 MMDD-HHmmss 人眼可辨；手写 stored ZIP、流式拷贝 + 分块 CRC，勿整读大文件、勿引入 zip/flate2）后删除临时目录并自然退出；打包失败保留对应临时目录并写 ARCHIVE_FAILED.txt（此时 logger 未 init 无法打点）。必须复制回 `logs/watchdog.pid`——看门狗先于 daemon 启动、WebUI stopScheduler 靠它终止看门狗，归档带走它会导致「关闭调度」失效。打包完成后子线程执行 **logd+devimp 预算清理**：两目录总大小 >128MB（`LOGD_DEVIMP_MAX_BYTES`）时按 mtime 从最旧文件删到 <96MB（`LOGD_DEVIMP_TARGET_BYTES`）；devimp 触顶换文件时也触发一次同款清理（`enforce_logd_devimp_limit`，在 WRITER 锁外调用），防长会话膨胀。
 
 - 开发诊断日志（devimp/）：独立目录 `<模块根>/devimp/`（与 logs/ 平级，**启动时随 logs/ 一起归档**到 `logd/devimp_<MMDD-HHmmss>.zip`）。**按前台包名分组**：文件名 `devimp_<前台包名>_<MMDD-HHmmss>.log`（本地时间秒级，人眼可辨；同秒重开以 -N 后缀去重）（首次写入惰性创建，整轮未开启 DEV 则不产生文件），scheduler_ipc 每秒经 `logger::set_devimp_package` 同步 `app_detect::get_current_package()`，**包名变化即关闭当前文件、下次写入以新包名+当前时间戳开新文件**；原始包名同时存入 logger 全局，**所有行类型的 package 列自动填充前台包名**（tick/core 不感知包名也带包名；place/event 仅在携带有效包名时覆盖，aff 后台迁移行传 "-" 是刻意不归属前台包，勿改 set_pkg）；空包名（启动初期尚未检测到前台应用）**不触发切文件**继续写当前文件，尚无任何包名时包名段为 `nopkg`（防 `devimp__` 空段）；单文件软上限 128MB **触顶自动换新时间戳文件继续写**（勿改回静默停写）。**写入量控制**：tick 行按 cluster 节流——决策签名（decision/tgt_perf/cur_freq/max_freq/thermal/touch/防抖进度）变化才写、无变化 2s 心跳（`DEVIMP_TICK_HEARTBEAT`，状态在切文件时清零），稳态从 akmode 25 行/s/组 降到 0.5 行/s/组，勿改回每 tick 必写；place/core 低频快照每 `DEVL_ROW_EVERY_ROUNDS=4` 轮（8s）一轮；snap 1s 一行保留（功耗关联锚点）。文件名含包名段、字典序≠时间序，清理（`devimp_prepare` 启动一次 + 触顶换文件后）一律按文件 mtime 排序保留最近 20 份，当前活跃文件不清理。总开关 `logger::set_devimp_active`（scheduler_ipc 按 `Config.meta.dev_record` 同步，meta 允许外部修改的字段之一、WebUI「开发记录」开关 + 热重载）；模式名经 `logger::set_devimp_mode` 同步、各行 mode 列自动填充。CSV 宽表 40 列 + `type` 列：`tick`（每决策 tick × 每核心组的调频决策轨迹，CLG Worker 与 akmode on_load_update 写入）、`snap`（1s 环境上下文，前台包名**实时取自** **`app_detect::get_current_package()`**——ModeChange 仅模式变化时才有事件，用事件维护会写过期包名）、`place`（低频快照：前台线程的包名/线程名/落点核，全部来自 affinity 缓存——comm 在线程首见 stat 采样时缓存、fg_cmdline 每轮刷新一次，**零新增文件读**）、`aff`（亲和迁移动作 pin/promote/demote/restore/blacklist_skip，包名列用缓存 cmdline）、`core`（逐核 util + 钉核计数，与 place 同周期每 4 轮/8s 一次）、`event`（模式/屏幕/热/配置状态变化；含 `kind="fas"` 行，action: activate/deactivate/destroy——FAS 实例生命周期状态变化即时打点，见 FAS 小节）。**共用数据减小开销**：电池/CPU 温度在 1s snap 块读一次存入 `last_batt_temp/last_cpu_temp`，status.csv、devimp snap、thermal（2s）三处共用（thermal 复用 ≤1s 旧值，带回滞的秒级判定无影响）；affinity 的逐核 util/在线位图/线程 comm 均为缓存复用。未开启开关时所有写入点零 IO。
+
+- **时间戳统一为设备本地时间（2026-09-11）**：status.csv / devimp 的 ts 列此前经 `as_secs()%86400` 输出 UTC，与 daemon.log、devimp 文件名（本地时间）相差时区，离线对齐必须人工换算（8550 整夜功耗分析踩坑）。现 `logger::format_now` 经 `libc::localtime_r` 走系统时区（非 unix 回退 UTC），devimp 文件头注释为 `# ts-column=local format_now`。新增任何日志流一律本地时间，勿再引入第二时区。
+
+- devimp `tgtop` 行（2026-09-11）：30s 一轮全系统 top 消耗者快照（cpu_monitor tokio 循环读 `TGID_RUN_TIME` 全 map 增量，top-5/轮），定位待机期「小核 util 长期 60%+」的后台元凶（place 行只覆盖前台线程）。列语义复用：pid/tid=TGID、comm=cmdline 首段（退化 comm）、util_pct=窗口运行占比（**多核并行可 >100%**，如 320%≈3.2 核满载，不 clamp）、max_util=运行时长增量 ms。门控 `chiri_telemetry && devimp_active`，首轮只建基线不出行；基线 map 整体重建（死进程条目随之清除）。新增行类型时同步更新 DEVIMP_HEADER 注释与本条。
 
 - devimp 双实例防护（进程层兜底）：devimp 文件按 `devimp_<pkg>_<毫秒时间戳>.log` 命名，两个 daemon 实例并行时会写两份不同时间戳的同包名文件（status/daemon 日志同理）。shell 侧清理（service.sh/action.sh/WebUI stopScheduler 依赖 logs/watchdog.pid）在 pid 文件丢失时失效——旧看门狗 3s 把 daemon 拉起与新实例并行。main.rs 在一切初始化（含日志归档）之前对 `<模块根>/daemon.lock` 做 `flock(LOCK_EX|LOCK_NB)`，拿锁失败直接 exit(0)（看门狗 3s 重试，旧实例退出后接管）；锁文件放模块根而非 logs/（logs/ 每次启动被整体归档 rename，不可作锁锚点）。fd 故意泄漏持锁至进程退出，内核在进程死亡时自动释放，无需清理逻辑。
 
@@ -291,6 +295,10 @@ WebUI 侧：
 
 - 屏幕事件双源直推：`monitor_screen_state_uevent` 收到 power（early_suspend/late_resume）、backlight KOBJ_CHANGE 或 leds backlight KOBJ_CHANGE（仅认名字含 backlight 的 leds，跳过通知灯/按键灯）且状态确实变化时**直接 send `DaemonEvent::ScreenStateChange`**（纯推送），不再依赖 app_detect 轮询转发；app_detect 的 verify+轮询转发保留为 uevent 漏报时的自愈兜底。双源可能对同一次屏幕切换各发一次事件，两套调度器的 ScreenStateChange 分支开头都有 `screen_on == is_screen_on` 去重守卫（状态未变只打点）——新增屏幕事件生产点时必须维持该守卫。
 
+- **驳回 episode 退役（2026-09-11 补丁）**：15s 连续不一致门控存在死锁——主节点自身失真（息屏仍报亮，如某 8550 面板 panel1-backlight）时，verify 每轮读到 ON 都会清 `INCONSISTENT_SINCE`，15s 永远攒不满 → 节点永不退役、arc 永久钉死 ON（实测整夜 0 条 screen,off、scenemode 全程未进入 → 大核带电+小核上限全开）。现增加 `VETO_EPISODES` 计数兜底：每 60s 最多记 1 次「息屏被驳回」episode（`VETO_EPISODE_MIN_GAP` 防同屏连发 uevent 重复计数），1800s 窗口（`VETO_EPISODE_WINDOW`）内累计 ≥3 次（`VETO_RETIRE_EPISODES`）即退役主节点；ON 读数**不**清零，仅全节点一致 OFF 或退役换节点时复位（防连锁误退役逐个耗尽候选）。
+
+- **scenemode 长息屏兜底（2026-09-11 补丁）**：进入门槛 `standby_max >= SCENEMODE_SAT_UTIL(0.75)` 在后台常驻负载下会整夜拒绝进入（实测小核 util 长期 60-70%、峰值触 0.75）。现息屏时长 ≥4×`scene_mode_delay_secs` 时绕过负载门槛进入 scenemode——短息屏仍按原门槛防「进→10s 饱和退出→300s 冷却」拉锯；门槛的防拉锯语义只对短息屏成立。
+
 ### 极速模式（fast）
 
 - fast 模式用专属锁频器、不读 yaml、停用 CLG：`src/chiri/fast.rs` 的 `FastLock` 与 CLG 完全独立，fast 模式下由 `mod.rs` 的 scheduler_ipc 先 `cpu_governor.release()` 再 `fast_lock.init()` 接管。
@@ -360,6 +368,8 @@ WebUI 侧：
 - eBPF 扩展探针（`yumi-ebpf/src/main.rs` 的 `handle_sched_wakeup`/`handle_sched_migrate_task`/`handle_cpufreq_transition`，PerCpuArray 计数）由 `cpu_monitor.rs` 仅在 ChiRi 上可选挂载（内核缺 tracepoint 时 warn 一次跳过，不影响主探针），每 2s 读累计值取增量发 `DaemonEvent::BpfStats`（Yumi 设备不发送；Yumi scheduler match 里的空 arm 仅为枚举完备性）。
 
 - chiri scheduler_ipc 以 `TELEMETRY_LOG_INTERVAL=1s` 消费：写 `logs/status.csv`（logger.rs `status_log_snapshot`，1s 一行，功耗精度 1s）+ 20s 一条 debug 摘要 `telemetry-summary`。BpfStats 不刷新 CLG 看门狗心跳（探针失效不影响负载源判定）。
+
+- BCC 失效可见性（2026-09-11）：`bcc_parms` 下标 6/8（电压/电流）缺失或非整数时此前 `?` 静默回退标准节点，「BCC 从未生效、功耗列一直来自 10s 缓存节点」完全不可见（8550 实测 batt_current_ma 99% 在 ±5、74% 为 0）。现 warn 一次 `telemetry-bcc-unusable`（去重）后回退，便于从 daemon.log 确认功耗列口径。
 
 ## [hard] 硬性约束
 
