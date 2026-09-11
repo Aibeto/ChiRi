@@ -324,17 +324,18 @@ pub struct Config {
 }
 
 impl Config {
-    /// 加载生效配置：基准内容编译期嵌入二进制（common::embedded_config_str，
-    /// 非 ChiRi SoC 用默认 config.yaml，内容与原磁盘文件一致，防篡改），
-    /// 磁盘文件只提供 meta.loglevel / meta.dev_record 覆盖（语言等其余内容固定，
-    /// 外部修改无效）。`path` 为生效配置的磁盘快照路径（common::get_config_path()），
-    /// 缺失时 meta 回退嵌入默认值。
+    /// 加载生效配置：feature 段以嵌入 feature.yaml 为基准（磁盘不落盘，防篡改），
+    /// meta 以嵌入 meta.yaml 为默认值，再被磁盘 meta.yaml 覆盖 loglevel / language
+    /// （sync_meta_snapshot 已先行校验/纠正）。`path` 为生效 meta.yaml 路径
+    /// （common::get_config_path()），缺失或非法时 meta 回退嵌入默认值。
     pub fn load(path: &str) -> anyhow::Result<Self> {
-        let mut config: Config = serde_yaml::from_str(crate::common::embedded_config_str())?;
+        let mut config: Config = serde_yaml::from_str(crate::common::embedded_feature_str())?;
+        let d = crate::common::embedded_meta_defaults();
+        config.meta.loglevel = d.loglevel;
+        config.meta.language = d.language;
         if let Some(m) = crate::common::read_external_meta(std::path::Path::new(path)) {
-            if let Some(v) = m.loglevel {
-                config.meta.loglevel = v;
-            }
+            config.meta.loglevel = m.loglevel;
+            config.meta.language = m.language;
         }
         Ok(config)
     }

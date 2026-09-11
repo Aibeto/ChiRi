@@ -1,17 +1,4 @@
-# 8998/config.yaml: [meta] [function] [io-settings] [cpu-idle] [affinity] [corectl] [thermal] [powersave] [balance] [performance]
-
-# [meta]
-meta:
-  name: "config_8998"
-  author: "ChiRi"
-  language: "zh"
-  loglevel: "INFO"
-  dev_record: true
-  # 功能总开关（缺省 true，热重载即时生效）：
-  #   fas_enabled: FAS 帧感知调度总闸（关闭后运行中实例立即注销，模式判定不再产生 fas）
-  #   scenemode_enabled: 息屏场景模式总闸（关闭后息屏不进入 scenemode，运行中立即退出恢复 doze）
-  fas_enabled: true
-  scenemode_enabled: true
+# 8550/feature.yaml: [function] [io-settings] [cpu-idle] [affinity] [corectl] [thermal] [powersave] [balance] [performance]
 
 # [function]
 function:
@@ -19,6 +6,7 @@ function:
   IOOptimization: true
 
 # [io-settings]
+# IO 设置
 IO_Settings:
   Scheduler: ""
   read_ahead_kb: "512"
@@ -35,25 +23,25 @@ scene_mode_delay_secs: 300
 Affinity:
   enabled: true
   top_app_uclamp_min_pct: 0
-  top_app_uclamp_max_pct: 0
+  top_app_uclamp_max_pct: 85
   pin_foreground_threads: true
 
 # [corectl]
 CoreCtl:
   enabled: true
-  # scenemode 离线核：息屏超时进入 scenemode 后小核全开（不足 3 个从大核补足），
-  # 大核簇/prime 下线省电。8998 内核 4.4 的热插拔路径质量未知，默认关闭
-  # （如需省电可改 true 自行验证）。
-  scenemode_offline: false
+  # scenemode 离线核：息屏超时进入 scenemode 后小核全开（保证 ≥3 个待命核响应
+  # 电源键等事件，另留 1 个专用小核给调度服务），大核簇/prime 整簇断电消除
+  # 空转漏电流；little 持续顶满上限则退回 powersave 并冷却 300s。亮屏按快照恢复。
+  scenemode_offline: true
 
 # [thermal]
 Thermal:
   enabled: true
   batt_soft_temp_c: 41
   batt_hard_temp_c: 45
-  # CPU 温度仅极端热时参与（内核 ~95°C 温控兜底）：合成温区在大型游戏高负载下
-  # 常态 85°C+，75/85 会导致过半时间被软件压制、比官调更卡；90/95 只在接近
-  # 内核起控点时提前轻压
+  # CPU 温度仅极端热时参与（内核 ~95°C 温控兜底）：soc_max 合成温区在大型游戏
+  # 高负载下常态 85°C+，75/85 会导致过半时间被软件压制、比官调更卡；90/95
+  # 只在接近内核起控点时提前轻压
   cpu_soft_temp_c: 90
   cpu_hard_temp_c: 95
   soft_perf_cap: 0.70
@@ -89,8 +77,11 @@ balance:
     up_threshold: 0.72
     down_threshold: 0.55
     smoothing_up: 0.75
-    down_rate_limit_ticks: 1
-    up_rate_limit_ticks: 1
+    # 防抖：原 1/1 等于无防抖，8550 实测 cap 与方向每 tick 都可能翻转
+    # （升频平滑推进、降频一步到位，util 抖动即来回改写 scaling_max_freq）。
+    # 调回 2/3；低载（<down_fast_threshold）仍跳过降频防抖立即下调，空闲不受影响
+    down_rate_limit_ticks: 3
+    up_rate_limit_ticks: 2
     headroom_factor: 1.20
     headroom_ramp: 0.12
     perf_floor: 0.10

@@ -1,0 +1,8 @@
+# meta.yaml: [meta] 用户可修改的抬头字段（守护进程逐字段严格校验）
+name: "config_8998"
+author: "ChiRi"
+language: "zh"
+loglevel: "INFO"
+dev_record: true
+fas_enabled: true
+scenemode_enabled: true

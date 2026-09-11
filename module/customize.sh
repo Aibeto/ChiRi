@@ -270,9 +270,10 @@ if [ "$HOT_UPDATE_AVAILABLE" = "true" ]; then
 
         # 2. 复制模块文件到目标目录
         ui_print "$MSG_COPYING_FILES"
-        # 备份用户配置文件（注意：rules.yaml 在模块根，不在 config/ 子目录）
-        if [ -f "$MODDIR/config/config.yaml" ]; then
-            cp "$MODDIR/config/config.yaml" "$MODDIR/config/config.yaml.bak"
+        # 备份用户可修改配置（meta.yaml 抬头字段；rules.yaml 在模块根，不在 config/ 子目录。
+        # feature.yaml 等仅存于二进制，无需备份）
+        if [ -f "$MODDIR/config/meta.yaml" ]; then
+            cp "$MODDIR/config/meta.yaml" "$MODDIR/config/meta.yaml.bak"
         fi
         if [ -f "$MODDIR/rules.yaml" ]; then
             cp "$MODDIR/rules.yaml" "$MODDIR/rules.yaml.bak"
@@ -300,8 +301,8 @@ if [ "$HOT_UPDATE_AVAILABLE" = "true" ]; then
            [ -f "$MODDIR/$key_file" ] || UPDATE_OK=false
         done
         if [ "$UPDATE_OK" = "false" ]; then
-            if [ -f "$MODDIR/config/config.yaml.bak" ]; then
-                mv "$MODDIR/config/config.yaml.bak" "$MODDIR/config/config.yaml"
+            if [ -f "$MODDIR/config/meta.yaml.bak" ]; then
+                mv "$MODDIR/config/meta.yaml.bak" "$MODDIR/config/meta.yaml"
             fi
             if [ -f "$MODDIR/rules.yaml.bak" ]; then
                 mv "$MODDIR/rules.yaml.bak" "$MODDIR/rules.yaml"
@@ -314,8 +315,8 @@ if [ "$HOT_UPDATE_AVAILABLE" = "true" ]; then
         fi
 
         # 恢复用户配置文件
-        if [ -f "$MODDIR/config/config.yaml.bak" ]; then
-            mv "$MODDIR/config/config.yaml.bak" "$MODDIR/config/config.yaml"
+        if [ -f "$MODDIR/config/meta.yaml.bak" ]; then
+            mv "$MODDIR/config/meta.yaml.bak" "$MODDIR/config/meta.yaml"
         fi
         if [ -f "$MODDIR/rules.yaml.bak" ]; then
             mv "$MODDIR/rules.yaml.bak" "$MODDIR/rules.yaml"

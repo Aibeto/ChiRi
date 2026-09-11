@@ -1,6 +1,6 @@
 # endfield.yaml: [fas-rules]
 # FAS 配置：com.hypergryph.endfield（明日方舟：终末地）
-# 编译期嵌入（src/common.rs::embedded_fas_app_str），不可编辑，不对外暴露。
+# 编译期嵌入（随 module/config 目录整体收录，common::embedded_fas_app_str 按配置名查找），不可编辑，不对外暴露。
 # 未列出的字段取 src/fas_types.rs::FasRulesConfig 默认值。
 fas_rules:
   fps_gears: [30.0, 60.0, 90.0, 120.0, 144.0, 165.0]

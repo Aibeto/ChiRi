@@ -1,5 +1,5 @@
 <script setup lang="ts">
-// ConfigEditorView.vue: [state] [loglevel] [dev-record] [lang] [load]
+// ConfigEditorView.vue: [state] [loglevel] [switches] [lang] [load]
 import { ref, onMounted, computed } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { Bridge } from '@/utils/bridge';
@@ -33,16 +33,39 @@ const loglevelLabel = computed(() => {
   return hit ? hit.name : lv;
 });
 
-// [dev-record] 
+// [switches] 
 // 开发记录开关（meta.dev_record）：开启后守护进程向 devimp/ 写按核调度诊断日志
 const devRecord = ref(Boolean(meta.value.dev_record));
+// FAS 帧感知调度总闸（meta.fas_enabled）：关闭后不再产生 fas 模式，运行中实例立即注销。
+// daemon 缺省 true，字段缺失时显示 ON（!== false 而非 Boolean）
+const fasEnabled = ref(meta.value.fas_enabled !== false);
+// 息屏场景模式总闸（meta.scenemode_enabled）：关闭后息屏不进入 scenemode，运行中立即退出
+const scenemodeEnabled = ref(meta.value.scenemode_enabled !== false);
 
-// v-model 在 @change 触发前已把 devRecord 翻转为新值，失败回滚用 !on（不能取 prev）
+// v-model 在 @change 触发前已把开关翻转为新值，失败回滚用 !on（不能取 prev）
 const onDevRecordChange = async (on: boolean) => {
   try {
     await Bridge.setDevRecord(on);
   } catch (e) {
     devRecord.value = !on;
+    toast(t('save_failed'));
+  }
+};
+
+const onFasChange = async (on: boolean) => {
+  try {
+    await Bridge.setFasEnabled(on);
+  } catch (e) {
+    fasEnabled.value = !on;
+    toast(t('save_failed'));
+  }
+};
+
+const onScenemodeChange = async (on: boolean) => {
+  try {
+    await Bridge.setScenemodeEnabled(on);
+  } catch (e) {
+    scenemodeEnabled.value = !on;
     toast(t('save_failed'));
   }
 };
@@ -68,6 +91,8 @@ const loadData = async () => {
     meta.value = m || {};
     activeConfig.value = name;
     devRecord.value = Boolean(meta.value.dev_record);
+    fasEnabled.value = meta.value.fas_enabled !== false;
+    scenemodeEnabled.value = meta.value.scenemode_enabled !== false;
   } catch (e) {
     toast(t('load_failed'));
   } finally {
@@ -110,6 +135,16 @@ const onSelectLoglevel = async (a: any) => {
         <van-cell center :title="t('dev_record')" :label="t('dev_record_hint')">
           <template #right-icon>
             <van-switch v-model="devRecord" size="22" @change="onDevRecordChange" />
+          </template>
+        </van-cell>
+        <van-cell center :title="t('fas_enabled')" :label="t('fas_enabled_hint')">
+          <template #right-icon>
+            <van-switch v-model="fasEnabled" size="22" @change="onFasChange" />
+          </template>
+        </van-cell>
+        <van-cell center :title="t('scenemode_enabled')" :label="t('scenemode_enabled_hint')">
+          <template #right-icon>
+            <van-switch v-model="scenemodeEnabled" size="22" @change="onScenemodeChange" />
           </template>
         </van-cell>
       </van-cell-group>

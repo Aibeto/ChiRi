@@ -1,16 +1,18 @@
 # config-example.yaml: [meta] [function] [io-settings] [cpu-idle] [scene-delay] [affinity] [corectl] [thermal] [modes]
-# config.yaml 完整字段模板
-# 本文件不参与加载（daemon 只认 config.yaml / {soc}/config.yaml），
-# 纯粹当字段说明书用。复制成 config.yaml 再改。
+# 完整字段说明书：原 config.yaml 已拆分为 meta.yaml（可修改抬头，daemon 严格校验）
+# 与 feature.yaml（不可修改调优段，仅存于二进制不落盘）。本文件不参与加载，
+# 纯粹当字段说明书用；改 meta/feature 模板源文件后重新编译才生效。
 #
-# 注意：调优配置编译期嵌入二进制（include_str!），磁盘文件只是
+# 注意：调优配置编译期嵌入二进制（module/config 目录整体 include_dir!），磁盘文件只是
 # "嵌入内容 + meta 覆盖"的快照。daemon 启动/重载时会把嵌入内容
-# 写回磁盘，篡改会被还原。允许外部修改的字段只有两个：
-# meta.loglevel 与 meta.dev_record（WebUI 日志等级/开发记录开关落点）。
+# 写回磁盘，篡改会被还原。允许外部修改的字段只有四个：
+# meta.loglevel / meta.dev_record / meta.fas_enabled / meta.scenemode_enabled
+# （WebUI 日志等级/开发记录/FAS/场景模式开关落点）。
 # 改调优参数要改这份模板源文件再重新编译。
 
 # [meta]
-# 允许外部修改的字段：loglevel + dev_record（WebUI 热重载生效）
+# 允许外部修改的字段：loglevel + dev_record + fas_enabled + scenemode_enabled
+# （WebUI 开关，热重载生效）
 # language 等其余 meta 字段固定，外部修改无效且被快照自愈还原
 meta:
   name: "example_config" # 仅供文档参考，代码不解析

@@ -118,28 +118,30 @@ cd webui && npm run type-check
 
 ### 配置（嵌入、快照与热重载）
 
-- 调优配置编译期嵌入二进制（防篡改）：`common.rs` 用 `include_str!` 打包 `module/config/{soc}/config.yaml ×3`、默认 `config.yaml`、`normal/akmode.yaml`、`normal/scenemode.yaml`、`normal/fas.yaml`（FAS 白名单）与 i18n 两个 ftl。运行时一律以 `common::embedded_config_str()`（按 `matched_soc_hint()` 选择）为准，磁盘同名文件只是「自愈快照 + meta 覆盖入口」。
+- 调优配置编译期嵌入二进制（防篡改）：`common.rs` 用 `include_dir!` **整体**嵌入 `module/config` 目录（`CONFIG_DIR` + `common::embedded_config_file(相对路径)`），`module/rules.yaml` 与 `src/chiri/*.yaml` 仍用 `include_str!` 单文件嵌入。原 config.yaml 已拆分为 **meta.yaml（用户可修改抬头，七个字段严格校验）+ feature.yaml（不可修改调优段，磁盘不落盘）**，各 SoC 目录与默认 config/ 下各一份且必须成对。**新增/删除 yaml 无需改任何 .rs**（放目录即被收录；目录增删由 build.rs 的 `rerun-if-changed=module/config` 触发重编译）。**必需文件缺失直接编译失败**：build.rs `assert_required_configs` 断言 meta/feature/akmode/scenemode/fas/ftl 存在且 SoC 目录 meta/feature 成对，杜绝静默回退代码默认值。
 
-- FAS 配置文件（均编译期嵌入）：`module/config/normal/fas.yaml` 定义 `fas.apps: {包名: 配置名}` 白名单，经 common.rs include_str! + OnceLock 解析，运行时导出 `fas_whitelist.yaml` 对外只读，用户/WebUI 不可修改；`module/config/normal/fas/<配置名>.yaml`（如 fas/endfield.yaml）为每应用 FAS 调优，编译期嵌入不导出（`FasRulesConfig` 全字段），按 `common::embedded_fas_app_str` 的 arm 查找。**FAS 游戏三步**：fas.yaml 加一行 → common.rs::embedded_fas_app_str 加 arm → 新建 `normal/fas/<配置名>.yaml`（可复制 `normal/fas-example.yaml` 全字段说明书裁剪——该文件仅文档参考、不被加载）。FAS 配置已脱离 rules.yaml（rules.yaml 的 `fas_rules` 注释模板与 `RulesConfig.fas_rules` 字段保留为 Yumi 冻结区向后兼容）。
+- FAS 配置文件（均编译期嵌入）：`module/config/normal/fas.yaml` 定义 `fas.apps: {包名: 配置名}` 白名单，随 module/config 目录构建期嵌入并经 OnceLock 解析，运行时导出 `fas_whitelist.yaml` 对外只读，用户/WebUI 不可修改；`module/config/normal/fas/<配置名>.yaml`（如 fas/endfield.yaml）为每应用 FAS 调优，编译期嵌入不导出（`FasRulesConfig` 全字段），由 `common::embedded_fas_app_str(配置名)` 按 `normal/fas/<配置名>.yaml` 路径查找（不再有 match arm）。**FAS 游戏两步**：fas.yaml 加一行 → 新建 `normal/fas/<配置名>.yaml`（可复制 `normal/fas-example.yaml` 全字段说明书裁剪——该文件仅文档参考、不被加载）。FAS 配置已脱离 rules.yaml（rules.yaml 的 `fas_rules` 注释模板与 `RulesConfig.fas_rules` 字段保留为 Yumi 冻结区向后兼容）。
 
-- `Config::load(path)`（chiri 与 scheduler 各一份，替代旧 `from_file`）用嵌入内容做基准，仅从磁盘文件反序列化 meta 段（`common::read_external_meta` 返回 `ExternalMetaOverrides`，只取 loglevel + dev_record + fas_enabled + scenemode_enabled，调优字段与其他 meta 字段即使被篡改也不读入）。
+- `Config::load(path)`（chiri 与 scheduler 各一份）：feature 段解析嵌入 feature.yaml（磁盘不落盘）；meta 先取嵌入 meta.yaml 默认值（`common::embedded_meta_defaults`），再被磁盘 meta.yaml 覆盖（`common::read_external_meta`）。meta.yaml 严格整体校验（`parse_disk_meta`）：name/author/language/loglevel/dev_record/fas_enabled/scenemode_enabled 七字段缺一不可、`deny_unknown_fields` 拒绝未知键、loglevel 限六档、language 限 en/zh、name/author 非空——任一异常整文件判非法（不再按行提取），由 sync_meta_snapshot 用内嵌默认覆盖修正。daemon 只消费 loglevel/language/三个开关（chiri 全量覆盖，scheduler 仅 loglevel+language；name/author 仅 WebUI 展示）。
 
-- 快照自愈：`common::sync_config_snapshot()` 在 main 启动时与两套 config_watcher 热重载后，把「嵌入内容 + 磁盘 meta 覆盖」写回 `get_config_path()`（内容一致时跳过写入防 inotify 成环），磁盘文件被篡改/删除都会被还原/重建。允许外部修改的字段只有四个：meta.loglevel（WebUI 日志等级切换）、meta.dev_record（WebUI「开发记录」开关，控制 devimp/ 诊断日志写入，热重载生效；布尔替换必须写裸值——serde_yaml 把带引号的 "true" 解析为字符串而非 bool）、meta.fas_enabled 与 meta.scenemode_enabled（功能总开关，见下）；language 等其余内容固定，外部修改无效且会被快照自愈还原。
+- meta.yaml 快照自愈：`common::sync_meta_snapshot()` 在 main 启动时与两套 config_watcher **触发热重载前**调用（先于 Config::load）：文件合法 → 跳过写入（防 inotify 成环）；缺失/不可读 → 嵌入原文原子重建（不留警告注释）；任一字段非法 → 嵌入原文整体覆盖 + 文件末尾追加警告注释「上一次修改存在非法字段，已恢复为默认值」+ warn 日志。`get_config_path()` 现指向 meta.yaml（active_config.chr 内容随之变为 "8550/meta.yaml" / "meta.yaml"）；旧版遗留 config.yaml 由 main 启动时清理。
 
 - `rules.yaml` 嵌入二进制且只读：编译期 `include_str!` 打包（`common::embedded_rules_str`/`embedded_rules()`），运行时**一律读嵌入值**（monitor/chiri/scheduler 初始加载 + app_detect 热重载共 4 处均改读嵌入）；磁盘 `rules.yaml` 仅是 `main.rs::sync_rules_snapshot` 启动时复制出的对外展示副本（内容一致跳过写），被篡改不影响调度行为、下次启动还原。全局模式、应用性能模式等均由模块随附维护，WebUI 无写入入口。
 
-- 功能总开关（config.yaml meta 段，缺省 true，热重载即时生效）：`fas_enabled` 与 `scenemode_enabled`。字段在 chiri `Meta`（`#[serde(default = "crate::utils::default_true")]`），`Config::load` 读盘 meta 覆盖后经 `common::set_fas_enabled`/`set_scenemode_enabled` 同步到进程级原子标志（覆盖 main 启动 + chiri config_watcher 热重载两条路径）。fas_enabled=false ⇒ `fas_available()` 恒 false（determine_mode 不产生 fas、FAS 监测线程不启动），chiri 主循环 fas 块开头注销运行中实例并按屏幕状态恢复 balance/doze；scenemode_enabled=false ⇒ 息屏不进入 scenemode，已激活的下个 tick 退出并恢复 affinity/core_ctl 快照 + doze 配置。高频路径只读原子量，不许在 tick 内读磁盘。快照自愈会保留这两个 meta 字段（`sync_config_snapshot` 的 meta 覆盖已含）。
+- 功能总开关（config.yaml meta 段，缺省 true，热重载即时生效）：`fas_enabled` 与 `scenemode_enabled`。字段在 chiri `Meta`（`#[serde(default = "crate::utils::default_true")]`），`Config::load` 读盘 meta 覆盖后经 `common::set_fas_enabled`/`set_scenemode_enabled` 同步到进程级原子标志（覆盖 main 启动 + chiri config_watcher 热重载两条路径）。fas_enabled=false ⇒ `fas_available()` 恒 false（determine_mode 不产生 fas、FAS 监测线程不启动），chiri 主循环 fas 块开头注销运行中实例并按屏幕状态恢复 balance/doze；scenemode_enabled=false ⇒ 息屏不进入 scenemode，已激活的下个 tick 退出并恢复 affinity/core_ctl 快照 + doze 配置。高频路径只读原子量，不许在 tick 内读磁盘。快照自愈会保留这两个 meta 字段（meta.yaml 覆盖已含）。WebUI「配置信息」页提供两个总闸开关（bridge `setFasEnabled`/`setScenemodeEnabled`，经 `updateMetaField` 做 meta.yaml 顶层行替换写入，mock 同步）。
 
-- 对外写文件防 panic：新增的 `common::write_file_no_panic`（tmp + rename，失败回退 try_write_file）全程无 unwrap/expect；`sync_rules_snapshot` 写失败时补建父目录重写一次，重写仍无效则 warn 并直接跳过——**任何对外文件写入都不允许 panic 击穿启动流程**，`sync_config_snapshot` 同口径。
+- 对外暴露审计（落盘最小化）：磁盘只保留有外部读取方的文件——meta.yaml（WebUI 读写）、rules.yaml / fas_whitelist.yaml / special_tuned.yaml / current_mode.chr / active_config.chr（WebUI 只读）。feature.yaml、normal/akmode.yaml、normal/scenemode.yaml、normal/fas\*.yaml 无任何读取方：不落盘、不监听，xtask 打包时从模块包移除（仅存于二进制）；customize.sh 热更新备份/恢复只针对 meta.yaml。i18n ftl 仅嵌入消费，暂仍随包（后续可同样移除）。
+
+- 对外写文件防 panic：新增的 `common::write_file_no_panic`（tmp + rename，失败回退 try_write_file）全程无 unwrap/expect；`sync_rules_snapshot` 写失败时补建父目录重写一次，重写仍无效则 warn 并直接跳过——**任何对外文件写入都不允许 panic 击穿启动流程**，`sync_meta_snapshot` 同口径。
 
 - `matched_soc_hint()` 已不检查磁盘目录存在性。新增配置项需同步更新反序列化结构体与默认值；改 `module/config/` 下的 yaml 源文件后重新编译才生效。**`module/config/config-example.yaml`** **是完整字段说明书（不参与加载），任何新增/删除/改语义的配置段与 meta 字段都必须同步更新它**（含注释说明取值范围与机型差异），否则模板与实际配置脱节。
 
-- 所有加载/热重载入口（main.rs、两套 config_watcher）统一走 `get_config_path()`，不要硬编码路径。启动时把生效配置的相对路径（如 `8550/config.yaml`，非处理器时 `config.yaml`）写入 `active_config.chr`，WebUI 据此读取同一份文件。
+- 所有加载/热重载入口（main.rs、两套 config_watcher）统一走 `get_config_path()`，不要硬编码路径。启动时把生效配置的相对路径（如 `8550/meta.yaml`，非处理器时 `meta.yaml`）写入 `active_config.chr`，WebUI 据此读取同一份文件。
 
 - 热重载链路三处断链已修复，勿回退：
-  1. config_watcher 必须监听生效配置的父目录（`config_path.parent()`），不是固定 `config/` 根目录。inotify 目录监听不递归，ChiRi 生效配置在 `config/{soc}/config.yaml` 子目录，监听根目录收不到 CLOSE_WRITE/MOVED_TO，导致 8550/8475/8998 上 WebUI 改 meta.loglevel 热重载完全失效（Yumi 生效配置在根目录，所以历史未暴露）。
-  2. `common::sync_config_snapshot` 必须原子写（同目录 tmp 文件 + rename）。直接 `fs::write` 截断覆盖存在窗口期，config_watcher/WebUI 可能读到半截内容导致 meta 解析失败回退默认（用户日志等级被静默丢弃）；rename 触发 MOVED_TO 后靠「内容一致跳过写入」防环。
-  3. config.yaml 调参热重载须联动运行中的调度器：config_watcher 重载成功后置 `config_dirty`（`Arc<AtomicBool>`），scheduler_ipc 循环内 `swap` 消费，亮屏时按当前模式 reload CLG/akmode 并刷新亲和/core_ctl（息屏不覆盖 Doze，亮屏事件补上）；此前调参要等下次 ModeChange/规则重载才生效。
+  1. config_watcher 必须监听生效配置的父目录（`config_path.parent()`），不是固定 `config/` 根目录。inotify 目录监听不递归，ChiRi 生效配置在 `config/{soc}/meta.yaml` 子目录，监听根目录收不到 CLOSE_WRITE/MOVED_TO，导致 8550/8475/8998 上 WebUI 改 meta.loglevel 热重载完全失效（Yumi 生效配置在根目录，所以历史未暴露）。
+  2. `common::sync_meta_snapshot` 必须原子写（write_file_no_panic：同目录 tmp 文件 + rename）。直接 `fs::write` 截断覆盖存在窗口期，config_watcher/WebUI 可能读到半截内容导致 meta 解析失败回退默认（用户日志等级被静默丢弃）；rename 触发 MOVED_TO 后靠「内容合法跳过写入」防环。
+  3. meta.yaml 调参热重载须联动运行中的调度器：config_watcher 重载成功后置 `config_dirty`（`Arc<AtomicBool>`），scheduler_ipc 循环内 `swap` 消费，亮屏时按当前模式 reload CLG/akmode 并刷新亲和/core_ctl（息屏不覆盖 Doze，亮屏事件补上）；此前调参要等下次 ModeChange/规则重载才生效。
 
 ### i18n
 
@@ -162,6 +164,8 @@ cd webui && npm run type-check
 ### WebUI
 
 - 与守护进程通过 kernelsu bridge 交互（见 `webui/src/utils/bridge.ts`），不要硬编码路径；读配置前先读 `active_config.chr` 确定实际生效文件。
+
+- `vite.config.ts` 的 `chiri-embedded-config` 插件在构建期把 `module/config/**`（排除 feature.yaml 与 _-example.yaml，mock 不读取）、`module/rules.yaml`、`src/chiri/_.yaml`嵌入为虚拟模块`virtual:chiri-config`（`files`键为相对仓库根的路径），**仅供`utils/mock.ts` 等 dev 场景取仓库默认值**（新增/删除 yaml 无需改 WebUI 代码，`MOCK_SOCS`从嵌入目录推导，不要在 mock 里手写配置内容或 SoC 列表）。**嵌入副本不是设备权威值**：meta.yaml（{soc}/meta.yaml）是用户可修改文件，WebUI 真实路径必须经 bridge 读`active_config.chr` 指向的设备文件（`bridge.ts` 不引用该虚拟模块），不得用嵌入副本覆盖或展示其设备现状。
 
 - 文件写入用 base64 管道（`echo '<b64>' | base64 -d > path.tmp && mv -f path.tmp path`）避免 shell 特殊字符干扰，必须经临时文件 + 原子 mv，防止直接 `>` 截断时 config_watcher 读到半截内容导致重载失败；不要用 `echo "${content}"` 拼接。
 

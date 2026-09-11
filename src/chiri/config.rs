@@ -5,8 +5,8 @@ use serde::Deserialize;
 use crate::fluent_args;
 use crate::i18n::t_with_args;
 
-/// 全局元信息段（对应 config.yaml 顶层 `Meta`）
-// [meta] 
+/// 全局元信息段（对应 meta.yaml 顶层字段）
+// [meta]
 #[derive(Debug, Deserialize, Default)]
 pub struct Meta {
     /// 日志级别：DEBUG / INFO / WARN / ERROR，热重载时即时生效
@@ -25,13 +25,13 @@ pub struct Meta {
 
     /// FAS 帧感知调度总开关：关闭后 fas_available() 恒为 false（determine_mode
     /// 不再产生 fas 模式、FAS 监测线程不启动、运行中实例立即注销）。
-    /// meta 段允许外部修改的字段之一（手改 config.yaml 后热重载生效）。
+    /// meta 段允许外部修改的字段之一（手改 meta.yaml 后热重载生效）。
     #[serde(default = "crate::utils::default_true", alias = "FasEnabled")]
     pub fas_enabled: bool,
 
     /// 息屏场景模式总开关：关闭后息屏不进入 scenemode（已激活的下个 tick 退出
     /// 并恢复 affinity/core_ctl 快照 + doze 配置）。
-    /// meta 段允许外部修改的字段之一（手改 config.yaml 后热重载生效）。
+    /// meta 段允许外部修改的字段之一（手改 meta.yaml 后热重载生效）。
     #[serde(default = "crate::utils::default_true", alias = "ScenemodeEnabled")]
     pub scenemode_enabled: bool,
 }
@@ -44,7 +44,7 @@ fn default_language() -> String {
     "en".to_string()
 }
 
-// [clg_config] 
+// [clg_config]
 // CPU Load Governor 配置
 /// CLG（CPU Load Governor）调频参数。
 /// 所有性能比/阈值均为 0.0~1.0 的相对值，`perf_init/perf_floor/perf_ceil` 再换算成最近频率档位。
@@ -192,7 +192,7 @@ impl Default for CpuLoadGovernorConfig {
     }
 }
 
-// [clg_normalize] 
+// [clg_normalize]
 impl CpuLoadGovernorConfig {
     /// 校验并规范化配置：
     /// - 非有限值（NaN/±Inf，如 YAML 溢出值）回退默认，防止污染控制链
@@ -277,7 +277,7 @@ impl CpuLoadGovernorConfig {
     }
 }
 
-// [mode_io] 
+// [mode_io]
 // 核心模式与杂项配置
 /// 单一性能模式的配置集合（config.yaml 中 powersave / balance / performance / fast 之一）
 #[derive(Debug, Deserialize, Default, Clone)]
@@ -328,7 +328,7 @@ fn default_iostats() -> String {
 
 /// cpuidle 段（对应 config.yaml `CpuIdle`）
 #[derive(Debug, Deserialize, Default)]
-// [toggles] 
+// [toggles]
 #[serde(rename_all = "snake_case")]
 pub struct CpuIdle {
     /// 要切换到的 cpuidle 调度器名（写入 /sys/devices/system/cpu/cpuidle/current_governor）
@@ -354,7 +354,7 @@ pub struct FunctionToggles {
 /// 计算目标上限比例 = clamp(组内最大核心占用率 × headroom, perf_floor, 1.0)：
 ///   升：目标 > 当前上限 + hysteresis → 立即上调（schedutil 在新上限内自由取频）；
 ///   降：目标 < 当前上限 − hysteresis 且持续 down_hold_ms → 上限收到目标档位。
-// [ak_config] 
+// [ak_config]
 #[derive(Debug, Deserialize, Clone)]
 pub struct SpecialTunedConfig {
     /// 负载放大系数：目标上限 = 组内最大核心占用率 × headroom，留出升频余量
@@ -415,7 +415,7 @@ impl SpecialTunedConfig {
     }
 }
 
-// [thermal_config] 
+// [thermal_config]
 // 热保护配置
 
 /// 热保护配置（config.yaml `Thermal` 段）。
@@ -559,7 +559,7 @@ impl ThermalGuardConfig {
     }
 }
 
-// [affinity_config] 
+// [affinity_config]
 // CPU 亲和 / core_ctl 配置
 
 /// CPU 亲和与线程迁移配置（config.yaml `Affinity` 段）。
@@ -617,7 +617,7 @@ impl AffinityConfig {
 /// core_ctl（厂商核心在线控制器）接管配置（config.yaml `CoreCtl` 段）。
 /// boost 模式下把各 cluster 的 min_cpus 抬到全组常在线，防厂商热插拔与
 /// ChiRi 调频打架；退出 boost 恢复快照。仅动 min_cpus。
-// [corectl_config] 
+// [corectl_config]
 #[derive(Debug, Deserialize, Clone)]
 pub struct CoreCtlConfig {
     /// 总开关：false 时不写任何 core_ctl 节点
@@ -644,8 +644,8 @@ impl Default for CoreCtlConfig {
     }
 }
 
-/// 顶层配置（config.yaml 全量）
-// [config_root] 
+/// 顶层配置（feature.yaml 调优段 + meta.yaml 抬头）
+// [config_root]
 #[derive(Debug, Deserialize, Default)]
 pub struct Config {
     /// 全局元信息：日志级别 / 语言
@@ -704,29 +704,28 @@ fn default_scene_mode_delay_secs() -> u64 {
     300
 }
 
-// [config_impl] 
+// [config_impl]
 impl Config {
-    /// 加载生效配置：**基准内容编译期嵌入二进制**（common::embedded_config_str，
-    /// 按命中 SoC 选择，防篡改），磁盘文件只提供 meta 段覆盖（loglevel / dev_record /
-    /// fas_enabled / scenemode_enabled 四个允许外部修改的字段；语言等其余内容固定，
-    /// 外部修改无效）。`path` 为生效配置的磁盘快照路径（common::get_config_path()），
-    /// 缺失或损坏时 meta 回退嵌入默认值。加载后合并嵌入的 akmode/scenemode 段，
-    /// 并把功能总开关同步到进程级原子标志（fas_available / scenemode 判定读取）。
+    /// 加载生效配置：feature 段以嵌入 feature.yaml 为基准（磁盘不落盘，防篡改），
+    /// meta 以嵌入 meta.yaml 为默认值（common::embedded_meta_defaults），再被磁盘
+    /// meta.yaml 覆盖（sync_meta_snapshot 已先行校验/纠正；缺失或非法时沿用嵌入默认）。
+    /// `path` 为生效 meta.yaml 路径（common::get_config_path()）。
+    /// 加载后合并嵌入的 akmode/scenemode 段，并把功能总开关同步到进程级原子标志
+    /// （fas_available / scenemode 判定读取）。
     pub fn load(path: &str) -> anyhow::Result<Self> {
-        let mut config: Config = serde_yaml::from_str(crate::common::embedded_config_str())?;
+        let mut config: Config = serde_yaml::from_str(crate::common::embedded_feature_str())?;
+        let d = crate::common::embedded_meta_defaults();
+        config.meta.loglevel = d.loglevel;
+        config.meta.language = d.language;
+        config.meta.dev_record = d.dev_record;
+        config.meta.fas_enabled = d.fas_enabled;
+        config.meta.scenemode_enabled = d.scenemode_enabled;
         if let Some(m) = crate::common::read_external_meta(std::path::Path::new(path)) {
-            if let Some(v) = m.loglevel {
-                config.meta.loglevel = v;
-            }
-            if let Some(v) = m.dev_record {
-                config.meta.dev_record = v;
-            }
-            if let Some(v) = m.fas_enabled {
-                config.meta.fas_enabled = v;
-            }
-            if let Some(v) = m.scenemode_enabled {
-                config.meta.scenemode_enabled = v;
-            }
+            config.meta.loglevel = m.loglevel;
+            config.meta.language = m.language;
+            config.meta.dev_record = m.dev_record;
+            config.meta.fas_enabled = m.fas_enabled;
+            config.meta.scenemode_enabled = m.scenemode_enabled;
         }
         // 功能总开关同步到进程级原子标志（覆盖启动 + config_watcher 热重载两条路径）
         crate::common::set_fas_enabled(config.meta.fas_enabled);

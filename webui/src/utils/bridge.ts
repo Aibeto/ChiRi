@@ -1,6 +1,6 @@
 // bridge.ts: [paths] [helpers] [real-bridge] [status-fs] [rules-ro] [config] [scheduler] [apps] [log] [bridge-export]
 // src/utils/bridge.ts
-import { exec, toast, listPackages } from '@/kernelsu'; 
+import { exec, toast, listPackages } from '@/kernelsu';
 import yaml from 'js-yaml';
 import { MockBridge } from './mock';
 import i18n from '@/i18n';
@@ -12,11 +12,11 @@ declare global {
 }
 
 // [paths] 
-const MODULE_BASE_PATH = "/data/adb/modules/chiri"; 
+const MODULE_BASE_PATH = "/data/adb/modules/chiri";
 const PATHS = {
   MODULE: MODULE_BASE_PATH,
-  RULES_YAML: `${MODULE_BASE_PATH}/rules.yaml`,          
-  CONFIG_YAML: `${MODULE_BASE_PATH}/config/config.yaml`, 
+  RULES_YAML: `${MODULE_BASE_PATH}/rules.yaml`,
+  CONFIG_META: `${MODULE_BASE_PATH}/config/meta.yaml`,
   ACTIVE_CONFIG: `${MODULE_BASE_PATH}/active_config.chr`,
   SPECIAL_TUNED: `${MODULE_BASE_PATH}/special_tuned.yaml`,
   FAS_WHITELIST: `${MODULE_BASE_PATH}/fas_whitelist.yaml`,
@@ -26,10 +26,10 @@ const PATHS = {
 };
 
 // [helpers] 
-// 解析守护进程当前实际加载的配置文件：
-// Chiri 目标 SoC（如 8550）使用处理器子目录 config/8550/config.yaml，守护进程启动时把
-// 相对 config 目录的路径（如 "8550/config.yaml"）写入 active_config.chr，这里读取它以保证
-// WebUI 与守护进程读写同一份文件。读取失败/为空时回退到默认 config/config.yaml。
+// 解析守护进程当前实际加载的配置文件（meta.yaml，可修改抬头）：
+// Chiri 目标 SoC（如 8550）使用处理器子目录 config/8550/meta.yaml，守护进程启动时把
+// 相对 config 目录的路径（如 "8550/meta.yaml"）写入 active_config.chr，这里读取它以保证
+// WebUI 与守护进程读写同一份文件。读取失败/为空时回退到默认 config/meta.yaml。
 async function resolveConfigPath(): Promise<string> {
   try {
     const { errno, stdout } = await exec(`cat "${PATHS.ACTIVE_CONFIG}"`);
@@ -39,7 +39,7 @@ async function resolveConfigPath(): Promise<string> {
       return `${MODULE_BASE_PATH}/config/${name}`;
     }
   } catch (e) { /* 回退默认 */ }
-  return PATHS.CONFIG_YAML;
+  return PATHS.CONFIG_META;
 }
 
 const isDev = import.meta.env.DEV || typeof window.ksu === 'undefined';
@@ -57,17 +57,24 @@ function utf8ToBase64(str: string): string {
 
 // 模式名 → 本地化文案已随 WebUI 模式切换入口移除（rules.yaml 只读，无写操作需 toast 文案）。
 
-// 单字段 YAML 行内替换：只改首个匹配行的值，保留缩进/字段名大小写/引号风格及其余内容与注释。
-// 用于日志等级等单字段写入，避免整文件重写丢失用户手写注释。匹配不到返回 null，由调用方兜底。
+// meta.yaml 顶层字段行替换：精确键名（大小写不敏感）、仅匹配顶层缩进为 0 的行，
+// 保留字段名原大小写/引号风格与注释；匹配不到返回 null，由调用方兜底
+// （daemon sync_meta_snapshot 会在热重载前校验，非法字段回退内嵌默认）。
 function replaceYamlFieldLine(content: string, field: string, value: string): string | null {
-  const re = new RegExp(`^(\\s*)(${field})(\\s*:\\s*)(.*)$`, 'im');
-  const m = content.match(re);
-  if (!m || m.index === undefined) return null;
-  const [, indent, name, sep, raw] = m;
-  // 原值带引号（"INFO" / 'INFO'）时保持引号风格，否则写裸值
-  const quoted = /^["']/.test(raw.trim());
-  const val = quoted ? `"${value}"` : value;
-  return content.slice(0, m.index) + `${indent}${name}${sep}${val}` + content.slice(m.index + m[0].length);
+  const lines = content.split('\n');
+  const want = field.toLowerCase();
+  for (let i = 0; i < lines.length; i++) {
+    const trimmed = lines[i].trimStart();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    if (lines[i].length !== trimmed.length) continue; // 仅顶层
+    const m = trimmed.match(/^([^:\s]+)(\s*:\s*)(.*)$/);
+    if (!m || m[1].toLowerCase() !== want) continue;
+    // 原值带引号（"INFO" / 'INFO'）时保持引号风格，否则写裸值
+    const val = /^["']/.test(m[3].trim()) ? `"${value}"` : value;
+    lines[i] = `${m[1]}${m[2]}${val}`;
+    return lines.join('\n');
+  }
+  return null;
 }
 
 // [real-bridge] 
@@ -102,7 +109,7 @@ const RealBridge = {
   async getRulesConfig(): Promise<any> { try { return yaml.load(await this.readFile(PATHS.RULES_YAML)) || {}; } catch (e) { return {}; } },
 
   // [config] 
-  // 生效配置文件相对 config 目录的路径（如 "8550/config.yaml"，非处理器时为 "config.yaml"），
+  // 生效 meta.yaml 相对 config 目录的路径（如 "8550/meta.yaml"，非处理器时为 "meta.yaml"），
   // 由守护进程启动时写入 active_config.chr；WebUI 只读展示，不改动文件。
   async getActiveConfigName(): Promise<string> {
     try {
@@ -110,50 +117,53 @@ const RealBridge = {
       const name = stdout.trim();
       if (errno === 0 && name && !name.includes('..')) return name;
     } catch (e) { /* 回退默认 */ }
-    return 'config.yaml';
+    return 'meta.yaml';
   },
 
-  // 配置文件抬头信息（meta 段：配置名/作者/语言/日志等级），仅供查看
+  // 配置文件抬头信息：直接读生效 meta.yaml（文件本身就是 meta 段），仅供查看
   async getConfigMeta(): Promise<Record<string, any>> {
     try {
-      const cfg = yaml.load(await this.readFile(await resolveConfigPath())) || {};
-      return (cfg as any).meta || {};
+      return yaml.load(await this.readFile(await resolveConfigPath())) || {};
     } catch (e) {
       return {};
     }
   },
 
-  // 切换日志等级：只替换生效 config.yaml 中 meta.loglevel 行的值（保留注释与其余内容），
-  // 守护进程 config_watcher 检测到变更后热重载即时生效。
-  async setLogLevel(level: string): Promise<void> {
+  // meta.yaml 单字段写入：顶层行替换保留注释，字段缺失时兜底整文件重写。
+  // daemon sync_meta_snapshot 会在热重载前严格校验，非法字段自动回退内嵌默认。
+  async updateMetaField(field: string, value: string | boolean): Promise<void> {
     const path = await resolveConfigPath();
     const content = await this.readFile(path);
-    // 字段缺失（异常精简的配置文件）时兜底整文件重写
-    const updated = replaceYamlFieldLine(content, 'loglevel', level) ?? (() => {
+    const updated = replaceYamlFieldLine(content, field, String(value)) ?? (() => {
       const cfg = yaml.load(content) || {};
-      if (!(cfg as any).meta) (cfg as any).meta = {};
-      (cfg as any).meta.loglevel = level;
+      (cfg as any)[field] = value;
       return yaml.dump(cfg);
     })();
     await this.writeFile(path, updated);
+  },
+
+  // 切换日志等级：写入 meta.yaml 的 loglevel，热重载即时生效
+  async setLogLevel(level: string): Promise<void> {
+    await this.updateMetaField('loglevel', level);
     toast(i18n.global.t('loglevel_updated') as string);
   },
 
-  // 开发记录开关：只替换 meta.dev_record 行（布尔裸值，保留注释与其余内容），
-  // 热重载即时生效；开启后守护进程向 devimp/ 目录写按核调度诊断日志。
+  // 开发记录开关：开启后守护进程向 devimp/ 目录写按核调度诊断日志
   async setDevRecord(on: boolean): Promise<void> {
-    const path = await resolveConfigPath();
-    const content = await this.readFile(path);
-    const value = on ? 'true' : 'false';
-    // 字段缺失时兜底整文件重写（replaceYamlFieldLine 保留原裸值风格，不加引号）
-    const updated = replaceYamlFieldLine(content, 'dev_record', value) ?? (() => {
-      const cfg = yaml.load(content) || {};
-      if (!(cfg as any).meta) (cfg as any).meta = {};
-      (cfg as any).meta.dev_record = on;
-      return yaml.dump(cfg);
-    })();
-    await this.writeFile(path, updated);
+    await this.updateMetaField('dev_record', on);
     toast(i18n.global.t('dev_record_updated') as string);
+  },
+
+  // FAS 总闸开关：关闭后 determine_mode 不再产生 fas，运行中 FAS 实例立即注销
+  async setFasEnabled(on: boolean): Promise<void> {
+    await this.updateMetaField('fas_enabled', on);
+    toast(i18n.global.t('fas_enabled_updated') as string);
+  },
+
+  // 息屏场景模式总闸：关闭后息屏不再使用scenemode，运行中实例立即退出
+  async setScenemodeEnabled(on: boolean): Promise<void> {
+    await this.updateMetaField('scenemode_enabled', on);
+    toast(i18n.global.t('scenemode_enabled_updated') as string);
   },
 
   // [scheduler] 

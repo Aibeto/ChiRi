@@ -361,7 +361,7 @@ pub fn start_scheduler_thread(
     fas_active: Arc<AtomicBool>,
 ) -> Result<()> {
     let root = common::get_module_root();
-    // 配置路径：8550 等 Chiri 目标 SoC 使用处理器子目录 config/{soc}/config.yaml，热重载跟随该文件
+    // 配置路径：8550 等 Chiri 目标 SoC 使用处理器子目录 config/{soc}/meta.yaml，热重载跟随该文件
     let config_path = common::get_config_path();
     let config_dir = root.join("config");
 
@@ -442,6 +442,10 @@ pub fn start_scheduler_thread(
                 }
                 log::info!("{}", t("config-reloading"));
 
+                // meta.yaml 自愈先于重载：字段非法时用嵌入默认整体覆盖并追加警告注释，
+                // 文件缺失则重建，然后再加载（Config::load 读到的一定是合法 meta）
+                common::sync_meta_snapshot(&config_path);
+
                 let old_lang = config_clone.read().unwrap().meta.language.clone();
 
                 match Config::load(config_path.to_str().unwrap()) {
@@ -455,10 +459,6 @@ pub fn start_scheduler_thread(
                         }
 
                         log::info!("{}", t("config-reloaded-success"));
-
-                        // 快照自愈：调优参数以嵌入内容为准，磁盘文件被篡改时还原
-                        // （meta 保留外部修改）。内容一致时内部跳过写入，不会成环。
-                        common::sync_config_snapshot(&config_path);
 
                         let scheduler =
                             CpuScheduler::new(config_clone.clone(), sys_path_clone.clone());

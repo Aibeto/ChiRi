@@ -2,7 +2,7 @@
 # akmode-example.yaml —— 明日方舟特调参考配置
 #
 # 本文件不参与加载，纯粹当字段说明书用。复制成 akmode.yaml 再改。
-# 注意：akmode.yaml 经 include_str! 编译进二进制，磁盘副本不加载，
+# 注意：akmode.yaml 随 module/config 目录整体编译期嵌入，磁盘副本不加载，
 # 改参数要改源文件再重新编译。
 #
 # 生效条件：前台是明日方舟（包名命中 special_tuned.yaml）。

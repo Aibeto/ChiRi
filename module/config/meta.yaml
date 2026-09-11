@@ -1,0 +1,14 @@
+# meta.yaml: [meta] 用户可修改的抬头字段（守护进程逐字段严格校验）
+# 七个字段必须齐全；loglevel 限 OFF/ERROR/WARN/INFO/DEBUG/TRACE，language 限 en/zh。
+# 任一字段非法时，daemon 启动/热重载会用二进制内嵌默认整体覆盖本文件并在末尾追加警告注释。
+# 修改保存后热重载即时生效。
+name: "default_config"
+author: "yuki"
+language: "zh"
+loglevel: "INFO"
+dev_record: false
+# 功能总开关（缺省 true，热重载即时生效）：
+#   fas_enabled: FAS 帧感知调度总闸（关闭后运行中实例立即注销，模式判定不再产生 fas）
+#   scenemode_enabled: 息屏场景模式总闸（关闭后息屏不进入 scenemode，运行中立即退出恢复 doze）
+fas_enabled: true
+scenemode_enabled: true

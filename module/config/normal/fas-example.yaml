@@ -3,10 +3,9 @@
 #  ⚠ 本文件仅作文档参考，不参与编译嵌入、不被任何代码加载
 #    （daemon 只加载 fas.yaml 白名单与 fas/<配置名>.yaml 每应用配置）
 #
-#  新增 FAS 游戏三步：
+#  新增 FAS 游戏两步（module/config 目录构建期整体收录，无需改 .rs）：
 #    1. module/config/normal/fas.yaml 白名单加一行：<精确包名>: <配置名>
-#    2. src/common.rs::embedded_fas_app_str() 加一个 match arm
-#    3. 新建 module/config/normal/fas/<配置名>.yaml（可复制下方模板裁剪，
+#    2. 新建 module/config/normal/fas/<配置名>.yaml（可复制下方模板裁剪，
 #       未列出的字段自动取 src/fas_types.rs::FasRulesConfig 默认值）
 #
 #  运行时行为速览（详见 AGENTS.md「FAS 帧感知调度」小节）：

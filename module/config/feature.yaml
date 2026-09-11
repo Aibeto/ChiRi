@@ -1,19 +1,6 @@
 # yumi 配置文件，不能动
 # config.yaml: [meta] [function] [io-settings] [cpu-idle] [powersave] [balance] [performance] [fast]
 
-# [meta]
-# 元数据信息
-meta:
-  name: "default_config"
-  author: "yuki"
-  language: "zh"
-  loglevel: "INFO"
-  # 功能总开关（缺省 true，热重载即时生效）：
-  #   fas_enabled: FAS 帧感知调度总闸（关闭后运行中实例立即注销，模式判定不再产生 fas）
-  #   scenemode_enabled: 息屏场景模式总闸（关闭后息屏不进入 scenemode，运行中立即退出恢复 doze）
-  fas_enabled: true
-  scenemode_enabled: true
-
 # [function]
 # 主要功能开关
 function:

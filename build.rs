@@ -184,6 +184,10 @@ fn add_path(add: &std::path::Path) -> Result<String, std::env::VarError> {
 }
 
 fn main() {
+    // module/config 目录整体构建期嵌入（include_dir!）：目录内新增/删除 yaml 需触发
+    // 本包重编译（已存在文件的改动由 rustc 的 include_bytes! 依赖跟踪覆盖，此处补目录级监听）。
+    println!("cargo:rerun-if-changed=module/config");
+    assert_required_configs();
     match build_ebpf() {
         Ok(bpf_obj) => {
             println!("cargo:warning=✅ yumi-ebpf 编译成功: {}", bpf_obj.display());
@@ -191,5 +195,52 @@ fn main() {
         Err(e) => {
             panic!("yumi-ebpf 编译失败: {e}");
         }
+    }
+}
+
+/// 必需配置文件缺失直接 panic（= 编译失败，快速暴露错误）：
+/// include_dir 嵌入内容是运行时唯一来源，缺文件不允许静默回退代码默认值。
+/// 另校验处理器子目录 meta.yaml / feature.yaml 必须成对出现（防止拆分文件只改一半）。
+fn assert_required_configs() {
+    let cfg_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("module/config");
+    let required = [
+        "meta.yaml",
+        "feature.yaml",
+        "normal/akmode.yaml",
+        "normal/scenemode.yaml",
+        "normal/fas.yaml",
+        "i18n/zh.ftl",
+        "i18n/en.ftl",
+    ];
+    let missing: Vec<&str> = required
+        .iter()
+        .filter(|f| !cfg_dir.join(f).is_file())
+        .copied()
+        .collect();
+    let mut unpaired: Vec<String> = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(&cfg_dir) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                let has_meta = p.join("meta.yaml").is_file();
+                let has_feature = p.join("feature.yaml").is_file();
+                if has_meta != has_feature {
+                    unpaired.push(format!(
+                        "{}（meta.yaml={} feature.yaml={}）",
+                        p.file_name()
+                            .map(|s| s.to_string_lossy().to_string())
+                            .unwrap_or_default(),
+                        has_meta,
+                        has_feature
+                    ));
+                }
+            }
+        }
+    }
+    if !missing.is_empty() || !unpaired.is_empty() {
+        panic!(
+            "必需配置文件缺失或 meta/feature 不成对，拒绝编译（嵌入内容是运行时唯一来源）:\n  missing: {:?}\n  unpaired: {:?}",
+            missing, unpaired
+        );
     }
 }

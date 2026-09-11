@@ -113,11 +113,11 @@ fn main() -> Result<()> {
     let chiri_active = common::is_chiri_soc();
 
     // [config_path]
-    // 3. 解析配置文件路径：8550 等 Chiri 目标 SoC 优先加载处理器子目录 config/{soc}/config.yaml，
-    //    其余机型回退到默认 config/config.yaml（两套调度仍共用同一份选中的文件）
+    // 3. 解析配置路径：8550 等 Chiri 目标 SoC 优先使用处理器子目录 config/{soc}/meta.yaml，
+    //    其余机型回退到默认 config/meta.yaml（可修改抬头；调优段 feature.yaml 仅存于二进制）
     let config_path = common::get_config_path();
-    // 写生效配置相对 config 目录的路径（处理器子目录时为 "8550/config.yaml"，默认时为 "config.yaml"），
-    // WebUI 拼接 `config/{相对路径}` 读取同一份文件，避免改错文件
+    // 写生效 meta.yaml 相对 config 目录的路径（处理器子目录时为 "8550/meta.yaml"，
+    // 默认时为 "meta.yaml"），WebUI 拼接 `config/{相对路径}` 读取同一份文件，避免改错文件
     let config_rel = config_path
         .strip_prefix(root.join("config"))
         .unwrap_or(&config_path);
@@ -127,10 +127,19 @@ fn main() -> Result<()> {
         config_rel.to_string_lossy().as_bytes(),
     );
 
-    // 配置快照自愈：调优配置编译期嵌入二进制（common::embedded_config_str），
-    // 磁盘文件只是「嵌入内容 + meta 覆盖」的快照。启动时把嵌入内容写回生效路径：
-    // 文件被篡改 → 还原调优参数（meta 保留用户选择）；文件缺失 → 重建。
-    common::sync_config_snapshot(&config_path);
+    // meta.yaml 快照自愈：可修改字段的基准是编译期嵌入的 meta.yaml。启动时校验磁盘副本：
+    // 字段非法 → 用嵌入默认整体覆盖并在文件尾追加警告注释；文件缺失 → 原子重建（不加注释）。
+    common::sync_meta_snapshot(&config_path);
+
+    // 清理拆分前的遗留 config.yaml（内容已并入二进制 feature 段与 meta.yaml，磁盘无读取方）
+    let _ = std::fs::remove_file(root.join("config").join("config.yaml"));
+    if let Ok(rd) = std::fs::read_dir(root.join("config")) {
+        for e in rd.flatten() {
+            if e.path().is_dir() {
+                let _ = std::fs::remove_file(e.path().join("config.yaml"));
+            }
+        }
+    }
 
     // rules.yaml 快照复制：rules.yaml 同样编译期嵌入二进制（只读，运行时一律读嵌入值），
     // 启动时把嵌入内容复制到模块根作对外展示副本（被篡改不影响调度行为，下次启动还原）。

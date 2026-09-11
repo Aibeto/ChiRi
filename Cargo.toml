@@ -25,6 +25,8 @@ libc = "0.2"
 log = "0.4"
 once_cell = "1.21" 
 lazy_static = "1.5.0"
+# 构建期整目录嵌入（module/config）：新增/删除 yaml 无需改 .rs，见 common.rs [embedded]
+include_dir = "0.7"
 
 # --- 异步与 eBPF (新增) ---
 # Aya 用于加载和与内核 eBPF 程序交互

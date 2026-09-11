@@ -1,6 +1,7 @@
 //! common.rs: [events] [paths] [soc_detect] [core_ranges] [special_tuned] [fas_whitelist] [aff_blacklist] [embedded] [external_meta]
 
 use crate::monitor::config::RulesConfig;
+use include_dir::{Dir, include_dir};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::env;
@@ -212,42 +213,42 @@ pub fn set_akmode_available(available: bool) {
     AKMODE_AVAILABLE.store(available, Ordering::Release);
 }
 
-// 功能总开关（fas_enabled / scenemode_enabled，config.yaml meta 段，缺省 true）：
+// 功能总开关（fas_enabled / scenemode_enabled，meta.yaml 顶层字段，缺省 true）：
 // Config::load（启动 + config_watcher 热重载）时同步到进程级原子标志，
 // 高频路径（fas_available / scenemode 进入判定）只读原子量，不触碰磁盘与锁。
 static FAS_ENABLED: AtomicBool = AtomicBool::new(true);
 static SCENEMODE_ENABLED: AtomicBool = AtomicBool::new(true);
 
-/// 设置 FAS 总开关（config.yaml meta.fas_enabled，Config::load 时调用）。
+/// 设置 FAS 总开关（meta.yaml 的 fas_enabled，Config::load 时调用）。
 pub fn set_fas_enabled(enabled: bool) {
     FAS_ENABLED.store(enabled, Ordering::Release);
 }
 
-/// 设置 scenemode 总开关（config.yaml meta.scenemode_enabled，Config::load 时调用）。
+/// 设置 scenemode 总开关（meta.yaml 的 scenemode_enabled，Config::load 时调用）。
 pub fn set_scenemode_enabled(enabled: bool) {
     SCENEMODE_ENABLED.store(enabled, Ordering::Release);
 }
 
-/// FAS 总开关是否开启（config.yaml meta.fas_enabled，缺省 true）。
+/// FAS 总开关是否开启（meta.yaml 的 fas_enabled，缺省 true）。
 pub fn fas_enabled() -> bool {
     FAS_ENABLED.load(Ordering::Acquire)
 }
 
-/// scenemode 总开关是否开启（config.yaml meta.scenemode_enabled，缺省 true）。
+/// scenemode 总开关是否开启（meta.yaml 的 scenemode_enabled，缺省 true）。
 pub fn scenemode_enabled() -> bool {
     SCENEMODE_ENABLED.load(Ordering::Acquire)
 }
 
 /// 返回当前应加载的配置文件路径：
-/// - 命中 Chiri 目标 SoC 且存在处理器子目录 `config/{命中片段}/config.yaml` 时，使用该文件
-/// - 否则回退到默认 `config/config.yaml`
+/// - 命中 Chiri 目标 SoC 且存在处理器子目录 `config/{命中片段}/meta.yaml` 时，使用该文件
+/// - 否则回退到默认 `config/meta.yaml`
 ///
 /// 所有配置加载/热重载入口（main.rs 与两套调度器的 config_watcher）统一走这里，
 /// 保证 8550 等目标机型使用处理器独立配置，其余机型不受影响。
 pub fn get_config_path() -> PathBuf {
     matched_soc_config_dir()
-        .map(|dir| dir.join("config.yaml"))
-        .unwrap_or_else(|| get_module_root().join("config").join("config.yaml"))
+        .map(|dir| dir.join("meta.yaml"))
+        .unwrap_or_else(|| get_module_root().join("config").join("meta.yaml"))
 }
 
 // [special_tuned]
@@ -368,16 +369,13 @@ pub fn is_special_mode_allowed(pkg: &str, mode: &str) -> bool {
 // 白名单运行时导出到模块根 fas_whitelist.yaml 供 WebUI 只读展示；
 // 每应用配置不导出。用户/WebUI 不可修改。
 
-const FAS_WHITELIST_TEXT: &str = include_str!("../module/config/normal/fas.yaml");
-const FAS_APP_ENDFIELD_TEXT: &str = include_str!("../module/config/normal/fas/endfield.yaml");
+// FAS 白名单与每应用配置（normal/fas.yaml 与 normal/fas/<配置名>.yaml）随
+// module/config 目录整体构建期嵌入（见 [embedded]），不在此逐文件硬编码。
 
-/// 按配置名返回对应应用的嵌入 FAS 配置文本。
-/// 新增 FAS 游戏：module/config/normal/fas.yaml 白名单加一行 + 此处加 arm + 新建配置文件。
+/// 按配置名返回对应应用的嵌入 FAS 配置文本（构建期自动收录 normal/fas/*.yaml）。
+/// 新增 FAS 游戏：fas.yaml 白名单加一行 + 新建 normal/fas/<配置名>.yaml，无需改 .rs。
 pub fn embedded_fas_app_str(name: &str) -> Option<&'static str> {
-    match name {
-        "endfield" => Some(FAS_APP_ENDFIELD_TEXT),
-        _ => None,
-    }
+    embedded_config_file(&format!("normal/fas/{name}.yaml"))
 }
 
 #[derive(Debug, Deserialize)]
@@ -405,7 +403,9 @@ static FAS_APP_CONFIGS: OnceLock<HashMap<String, crate::fas_types::FasRulesConfi
 /// FAS 白名单（精确包名 → 配置名），编译期嵌入，解析失败回退空表。
 pub fn fas_whitelist() -> &'static HashMap<String, String> {
     FAS_WHITELIST.get_or_init(|| {
-        match serde_yaml::from_str::<FasWhitelistFile>(FAS_WHITELIST_TEXT) {
+        // 构建期嵌入的 normal/fas.yaml（缺失时按空表处理）
+        let text = embedded_config_file("normal/fas.yaml").unwrap_or_default();
+        match serde_yaml::from_str::<FasWhitelistFile>(text) {
             Ok(f) => f.fas.apps,
             Err(e) => {
                 log::warn!("fas-config-parse-failed: {e}");
@@ -536,26 +536,50 @@ pub fn is_affinity_blacklisted(cmdline: &str) -> bool {
         .any(|e| e.matches(cmdline))
 }
 
-// 编译期嵌入的配置（include_str!，防篡改）
+// 编译期嵌入的配置（整目录 include_dir!，防篡改）
 //
-// 调优配置一律以二进制内嵌内容为准；磁盘上的同名 yaml 只是「自愈快照 +
-// meta 覆盖入口」：daemon 启动/重载时会把嵌入内容还原到磁盘（快照自愈），
-// 只有 meta.loglevel 允许被外部修改（WebUI 日志等级切换），其余内容固定。
+// 原 config.yaml 已拆分为 **meta.yaml（用户可修改抬头）+ feature.yaml（不可修改
+// 调优段）**，各 SoC 目录与默认 config/ 下各一份；二者仅存于二进制，磁盘不落盘
+// （feature 无任何外部读取方；meta 的磁盘副本即 meta.yaml，由 sync_meta_snapshot
+// 自愈）。module/config 目录**整体**在构建期嵌入：新增/删除 yaml（新 SoC、新 FAS
+// 应用配置等）无需改动任何 .rs；必需文件缺失由 build.rs 断言，直接编译失败。
+// 已存在文件的改动由 rustc 的 include_bytes! 依赖跟踪触发重编译；目录增删由
+// build.rs 的 rerun-if-changed=module/config 触发。
 
 // [embedded]
-/// 嵌入的 config.yaml：按命中的处理器取对应内容，非 ChiRi SoC 用默认配置
-pub fn embedded_config_str() -> &'static str {
-    match matched_soc_hint() {
-        Some("8550") => include_str!("../module/config/8550/config.yaml"),
-        Some("8475") => include_str!("../module/config/8475/config.yaml"),
-        Some("8998") => include_str!("../module/config/8998/config.yaml"),
-        _ => include_str!("../module/config/config.yaml"),
+static CONFIG_DIR: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/module/config");
+
+/// 按相对 module/config 的路径取嵌入文本（如 "8550/meta.yaml"），缺失返回 None。
+/// 必需文件的存在性由 build.rs 编译期断言兜底，运行时不会静默空转。
+pub(crate) fn embedded_config_file(rel: &str) -> Option<&'static str> {
+    CONFIG_DIR.get_file(rel).and_then(|f| f.contents_utf8())
+}
+
+/// 嵌入的 meta.yaml（用户可修改字段的默认值）：按命中处理器取 {soc}/meta.yaml，
+/// 未命中（默认 Yumi）取 meta.yaml
+pub fn embedded_meta_str() -> &'static str {
+    if let Some(soc) = matched_soc_hint() {
+        if let Some(text) = embedded_config_file(&format!("{soc}/meta.yaml")) {
+            return text;
+        }
     }
+    embedded_config_file("meta.yaml").unwrap_or_default()
+}
+
+/// 嵌入的 feature.yaml（不可修改调优段）：按命中处理器取 {soc}/feature.yaml，
+/// 未命中取 feature.yaml。仅存于二进制，磁盘不落盘、不监听
+pub fn embedded_feature_str() -> &'static str {
+    if let Some(soc) = matched_soc_hint() {
+        if let Some(text) = embedded_config_file(&format!("{soc}/feature.yaml")) {
+            return text;
+        }
+    }
+    embedded_config_file("feature.yaml").unwrap_or_default()
 }
 
 /// 嵌入的 akmode.yaml（config/normal/，嵌入后特调始终可用）
 pub fn embedded_akmode_str() -> &'static str {
-    include_str!("../module/config/normal/akmode.yaml")
+    embedded_config_file("normal/akmode.yaml").unwrap_or_default()
 }
 
 /// 嵌入的 rules.yaml（模块根，编译期打包进二进制）：与其他只读文件（akmode/scenemode/
@@ -579,167 +603,149 @@ pub fn embedded_rules() -> crate::monitor::config::RulesConfig {
 
 /// 嵌入的 scenemode.yaml（config/normal/）
 pub fn embedded_scenemode_str() -> &'static str {
-    include_str!("../module/config/normal/scenemode.yaml")
+    embedded_config_file("normal/scenemode.yaml").unwrap_or_default()
 }
 
-/// 嵌入的语言包：zh → zh.ftl，其余语言一律回退 en.ftl
+/// 嵌入的语言包：zh → i18n/zh.ftl，其余语言一律回退 i18n/en.ftl
 pub fn embedded_ftl_str(lang: &str) -> &'static str {
-    if lang.eq_ignore_ascii_case("zh") {
-        include_str!("../module/config/i18n/zh.ftl")
+    let rel = if lang.eq_ignore_ascii_case("zh") {
+        "i18n/zh.ftl"
     } else {
-        include_str!("../module/config/i18n/en.ftl")
-    }
+        "i18n/en.ftl"
+    };
+    embedded_config_file(rel).unwrap_or_default()
 }
 
-/// 磁盘配置文件的 meta 覆盖结构：只反序列化 meta 段，其余字段全部忽略
-/// （调优字段即使被篡改也不会被读入，从根本上防篡改）。
-/// **允许外部修改的字段只有四个**：meta.loglevel（WebUI 日志等级切换）、
-/// meta.dev_record（WebUI 开发记录开关）、meta.fas_enabled / meta.scenemode_enabled
-/// （功能总开关，手改 config.yaml 后热重载生效）；
-/// language 等其余 meta 字段不在此列——配置内容一律以二进制内嵌值为准。
+/// 磁盘 meta.yaml 的严格结构：七个字段全部必填、拒绝未知字段。
+/// 任一缺失/多余/类型不符，或取值不在白名单内，整文件判非法——
+/// 由 sync_meta_snapshot 用二进制内嵌默认值整体覆盖修正。
 // [external_meta]
-#[derive(Deserialize, Default)]
-struct ExternalMetaSection {
-    #[serde(default, alias = "Loglevel")]
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MetaYamlFile {
+    name: String,
+    author: String,
+    language: String,
     loglevel: String,
-    /// 缺省 None = 磁盘未提供该字段（不覆盖嵌入值）
-    #[serde(default, alias = "DevRecord")]
-    dev_record: Option<bool>,
-    #[serde(default, alias = "FasEnabled")]
-    fas_enabled: Option<bool>,
-    #[serde(default, alias = "ScenemodeEnabled")]
-    scenemode_enabled: Option<bool>,
+    dev_record: bool,
+    fas_enabled: bool,
+    scenemode_enabled: bool,
 }
 
-#[derive(Deserialize, Default)]
-struct ExternalMetaFile {
-    #[serde(default, alias = "Meta")]
-    meta: ExternalMetaSection,
-}
-
-/// 磁盘 meta 覆盖值（read_external_meta 的返回结构，逐字段 Option 区分「未提供」）
-#[derive(Default)]
+/// 磁盘 meta.yaml 校验通过后交给 Config::load 的覆盖值（全字段必有效）。
+/// daemon 只消费其中 5 项（name/author 仅 WebUI 展示，直接读文件即可）。
+#[derive(Debug, Clone)]
 pub struct ExternalMetaOverrides {
-    pub loglevel: Option<String>,
-    pub dev_record: Option<bool>,
-    pub fas_enabled: Option<bool>,
-    pub scenemode_enabled: Option<bool>,
+    pub loglevel: String,
+    pub language: String,
+    pub dev_record: bool,
+    pub fas_enabled: bool,
+    pub scenemode_enabled: bool,
 }
 
-/// 读磁盘配置文件的 meta 覆盖值（仅 loglevel / dev_record / fas_enabled /
-/// scenemode_enabled 四个允许外部修改的字段）。
-/// 文件缺失或解析失败返回 None：文件损坏时回退嵌入默认值，绝不让坏文件拖垮配置加载。
-pub fn read_external_meta(path: &Path) -> Option<ExternalMetaOverrides> {
-    let text = std::fs::read_to_string(path).ok()?;
-    let file = serde_yaml::from_str::<ExternalMetaFile>(&text).ok()?;
-    Some(ExternalMetaOverrides {
-        loglevel: Some(file.meta.loglevel).filter(|v| !v.is_empty()),
-        dev_record: file.meta.dev_record,
-        fas_enabled: file.meta.fas_enabled,
-        scenemode_enabled: file.meta.scenemode_enabled,
-    })
-}
-
-/// 把 yaml 文本中指定标量键的值替换为 value（保留缩进与注释，与
-/// WebUI bridge.ts::setLogLevel 的行替换同口径）。全文件按行扫描，
-/// 仅替换第一个形如 `<缩进>key: ...` 的行。`quoted` 控制值是否带双引号
-/// （字符串字段带引号；布尔字段必须裸值——serde_yaml 把 "true" 解析为字符串而非 bool）。
-fn replace_yaml_scalar_impl(content: &str, key: &str, value: &str, quoted: bool) -> String {
-    let mut out = Vec::with_capacity(content.lines().count());
-    let mut replaced = false;
-    for line in content.lines() {
-        let trimmed = line.trim_start();
-        if !replaced
-            && trimmed.starts_with(key)
-            && trimmed[key.len()..].trim_start().starts_with(':')
-        {
-            let indent = &line[..line.len() - trimmed.len()];
-            let val = if quoted {
-                format!("\"{value}\"")
-            } else {
-                value.to_string()
-            };
-            out.push(format!("{indent}{key}: {val}"));
-            replaced = true;
-        } else {
-            out.push(line.to_string());
+impl Default for ExternalMetaOverrides {
+    fn default() -> Self {
+        Self {
+            loglevel: "INFO".to_string(),
+            language: "en".to_string(),
+            dev_record: false,
+            fas_enabled: true,
+            scenemode_enabled: true,
         }
     }
-    let mut s = out.join("\n");
-    if content.ends_with('\n') {
-        s.push('\n');
+}
+
+/// 读磁盘 meta.yaml（先经 sync_meta_snapshot 校验/纠正）。文件缺失或仍非法时返回
+/// None，调用方沿用嵌入默认值——绝不 panic，也绝不让坏文件拖垮配置加载。
+pub fn read_external_meta(path: &Path) -> Option<ExternalMetaOverrides> {
+    let text = std::fs::read_to_string(path).ok()?;
+    parse_disk_meta(&text)
+}
+
+/// 嵌入 meta.yaml 的默认覆盖值（编译期内容，构建期断言文件存在，正常必合法）
+pub fn embedded_meta_defaults() -> ExternalMetaOverrides {
+    parse_disk_meta(embedded_meta_str()).unwrap_or_default()
+}
+
+/// 日志等级白名单（大小写不敏感，与 logger 支持的档位一致）
+const LOGLEVELS: [&str; 6] = ["OFF", "ERROR", "WARN", "INFO", "DEBUG", "TRACE"];
+
+/// 去掉成对的单层引号（meta.yaml 里字符串值常带引号）
+fn unquote(s: &str) -> &str {
+    for q in ['"', '\''] {
+        if s.len() >= 2 && s.starts_with(q) && s.ends_with(q) {
+            return &s[1..s.len() - 1];
+        }
     }
     s
 }
 
-/// 替换字符串字段（带引号，如 loglevel）
-fn replace_yaml_scalar(content: &str, key: &str, value: &str) -> String {
-    replace_yaml_scalar_impl(content, key, value, true)
+/// 校验并归一化日志等级：必须整体等于某个档位（去引号后），含空白/注释/换行的脏值拒绝
+fn sanitize_loglevel(raw: &str) -> Option<String> {
+    let v = unquote(raw.trim());
+    LOGLEVELS
+        .iter()
+        .find(|l| l.eq_ignore_ascii_case(v))
+        .map(|l| l.to_string())
 }
 
-/// 替换布尔字段（裸值，如 dev_record）
-fn replace_yaml_scalar_raw(content: &str, key: &str, value: &str) -> String {
-    replace_yaml_scalar_impl(content, key, value, false)
+/// 校验并归一化日志语言：仅接受 en / zh（嵌入语言包只打包这两种）
+fn sanitize_language(raw: &str) -> Option<String> {
+    match unquote(raw.trim()).to_ascii_lowercase().as_str() {
+        "zh" => Some("zh".to_string()),
+        "en" => Some("en".to_string()),
+        _ => None,
+    }
 }
 
-/// 配置快照自愈：把「嵌入内容 + 磁盘 meta 覆盖」写回生效配置路径。
-/// - 磁盘文件被篡改 → 调优参数被还原为嵌入值（meta 保留用户选择）
-/// - 文件缺失 → 重建（首次安装 / 被误删）
-/// - 内容已一致 → 跳过写入（返回 false，防止 config_watcher 事件循环）
-///
-/// main.rs 启动时与两套 config_watcher 热重载后调用。
-/// 返回是否实际写入。
-pub fn sync_config_snapshot(path: &Path) -> bool {
-    // 嵌入内容为唯一基准；外部仅 loglevel / dev_record / fas_enabled /
-    // scenemode_enabled 覆盖（语言等其余内容固定）
-    let mut content = embedded_config_str().to_string();
-    let meta = read_external_meta(path);
-    if let Some(m) = &meta {
-        if let Some(v) = &m.loglevel {
-            content = replace_yaml_scalar(&content, "loglevel", v);
-        }
-        if let Some(v) = m.dev_record {
-            content =
-                replace_yaml_scalar_raw(&content, "dev_record", if v { "true" } else { "false" });
-        }
-        if let Some(v) = m.fas_enabled {
-            content =
-                replace_yaml_scalar_raw(&content, "fas_enabled", if v { "true" } else { "false" });
-        }
-        if let Some(v) = m.scenemode_enabled {
-            content = replace_yaml_scalar_raw(
-                &content,
-                "scenemode_enabled",
-                if v { "true" } else { "false" },
+/// 整体校验磁盘 meta.yaml：结构严格（字段齐全、无未知键、类型正确）+ 取值白名单。
+/// 任一字段异常返回 None——调用方以二进制内嵌默认值覆盖修正，用户乱改不会生效。
+fn parse_disk_meta(text: &str) -> Option<ExternalMetaOverrides> {
+    let f: MetaYamlFile = serde_yaml::from_str(text).ok()?;
+    if f.name.trim().is_empty() || f.author.trim().is_empty() {
+        return None;
+    }
+    Some(ExternalMetaOverrides {
+        loglevel: sanitize_loglevel(&f.loglevel)?,
+        language: sanitize_language(&f.language)?,
+        dev_record: f.dev_record,
+        fas_enabled: f.fas_enabled,
+        scenemode_enabled: f.scenemode_enabled,
+    })
+}
+
+/// meta.yaml 快照自愈：main.rs 启动时与两套 config_watcher **触发热重载前**调用。
+/// - 文件合法 → 跳过写入（返回 false，防 config_watcher 事件成环）
+/// - 文件缺失/不可读 → 嵌入原文原子重建（首次安装 / 被误删；不留警告注释）
+/// - 任一字段非法 → 嵌入原文整体覆盖 + 文件末尾追加警告注释 + warn 日志
+///   （完全丢失重建与「修改出错被纠正」是两回事，前者不留言）
+pub fn sync_meta_snapshot(meta_path: &Path) -> bool {
+    let embedded = embedded_meta_str();
+    let corrected = match std::fs::read_to_string(meta_path) {
+        Ok(text) => {
+            if parse_disk_meta(&text).is_some() {
+                return false;
+            }
+            log::warn!(
+                "[Meta] meta.yaml fields invalid, reset to embedded defaults: {}",
+                meta_path.display()
             );
+            format!(
+                "{embedded}\n# 上一次修改存在非法字段，已恢复为默认值；详情见 logs/daemon.log\n"
+            )
         }
-    }
-    // 内容一致就跳过：watcher 重载后再次写入会再次触发 inotify，必须防环
-    if std::fs::read_to_string(path).ok().as_deref() == Some(content.as_str()) {
-        return false;
-    }
-    if let Some(parent) = path.parent() {
+        Err(_) => {
+            log::info!(
+                "[Meta] meta.yaml missing, rebuilt from embedded defaults: {}",
+                meta_path.display()
+            );
+            embedded.to_string()
+        }
+    };
+    if let Some(parent) = meta_path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    // 原子写：先写同目录临时文件再 rename。直接 fs::write 截断覆盖存在窗口期——
-    // config_watcher 的 inotify（CLOSE_WRITE）与 WebUI 读盘可能读到半截内容，
-    // 导致 meta 解析失败回退默认（用户日志等级设置被静默丢弃）。
-    // rename 触发的 MOVED_TO 会再次走 reload，但内容一致时防环判断直接跳过。
-    // 临时文件名兜底：path 无文件名（根目录 / ".." 结尾等）时 file_name() 为 None，
-    // 空串会让临时文件退化为通用的 ".tmp"，可能覆盖目录中同名文件——回退固定名。
-    let file_name = path
-        .file_name()
-        .map(|s| s.to_string_lossy().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "config".to_string());
-    let tmp_path = path.with_file_name(format!("{}.tmp", file_name));
-    if std::fs::write(&tmp_path, content.as_bytes()).is_ok()
-        && std::fs::rename(&tmp_path, path).is_ok()
-    {
-        return true;
-    }
-    let _ = std::fs::remove_file(&tmp_path);
-    crate::utils::try_write_file(path, content.as_bytes()).is_ok()
+    write_file_no_panic(meta_path, corrected.as_bytes())
 }
 
 /// rules.yaml 快照复制：把编译期嵌入的 rules.yaml 向外复制到模块根（与 config.yaml

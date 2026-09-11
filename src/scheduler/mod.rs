@@ -110,7 +110,7 @@ pub fn start_scheduler_thread(
     shared_config: Arc<RwLock<Config>>,
 ) -> Result<()> {
     let root = common::get_module_root();
-    // 配置路径：非 Chiri 机型回退到默认 config/config.yaml；若意外命中处理器子目录则跟随之
+    // 配置路径：非 Chiri 机型回退到默认 config/meta.yaml；若意外命中处理器子目录则跟随之
     let config_path = common::get_config_path();
     let config_dir = root.join("config");
 
@@ -148,6 +148,10 @@ pub fn start_scheduler_thread(
                 }
                 log::info!("{}", t("config-reloading"));
 
+                // meta.yaml 自愈先于重载：字段非法时用嵌入默认整体覆盖并追加警告注释，
+                // 文件缺失则重建，然后再加载（Config::load 读到的一定是合法 meta）
+                crate::common::sync_meta_snapshot(&config_path);
+
                 let old_lang = config_clone.read().unwrap().meta.language.clone();
                 
                 match Config::load(config_path.to_str().unwrap()) {
@@ -159,10 +163,6 @@ pub fn start_scheduler_thread(
                         if old_lang != new_lang { load_language(&new_lang); }
 
                         log::info!("{}", t("config-reloaded-success"));
-
-                        // 快照自愈：调优参数以嵌入内容为准，磁盘文件被篡改时还原
-                        // （meta 保留外部修改）。内容一致时内部跳过写入，不会成环。
-                        crate::common::sync_config_snapshot(&config_path);
 
                         let scheduler = CpuScheduler::new(config_clone.clone(), sys_path_clone.clone());
                         if let Err(e) = scheduler.apply_system_tweaks() {

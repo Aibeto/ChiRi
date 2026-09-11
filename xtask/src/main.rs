@@ -119,6 +119,29 @@ fn build(sh: &Shell, no_pack: bool) -> Result<()> {
         fs::remove_file(temp_dir.join(".gitignore"))?;
     }
 
+    // 4.5 从模块包移除仅二进制使用的配置：运行时只读嵌入内容，磁盘上无任何读取方，
+    //     取消对外暴露以缩小可篡改面（feature.yaml 为不可修改调优段，同理不落盘）。
+    //     meta.yaml / rules.yaml / 特调与 FAS 导出文件有 WebUI 读取方，保留。
+    const BIN_ONLY: [&str; 4] = [
+        "config/feature.yaml",
+        "config/normal/akmode.yaml",
+        "config/normal/scenemode.yaml",
+        "config/normal/fas.yaml",
+    ];
+    for rel in BIN_ONLY {
+        let _ = fs::remove_file(temp_dir.join(rel));
+    }
+    // normal/fas/ 目录（每应用 FAS 调优）整体只进二进制
+    let _ = fs::remove_dir_all(temp_dir.join("config/normal/fas"));
+    // 各处理器子目录的 feature.yaml
+    if let Ok(rd) = fs::read_dir(temp_dir.join("config")) {
+        for e in rd.flatten() {
+            if e.path().is_dir() {
+                let _ = fs::remove_file(e.path().join("feature.yaml"));
+            }
+        }
+    }
+
     // 5. 组装 bin 目录
     let bin_path = temp_dir.join("core").join("bin");
     fs::create_dir_all(&bin_path)?;
