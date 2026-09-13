@@ -22,14 +22,16 @@ Thumbs.db
 
 # Artifacts
 yumi-*.zip
-*.bak
+# *.bak
 output/
 *.log
 logd/
 
-# plan
+# IDE
 .trae/documents/
 .trae/specs/
+# .codebuddy/memory/
+.codebuddy/docs/
 
 # reference
 AppOptR/

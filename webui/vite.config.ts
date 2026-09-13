@@ -3,18 +3,16 @@ import { fileURLToPath, URL } from 'node:url'
 import { readdirSync, readFileSync } from 'node:fs'
 import { join, relative, sep } from 'node:path'
 import { defineConfig, type Plugin } from 'vite'
-import vue from '@vitejs/plugin-vue'
-import Components from 'unplugin-vue-components/vite'
-import { VantResolver } from '@vant/auto-import-resolver'
+import { svelte } from '@sveltejs/vite-plugin-svelte'
 
-// [embedded-config] 
+// [embedded-config]
 // 构建期把仓库内的配置 yaml 整体嵌入（虚拟模块 virtual:chiri-config）：
-// 目录级收录，新增/删除 yaml 无需改 WebUI 代码；dev 与 build 都读仓库磁盘内容。
+// 目录级收录，新增/删除 yaml 无需改代码；dev 与 build 都读仓库磁盘内容。
 // 注意：嵌入值是**仓库默认值**而非设备权威值——meta.yaml 是用户可修改文件，
-// WebUI 真实路径走 bridge 读设备文件（见 mock.ts 说明）。
+// 真实设备路径一律走 contract 层读盘（见 src/dev/mock-shell.ts 说明）。
 const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url))
 const EMBED_DIRS = ['module/config', 'src/chiri']
-const EMBED_FILES = ['module/rules.yaml']
+const EMBED_FILES = ['module/rules.yaml', 'module/module.prop']
 
 function collectYaml(absDir: string, out: Record<string, string>) {
   for (const entry of readdirSync(absDir, { withFileTypes: true })) {
@@ -22,7 +20,7 @@ function collectYaml(absDir: string, out: Record<string, string>) {
     if (entry.isDirectory()) collectYaml(full, out)
     else if (/\.ya?ml$/.test(entry.name)) {
       const rel = relative(REPO_ROOT, full).split(sep).join('/')
-      // feature.yaml 仅 daemon 二进制使用、*-example.yaml 纯文档：mock 都不读取，不进 WebUI 产物
+      // feature.yaml 仅 daemon 二进制使用、*-example.yaml 纯文档：mock 都不读取，不进产物
       if (/(^|\/)feature\.yaml$/.test(rel) || /-example\.yaml$/.test(rel)) continue
       out[rel] = readFileSync(full, 'utf-8')
     }
@@ -57,21 +55,14 @@ function embeddedConfigPlugin(): Plugin {
   }
 }
 
-// https://vitejs.dev/config/
+// [plugins] [resolve-alias] [base]
 export default defineConfig({
-  plugins: [
-    embeddedConfigPlugin(),
-    vue(),
-    // 自动导入 Vant 组件
-    Components({
-      resolvers: [VantResolver()],
-    }),
-  ],
+  plugins: [embeddedConfigPlugin(), svelte()],
   resolve: {
     alias: {
       '@': fileURLToPath(new URL('./src', import.meta.url))
     }
   },
-  // 强制打包为相对路径，确保在 WebUI 环境下资源能加载
+  // 强制打包为相对路径，确保在 WebView（file:// 或自定义 scheme）下资源可加载
   base: './'
 })

@@ -1,9 +1,20 @@
 # AGENTS.md
 
-> 上次更新时间：2026-09-11
+> 上次更新时间：2026-09-13
 > 最后更新位于此 head 之后：fd9a71ab6c6b4636cb073bcffa96cb468c4993fd
 
 本文档为 AI 编程助手（Cursor / Claude Code / Trae 等）在本仓库工作时的指导文件。
+
+> ** workBuddy 和 CodeBuddy 协作文件已统一到 `.codebuddy/`（2026-09-13）**
+>
+> - 本文件 `AGENTS.md`：项目**指导**文档，按区块维护（Grep `\[tag\]` 定位，勿通读全文）。
+> - `.codebuddy/memory/`：跨会话记忆，注意它是一个**目录**而不是单一文件——
+>   `MEMORY.md` 放长期事实（就地更新、保持精简），`YYYY-MM-DD.md` 是按日期追加的工作日志（只追加不重写）。
+> - `.codebuddy/docs/`：计划、评估等 AI 产出文档（`mdocs/` 只放项目原有文档，勿把 AI 产出放进去）。
+> - 旧的 `.workbuddy/` 已废弃合并，其下只剩重定向说明文件，不再写入任何内容。
+>   凡属架构约定、契约数字、命令口径的变更，AGENTS.md 与 `.codebuddy/memory/` 都要同步；
+>   具体某次改动的经过只写当日日志。
+>   **开始工作前可以考虑互相阅读**：读本文件的同时，考虑读 `.codebuddy/memory/MEMORY.md` 与最近几天的 `YYYY-MM-DD.md`。
 
 > AGENTS.md: [overview] [tree] [stack] [cmds] [convention] [chiri] [hard] [lessons] [maint]（Grep `\[tag\]` 定位区块，勿通读全文）
 
@@ -33,7 +44,7 @@ yumi-ebpf/            # eBPF 探针（bpfel-unknown-none，build-std 编译；�
 xtask/                # 构建脚本（cargo xtask build 完成编译打包 zip）
 module/               # Magisk/KernelSU 模块载体（module.prop、customize.sh、service.sh）
   config/             # config.yaml / rules.yaml / i18n (en.ftl / zh.ftl)；<soc>/config.yaml 处理器子目录（各 SoC 自带，8475/8998 参数相同、各自一份）+ normal/akmode.yaml、normal/scenemode.yaml、normal/fas.yaml（FAS 白名单）、normal/fas/<配置名>.yaml 每应用 FAS 调优（编译期嵌入）
-webui/                # Vue 3 + TypeScript + Vite + Pinia + Vant 管理界面
+webui/                # Svelte 5(runes) + TypeScript + Vite + ak-ui 管理界面；分层 kernel/shell → contract → data → views，tests/ 为纯逻辑断言（详见 webui/README.md）
 updateInformation/    # 更新.json 与 changelog
 .github/workflows/    # CI：Node 24 + Rust nightly + NDK r29 + cargo-ndk
 ```
@@ -44,7 +55,7 @@ updateInformation/    # 更新.json 与 changelog
 | -------- | --------------------------------------------------------------------------------- |
 | 守护进程 | Rust (edition 2024, nightly), tokio, aya (eBPF), serde_yaml, inotify, netlink     |
 | eBPF     | aya 框架，`sched_switch` tracepoint + `queueBuffer` uprobe                        |
-| WebUI    | Vue 3, TypeScript, Vite, Pinia, Vant, vue-i18n, kernelsu                          |
+| WebUI    | Svelte 5 (runes), TypeScript, Vite, ak-ui 1.0.0 (CSS Core), js-yaml, vitest       |
 | 构建     | cargo xtask build（Rust aarch64-linux-android 交叉编译 + webui npm build + 打包） |
 
 ## [cmds] 常用命令
@@ -59,11 +70,14 @@ cargo xtask build --no-pack
 # 本地静态检查（验证 yumi crate 本身；需 nightly + aarch64-linux-android target + bpf-linker）
 cargo +nightly check -p yumi --target aarch64-linux-android
 
-# WebUI 开发
+# WebUI 开发（无 ksu 时自动装载 src/dev/mock-shell 设备替身）
 cd webui && npm install && npm run dev
 
-# WebUI 类型检查
+# WebUI 类型检查（svelte-check，已替换旧的 vue-tsc）
 cd webui && npm run type-check
+
+# WebUI 纯逻辑断言（契约层与数据层，可脱离真机运行）
+cd webui && npm test
 ```
 
 - 本地 check 需要 nightly + aarch64-linux-android target + bpf-linker：eBPF 编译用 `-Z build-std`（仅 nightly 支持），build.rs 会构建 yumi-ebpf。yumi 是 Android/Linux 专属 crate，别用 Windows host 目标检查（netlink-sys/aya 无法在 Windows 编译）。Windows 下 bpf-linker 为 `bpf-linker.exe`（build.rs 已按 `cfg!(windows)` 兼容）。
@@ -128,7 +142,7 @@ cd webui && npm run type-check
 
 - `rules.yaml` 嵌入二进制且只读：编译期 `include_str!` 打包（`common::embedded_rules_str`/`embedded_rules()`），运行时**一律读嵌入值**（monitor/chiri/scheduler 初始加载 + app_detect 热重载共 4 处均改读嵌入）；磁盘 `rules.yaml` 仅是 `main.rs::sync_rules_snapshot` 启动时复制出的对外展示副本（内容一致跳过写），被篡改不影响调度行为、下次启动还原。全局模式、应用性能模式等均由模块随附维护，WebUI 无写入入口。
 
-- 功能总开关（config.yaml meta 段，缺省 true，热重载即时生效）：`fas_enabled` 与 `scenemode_enabled`。字段在 chiri `Meta`（`#[serde(default = "crate::utils::default_true")]`），`Config::load` 读盘 meta 覆盖后经 `common::set_fas_enabled`/`set_scenemode_enabled` 同步到进程级原子标志（覆盖 main 启动 + chiri config_watcher 热重载两条路径）。fas_enabled=false ⇒ `fas_available()` 恒 false（determine_mode 不产生 fas、FAS 监测线程不启动），chiri 主循环 fas 块开头注销运行中实例并按屏幕状态恢复 balance/doze；scenemode_enabled=false ⇒ 息屏不进入 scenemode，已激活的下个 tick 退出并恢复 affinity/core_ctl 快照 + doze 配置。高频路径只读原子量，不许在 tick 内读磁盘。快照自愈会保留这两个 meta 字段（meta.yaml 覆盖已含）。WebUI「配置信息」页提供两个总闸开关（bridge `setFasEnabled`/`setScenemodeEnabled`，经 `updateMetaField` 做 meta.yaml 顶层行替换写入，mock 同步）。
+- 功能总开关（config.yaml meta 段，缺省 true，热重载即时生效）：`fas_enabled` 与 `scenemode_enabled`。字段在 chiri `Meta`（`#[serde(default = "crate::utils::default_true")]`），`Config::load` 读盘 meta 覆盖后经 `common::set_fas_enabled`/`set_scenemode_enabled` 同步到进程级原子标志（覆盖 main 启动 + chiri config_watcher 热重载两条路径）。fas_enabled=false ⇒ `fas_available()` 恒 false（determine_mode 不产生 fas、FAS 监测线程不启动），chiri 主循环 fas 块开头注销运行中实例并按屏幕状态恢复 balance/doze；scenemode_enabled=false ⇒ 息屏不进入 scenemode，已激活的下个 tick 退出并恢复 affinity/core_ctl 快照 + doze 配置。高频路径只读原子量，不许在 tick 内读磁盘。快照自愈会保留这两个 meta 字段（meta.yaml 覆盖已含）。WebUI「配置」页提供两个总闸开关（`src/views/ConfigView.svelte` → `state.setDraft` → `contract/meta.ts::writeMetaFields`）：先落草稿、由「保存」做单次读-改-写（顶层行替换 + tmp→rename），写后回读实际值（守护进程可能判定非法并整体重置）；dev mock 走同一条链路。
 
 - 对外暴露审计（落盘最小化）：磁盘只保留有外部读取方的文件——meta.yaml（WebUI 读写）、rules.yaml / fas_whitelist.yaml / special_tuned.yaml / current_mode.chr / active_config.chr（WebUI 只读）。feature.yaml、normal/akmode.yaml、normal/scenemode.yaml、normal/fas\*.yaml 无任何读取方：不落盘、不监听，xtask 打包时从模块包移除（仅存于二进制）；customize.sh 热更新备份/恢复只针对 meta.yaml。i18n ftl 仅嵌入消费，暂仍随包（后续可同样移除）。
 
@@ -163,21 +177,21 @@ cd webui && npm run type-check
 
 ### WebUI
 
-- 与守护进程通过 kernelsu bridge 交互（见 `webui/src/utils/bridge.ts`），不要硬编码路径；读配置前先读 `active_config.chr` 确定实际生效文件。
+- 分层（上层只依赖下层接口）：`kernel/ksu.ts`（原生注入的 ksu.\* 桥，逐 API 能力探测、缺失时降级）→ `kernel/shell.ts`（可注入 `ShellRunner`，dev 预览与单测注入 `dev/mock-shell.ts`）→ `contract/`（paths 路径安全校验 / read 三分类读取 / meta 读写 / daemon flock 存活探测与关闭调度 / sources 设备形态与只读源）→ `data/`（纯解析：status-csv 21 列、daemon-log、mode、whitelists、rules、apps）→ `views/` 四屏。不硬编码路径；读配置前先读 `active_config.chr` 确定实际生效文件（`contract/sources.ts`）。
 
-- `vite.config.ts` 的 `chiri-embedded-config` 插件在构建期把 `module/config/**`（排除 feature.yaml 与 _-example.yaml，mock 不读取）、`module/rules.yaml`、`src/chiri/_.yaml`嵌入为虚拟模块`virtual:chiri-config`（`files`键为相对仓库根的路径），**仅供`utils/mock.ts` 等 dev 场景取仓库默认值**（新增/删除 yaml 无需改 WebUI 代码，`MOCK_SOCS`从嵌入目录推导，不要在 mock 里手写配置内容或 SoC 列表）。**嵌入副本不是设备权威值**：meta.yaml（{soc}/meta.yaml）是用户可修改文件，WebUI 真实路径必须经 bridge 读`active_config.chr` 指向的设备文件（`bridge.ts` 不引用该虚拟模块），不得用嵌入副本覆盖或展示其设备现状。
+- `vite.config.ts` 的 `chiri-embedded-config` 插件在构建期把 `module/config/**`（排除 feature.yaml 与 _-example.yaml，mock 不读取）、`module/rules.yaml`、`src/chiri/_.yaml`嵌入为虚拟模块`virtual:chiri-config`（`files`键为相对仓库根的路径），**仅供`dev/mock-shell.ts`无设备预览取仓库默认值**（新增/删除 yaml 无需改 WebUI 代码；mock 的设备形态由 URL 参数`?soc=chiri|yumi` 指定，配置默认值取自嵌入副本，不要在 mock 里手写配置内容或 SoC 列表）。**嵌入副本不是设备权威值**：meta.yaml（{soc}/meta.yaml）是用户可修改文件，WebUI 真实路径必须经 shell 读`active_config.chr` 指向的设备文件（`contract/` 不引用该虚拟模块），不得用嵌入副本覆盖或展示其设备现状。
 
-- 文件写入用 base64 管道（`echo '<b64>' | base64 -d > path.tmp && mv -f path.tmp path`）避免 shell 特殊字符干扰，必须经临时文件 + 原子 mv，防止直接 `>` 截断时 config_watcher 读到半截内容导致重载失败；不要用 `echo "${content}"` 拼接。
+- 文件写入用 base64 管道（`printf '%s' <b64> | base64 -d > <path>.webui.tmp && mv -f <path>.webui.tmp <path>`）避免 shell 特殊字符干扰；临时文件后缀固定 `.webui.tmp`（与 daemon 自身的 `<name>.tmp` 区分防互踩），必须经临时文件 + 原子 mv，防止直接 `>` 截断时 config_watcher 读到半截内容导致重载失败；不要用 `echo "${content}"` 拼接。
 
-- 依赖约束：`typescript` 固定 5.x（`~5.9.0`）。TS 7.x 是 Go 原生编译器，不再导出 `lib/tsc`，`vue-tsc` 3.x 无法兼容（type-check 报 `ERR_PACKAGE_PATH_NOT_EXPORTED`），勿升级。
+- 依赖现状：type-check 走 `svelte-check`（旧 vue-tsc 及其 typescript 5.x 固定约束已随重构移除，现为 ^6.0.3）；`svelte` 5（runes）+ `@yunyoujun/ak-ui` 锁定 1.0.0（CSS Core，`.ak-*` 类名与 `--ak-*` token 属 1.x 契约承诺）。
 
-- 不开放 YAML 编辑：`/config` 页只查看生效配置文件（`active_config.chr` 解析路径 + meta 抬头：配置名/作者/日志语言/日志等级）并切换日志等级（`bridge.ts::setLogLevel` 只替换 `meta.loglevel` 行、保留注释与其余内容，config_watcher 热重载即时生效），另提供「开发记录」开关（`bridge.ts::setDevRecord` 同口径替换 `meta.dev_record` 行，布尔裸值；MockBridge 需同步提供同名方法——`Bridge = isDev ? MockBridge : RealBridge` 是联合类型，缺方法 type-check 报错）。
+- 唯一可写文件是 meta.yaml 的 5 个字段（language/loglevel/dev_record/fas_enabled/scenemode_enabled）：`contract/meta.ts::writeMetaFields` 做单次读-改-写（`replaceTopLevelField` 顶层行替换、保留注释与其余内容 + tmp→rename；tmp+rename 会产生两个 inotify 事件，故整段一次写入、绝不做多次写入），写后回读实际值——daemon 对 meta 整文件严格校验（七字段缺一不可 + `deny_unknown_fields`），非法即用内嵌默认整体覆盖；「配置」页交互为草稿 + 保存（`state.svelte.ts::setDraft`），config_watcher 热重载即时生效。name/author 仅展示。dev mock 走同一条链路（ShellRunner 注入），无 MockBridge 联合类型约束。
 
-- 禁止 WebUI 修改性能模式（rules.yaml 只读）：WebUI 不提供全局模式切换与为 App 指定模式/删除规则的任何入口（`bridge.ts` 无 `setMode`/`saveAppRule`/`saveRulesConfig` 写路径，rules.yaml 仅读取展示；Home 页模式网格已移除、应用列表页只读标签）。需要调整时改 `module/rules.yaml` 源文件重新编译。
+- 禁止 WebUI 修改性能模式（rules.yaml 只读）：契约层无任何 rules.yaml 写路径，不提供全局模式切换与为 App 指定模式/删除规则的入口；应用列表仅展示特调/FAS/现存 app_modes 只读标签，提供「重新扫描」按钮（扫描中禁用防并发）。需要调整时改 `module/rules.yaml` 源文件重新编译。
 
-- rules.yaml 只读后的 null 兼容：WebUI 已无 rules.yaml 写路径（`saveRulesConfig` 随模式切换入口移除）；守护进程侧 `monitor/config.rs` 的 `RulesConfig::app_modes` 仍用 `deserialize_with`（untagged 枚举）显式兼容 null 为空表，历史遗留的 `app_modes: null` 旧文件也不告警。
+- rules.yaml 只读后的 null 兼容：守护进程侧 `monitor/config.rs` 的 `RulesConfig::app_modes` 仍用 `deserialize_with`（untagged 枚举）显式兼容 null 为空表，历史遗留的 `app_modes: null` 旧文件也不告警。
 
-- FAS 标签（只读）：`bridge.ts::getFasWhitelist` 读 `fas_whitelist.yaml`（每行 split(':')，解析异常回空表），仅 `isChiri && fasWhitelist[pkg]` 时应用列表显示 FAS 标签——FAS 仅白名单驱动、非用户可选模式（mode_fas 动作项保持注释）；Home 页 `currentMode==='fas'` 显示 mode_fas/desc_fas；MockBridge 同步提供 `getFasWhitelist`（联合类型硬约束，缺方法 type-check 报错）。
+- 特调/FAS 标签（只读）：`data/whitelists.ts` 解析 `special_tuned.yaml`（仅精确条目，导出文件不含正则）与 `fas_whitelist.yaml`（每行 `包名:配置名`，解析异常回空表），仅 `deviceKind==='chiri'` 时应用列表显示标签、`yumi` 显示「不适用」；FAS 仅白名单驱动、非用户可选模式；当前模式为 fas 时经 `data/mode.ts` 派生展示文案。白名单命中 ≠ 实际生效（`fas_available()` 另有 UI 不可见的条件），界面只陈述已知事实，生效以 `current_mode.chr` 观测值为准。
 
 ## [chiri] ChiRi 调度子系统
 
@@ -223,11 +237,11 @@ cd webui && npm run type-check
 
 WebUI 侧：
 
-- 双套流动：`bridge.ts::isChiri`（active_config 为处理器子目录 `config/{soc}/config.yaml` 时真）判定设备类型，`stores/scheduler.ts` 存 `isChiri` 态。
+- 设备形态三态：`contract/sources.ts::deviceKind()` 依据 active_config 是否指向处理器子目录判定 `chiri` / `yumi` / `unknown`；读不到时是 `unknown`（界面显示「无法判定」，不替用户下结论）。状态落在 `src/state.svelte.ts`。
 
-- 特调在 WebUI 为只读标注：`getSpecialTuned` 读白名单，仅 `isChiri && specialTuned[pkg]` 时在应用列表显示「特调：{fallback}」标签（Yumi 设备不显示）；不提供专属特调模式选项、不做特调清理/重扫修复。应用性能模式已禁止在 WebUI 指定（rules.yaml 只读），应用列表仅展示特调/FAS/现存 app_modes 标签，提供「重新扫描」按钮（扫描中禁用防并发）。
+- 特调/FAS 在 WebUI 为只读标注：`data/whitelists.ts` 解析白名单，仅 `chiri` 机型显示「特调 / FAS」标签（`yumi` 显示「不适用」）；不提供专属特调模式选项、不做特调清理/重扫修复。应用性能模式已禁止在 WebUI 指定（rules.yaml 只读），应用列表仅展示特调/FAS/现存 app_modes 标签，提供「重新扫描」按钮（扫描中禁用防并发）。
 
-- 当前模式读取与自愈：`bridge.ts::getCurrentMode` 读 `current_mode.chr`（空文件回退 `balance`）；守护进程启动时写一次初始模式、模式切换时写入，并常态每 5 秒重写一次（两套 scheduler_ipc 均实现），防止文件被意外清空/删除后 WebUI 读不到状态。
+- 当前模式读取与自愈：`contract/sources.ts::readCurrentModeRaw()` 读 `current_mode.chr`（内容为模式名原样字节、无换行无空格）；守护进程启动时写一次、模式切换时写、并常态每 5 秒**无条件**重写一次（两套 scheduler_ipc 各一份实现），因此**不能用 mtime 判断模式变化**；守护进程停止后文件是陈旧值，界面须结合存活探测呈现。文件为空/缺失时界面显示「未知 · 尚未产生模式记录」，与「模式名不在已注册档位内」区分开。
 
 ### FAS 帧感知调度（解耦多实例，ChiRi 专属）
 
@@ -405,7 +419,7 @@ WebUI 侧：
 
 - **热更新必须先杀看门狗再复制二进制，且复制结果必须显式校验**：`customize.sh` 热更新只 killall yumi 不杀看门狗时，看门狗的 3s 周期复活可落在 killall 与 `cp` 之间的窗口——`cp` 覆盖**运行中的可执行文件**会 `ETXTBSY` 失败，且 `cp -r ... 2>/dev/null` 把它静默吞掉：模块目录残留旧版本，热更新后手动重启调度（action.sh 拉的是 live 目录的二进制）仍跑旧版，直到重启设备被 KSU 的 `modules_update` 覆盖才固化。修复四件套：① 复制前按 `logs/watchdog.pid` 杀旧看门狗；② killall 统一 `-9` 并轮询确认 daemon 退出（pidof，≤5s，D 状态进程对 SIGKILL 也要等 IO 返回）；③ `core/bin/yumi` 单独 `cp` 并校验退出码，失败恢复配置备份、重启旧版服务保持调度连续并明确告知；④ **`MODDIR` 赋值后必须 `export`**——安装器环境可能已把 MODDIR 导出为 staging（modules_update），仅局部赋值子进程看不到，service.sh 的 `[ -z "$MODDIR" ]` 会继承错位路径（看门狗从 staging 拉起 daemon、日志/pidfile/锁写入 staging，KSU 清理后调度静默死亡）。顺带修正 `chmod 755 "$MODDIR/yumi"` 的错误路径（二进制在 `core/bin/yumi`）。**热更新路径（成功与失败）都必须以 `exit 1` 结束**——exit 0 会让 KSU 把模块归为「待更新」，重启前 Action/WebUI 全部禁用（脚本 MSG_HOT_UPDATE_HINT 注明的预期行为）。
 
-- WebUI「关闭调度」而非重启：`bridge.ts::stopScheduler` 先按 `logs/watchdog.pid` kill 掉看门狗（防止其把主进程再拉起），再 `killall -9 yumi`，实现彻底停止调度；恢复需点击模块 Action（`action.sh` 手动启动）或重启设备。不要在 ksu.exec 里用 `nohup ... &` 后台拉起——`ksu.exec` 返回会清理执行 shell 的进程组，直接拉起会被一并杀掉；要启动调度一律调用模块自身的 service.sh/action.sh（内含 `nohup`，且 disable_boost 幂等）。
+- WebUI「关闭调度」而非重启：`contract/daemon.ts::stopScheduler` 先按 `logs/watchdog.pid` kill 掉看门狗（防止其把主进程再拉起），再 `killall -9 yumi`（缺失时回退 pkill），实现彻底停止调度；恢复需点击模块 Action（`action.sh` 手动启动）或重启设备。不要在 ksu.exec 里用 `nohup ... &` 后台拉起——`ksu.exec` 返回会清理执行 shell 的进程组，直接拉起会被一并杀掉；要启动调度一律调用模块自身的 service.sh/action.sh（内含 `nohup`，且 disable_boost 幂等）。
 
 - 模块热更新必须 `exit 1` 收尾：customize.sh 的热更新分支把新文件直接 cp 进已安装模块目录 `/data/adb/modules/chiri` 并重启服务后，必须轮询确认 daemon（`pidof`/`pgrep yumi`，最多 \~6s）存活，然后无条件 `exit 1` 按报错退出。若 `return 0` 让安装器继续"完整安装"，会再覆盖一遍模块目录并写 update 标记，管理器随即识别为"模块更新"提示重启、隐藏 WebUI/Action；`exit 1` 使安装器按失败中止（清理暂存目录、不碰已热替换的目录），管理器不感知更新。管理器显示"安装失败"是预期行为，脚本内已双语提示；服务未启动时同样 exit 1 并提示重启设备走完整安装。
 
