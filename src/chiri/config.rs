@@ -34,6 +34,14 @@ pub struct Meta {
     /// meta 段允许外部修改的字段之一（手改 meta.yaml 后热重载生效）。
     #[serde(default = "crate::utils::default_true", alias = "ScenemodeEnabled")]
     pub scenemode_enabled: bool,
+
+    /// 线程摆放总开关（meta.yaml `thread_bind`）：false = 关闭线程功能，CPU 亲和/绑核
+    /// （cpuset / uclamp / sched_setaffinity）与 core_ctl 核心在线接管全部交还系统，
+    /// 也就是**把所有绑定分配改成全核心**。
+    /// 与 config.yaml 的 `Affinity.enabled` / `CoreCtl.enabled` 取「与」——机型可按硬件
+    /// 禁用、用户可按意愿禁用；合并在 Config::load 完成，下游只看那两个子开关。
+    #[serde(default = "crate::utils::default_true", alias = "ThreadBind")]
+    pub thread_bind: bool,
 }
 
 // Meta 缺省值：config.yaml 省略该字段时回退到此处
@@ -279,7 +287,7 @@ impl CpuLoadGovernorConfig {
 
 // [mode_io]
 // 核心模式与杂项配置
-/// 单一性能模式的配置集合（config.yaml 中 powersave / balance / performance / fast 之一）
+/// 单一性能模式的配置集合（config.yaml 中 reduce / default / boost / vector 之一）
 #[derive(Debug, Deserialize, Default, Clone)]
 pub struct Mode {
     /// 该模式下的 CLG 调频参数
@@ -428,8 +436,8 @@ impl SpecialTunedConfig {
 /// 豁免档 free_above：当前性能上限已高于豁免档时不钳制。
 /// 意味着持续高负载可以冲到硬件最高频——不挡性能的路，只在中低负载区间积热时压一压。
 ///
-/// 仅对 CLG 接管模式生效（powersave/balance/performance/doze/scenemode）。
-/// fast/akmode 走自己的路径，不受影响。
+/// 仅对 CLG 接管模式生效（reduce/default/boost/doze/scenemode）。
+/// vector/akmode 走自己的路径，不受影响。
 #[derive(Debug, Deserialize, Clone)]
 pub struct ThermalGuardConfig {
     /// false = 完全不采温、不压制
@@ -563,7 +571,7 @@ impl ThermalGuardConfig {
 // CPU 亲和 / core_ctl 配置
 
 /// CPU 亲和与线程迁移配置（config.yaml `Affinity` 段）。
-/// boost 模式（performance/fast/特调）下由 AffinityManager 应用：
+/// boost 类模式（boost/vector/特调）下由 AffinityManager 应用：
 /// top-app/foreground cpuset 收窄到大核+超大核、后台分组压小核、
 /// 可选 uclamp.min 抬前台利用率下限、可选前台线程 sched_setaffinity 迁移。
 /// normal/doze 下 top-app 恢复系统布局，后台保持压小核。配置热重载即时生效。
@@ -628,10 +636,11 @@ pub struct CoreCtlConfig {
     /// 配置压制）；编号最大的小核独占给调度服务（从业务 cpuset 组移除 + 自身
     /// 线程移入根组 + 自钉）。亮屏/退出 scenemode 按快照恢复。逐核回读验证，
     /// 内核拒绝的核自动跳过。
-    /// 按机型配置：8550/8475 开，8998（4.4 老内核热插拔质量未知）默认关。
-    /// 注意：与 boost 互斥——scenemode 下 boost 被抑制，防止厂商 core_ctl
-    /// 按 min_cpus 把下线的核又拉回来。
+    /// 【已停用（2026-09-17）】stardust 家族（scenemode/down）语义改为「停线程迁移 +
+    /// 全部 cpuset 恢复全核 + 仅压频」，不再做 prime 整簇下线。字段仅为兼容旧机型
+    /// yaml 保留（deny 解析需要），改值无效果。
     #[serde(default = "crate::utils::default_true")]
+    #[allow(dead_code)]
     pub scenemode_offline: bool,
 }
 
@@ -663,13 +672,13 @@ pub struct Config {
 
     // 按场景划分的性能模式：键名即 mode，get_mode 按名检索
     #[serde(default)]
-    pub powersave: Mode,
+    pub reduce: Mode,
     #[serde(default)]
-    pub balance: Mode,
+    pub default: Mode,
     #[serde(default)]
-    pub performance: Mode,
+    pub boost: Mode,
     #[serde(default)]
-    pub fast: Mode,
+    pub vector: Mode,
     /// 息屏场景模式（scenemode）：屏幕熄灭超过 `scene_mode_delay_secs` 秒后切换到的
     /// 低功耗配置（压低频率上限、禁止主动升频），亮屏后恢复原模式。
     /// 未定义时回退 CLG 默认参数（兜底，通常 8550 config.yaml 会显式配置）。
@@ -720,16 +729,25 @@ impl Config {
         config.meta.dev_record = d.dev_record;
         config.meta.fas_enabled = d.fas_enabled;
         config.meta.scenemode_enabled = d.scenemode_enabled;
+        config.meta.thread_bind = d.thread_bind;
         if let Some(m) = crate::common::read_external_meta(std::path::Path::new(path)) {
             config.meta.loglevel = m.loglevel;
             config.meta.language = m.language;
             config.meta.dev_record = m.dev_record;
             config.meta.fas_enabled = m.fas_enabled;
             config.meta.scenemode_enabled = m.scenemode_enabled;
+            config.meta.thread_bind = m.thread_bind;
         }
         // 功能总开关同步到进程级原子标志（覆盖启动 + config_watcher 热重载两条路径）
         crate::common::set_fas_enabled(config.meta.fas_enabled);
         crate::common::set_scenemode_enabled(config.meta.scenemode_enabled);
+        // 线程功能总闸与机型内的两个子开关取「与」：关掉后 affinity 走 release()
+        // （逐线程恢复全核 + cpuset/uclamp 快照回写）、core_ctl 回 Normal（恢复
+        // min_cpus/online 快照）——即「把绑定分配全部改成全核心」。热重载后由
+        // scheduler_ipc 的 config_dirty 分支调 apply_affinity_and_corectl 落地，
+        // 周期块（2s）也会兜一次。
+        config.affinity.enabled &= config.meta.thread_bind;
+        config.core_ctl.enabled &= config.meta.thread_bind;
         config.merge_akmode();
         config.merge_scenemode();
         config.thermal.normalize();
@@ -819,10 +837,10 @@ impl Config {
     /// 特调模式（akmode）不走 CLG，由 AkmodeGovernor 独立接管。
     pub fn get_mode(&self, mode_name: &str) -> Option<&Mode> {
         match mode_name {
-            "powersave" => Some(&self.powersave),
-            "balance" => Some(&self.balance),
-            "performance" => Some(&self.performance),
-            "fast" => Some(&self.fast),
+            "reduce" => Some(&self.reduce),
+            "default" => Some(&self.default),
+            "boost" => Some(&self.boost),
+            "vector" => Some(&self.vector),
             _ => None,
         }
     }

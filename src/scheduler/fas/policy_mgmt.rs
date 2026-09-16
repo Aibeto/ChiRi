@@ -49,10 +49,10 @@ impl FasController {
         self.cfg.gear_dampen_frames = new_rules.gear_dampen_frames;
         self.cfg.downgrade_boost_perf_inc = new_rules.downgrade_boost_perf_inc;
         self.cfg.downgrade_boost_duration = new_rules.downgrade_boost_duration;
-        self.cfg.fast_decay_frame_threshold = new_rules.fast_decay_frame_threshold;
-        self.cfg.fast_decay_perf_threshold = new_rules.fast_decay_perf_threshold;
-        self.cfg.fast_decay_max_step = new_rules.fast_decay_max_step;
-        self.cfg.fast_decay_min_step = new_rules.fast_decay_min_step;
+        self.cfg.steady_decay_frame_threshold = new_rules.steady_decay_frame_threshold;
+        self.cfg.steady_decay_perf_threshold = new_rules.steady_decay_perf_threshold;
+        self.cfg.steady_decay_max_step = new_rules.steady_decay_max_step;
+        self.cfg.steady_decay_min_step = new_rules.steady_decay_min_step;
         self.cfg.jank_cooldown_frames = new_rules.jank_cooldown_frames;
         self.cfg.max_inc_damped = new_rules.max_inc_damped;
         self.cfg.max_inc_normal = new_rules.max_inc_normal;

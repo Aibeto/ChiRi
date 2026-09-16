@@ -308,10 +308,10 @@ if [ "$HOT_UPDATE_AVAILABLE" = "true" ]; then
                 mv "$MODDIR/rules.yaml.bak" "$MODDIR/rules.yaml"
             fi
             chmod 755 "$MODDIR/core/bin/yumi" 2>/dev/null
-            ui_print "ERROR: hot update copy failed! Old version kept & restarting."
-            ui_print "错误：热更新文件复制失败！正在重启旧版本以保持调度。"
-            ui_print "当前仍为旧版本——请重新刷入模块或重试热更新完成升级。"
-            ui_print "Old version is running — re-flash or retry the hot update to upgrade."
+            ui_print "ERROR: hot update copy failed! Old version kept."
+            ui_print "错误：热更新文件复制失败！旧版本文件已保留。"
+            ui_print "请手动执行 Action 启动旧版本调度。"
+            ui_print "Run Action manually to start the old scheduler."
         fi
 
         # 恢复用户配置文件
@@ -327,55 +327,12 @@ if [ "$HOT_UPDATE_AVAILABLE" = "true" ]; then
         chmod 755 "$MODDIR/action.sh" 2>/dev/null
         chmod 755 "$MODDIR/core/bin/yumi" 2>/dev/null
         
-        # 3. 重启调度服务
-        # 使用setsid启动service.sh，确保进程脱离安装环境存活
-        ui_print "$MSG_RESTARTING_SCHEDULER"
-        if [ -f "$MODDIR/service.sh" ]; then
-            # 检测 setsid 可用性，优先使用 BusyBox 的 setsid
-            SETSID_CMD=""
-            if command -v setsid >/dev/null 2>&1; then
-                SETSID_CMD="setsid"
-            elif [ -n "$BUSYBOX" ] && "$BUSYBOX" setsid true >/dev/null 2>&1; then
-                SETSID_CMD="$BUSYBOX setsid"
-            fi
-            
-            # 启动 service.sh，优先使用 setsid 脱离父进程组
-            if [ -n "$SETSID_CMD" ]; then
-                $SETSID_CMD sh "$MODDIR/service.sh" </dev/null >/dev/null 2>&1 &
-            else
-                # fallback: 使用 nohup（兼容性更好，但可能无法完全脱离进程组）
-                nohup sh "$MODDIR/service.sh" </dev/null >/dev/null 2>&1 &
-            fi
-        fi
-        sleep 2
-
-        # 4. 确认服务启动状态：watchdog nohup 拉起 daemon 有延迟，轮询最多 ~6s
-        ui_print "$MSG_VERIFY_SERVICE"
-        SERVICE_OK=false
-        CHECK_ROUND=0
-        while [ $CHECK_ROUND -lt 3 ]; do
-            sleep 2
-            if [ -x "/system/bin/pidof" ]; then
-                DAEMON_PID=$(/system/bin/pidof yumi 2>/dev/null)
-            elif [ -n "$BUSYBOX" ]; then
-                DAEMON_PID=$($BUSYBOX pgrep -x yumi 2>/dev/null)
-            else
-                DAEMON_PID=""
-            fi
-            if [ -n "$DAEMON_PID" ]; then
-                SERVICE_OK=true
-                break
-            fi
-            CHECK_ROUND=$((CHECK_ROUND + 1))
-        done
-
+        # 3.【已取消】重启调度服务（2026-09-17）：
+        #    热更新后不再自动拉起调度——安装器环境里 setsid/nohup 拉起的 service.sh
+        #    生命周期不可控（管理器退出后进程可能被收割），失败场景也无法在安装器
+        #    里可靠提示。统一改为要求用户手动执行 Action 启动（见下方文案）。
         ui_print " "
-        if [ "$SERVICE_OK" = "true" ]; then
-            ui_print "$MSG_HOT_UPDATE_DONE"
-        else
-            ui_print "$MSG_SERVICE_FAIL"
-        fi
-        ui_print "$MSG_HOT_UPDATE_HINT"
+        ui_print "$MSG_HOT_UPDATE_ABORT"
 
         # 5. 清理安装暂存 + 走官方失败路径结束安装。
         #    背景：安装器在执行 customize.sh **之前**已把 zip 解压到

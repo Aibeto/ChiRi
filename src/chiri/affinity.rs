@@ -3,7 +3,7 @@
 /// CPU 亲和与线程迁移控制器（ChiRi 专属，按核心粒度放置，低开销版）。
 ///
 /// 分层：
-/// - cgroup 层：boost（performance/fast/特调）下收窄 top-app/foreground cpuset
+/// - cgroup 层：boost 类模式（boost/vector/特调）下收窄 top-app/foreground cpuset
 ///   到大核+超大核、后台分组压小核；可选 uclamp.min/max；normal/doze 恢复快照。
 /// - 线程层：
 ///   * 前台（fg_pid 由 app_detect 提供）：关键线程（主线程/RenderThread 等）
@@ -57,9 +57,9 @@ const KIND_NORMAL: u8 = 2;
 enum GroupBind {
     /// 未绑定（全核掩码）
     None,
-    /// 关键线程：boost 组掩码兜底 / balance 小核高水位 normal_press
+    /// 关键线程：boost 组掩码兜底 / default 小核高水位 normal_press
     Key,
-    /// balance 小核高水位下因「忙」绑定（normal_busy），空闲后单独释放
+    /// default 小核高水位下因「忙」绑定（normal_busy），空闲后单独释放
     Busy,
 }
 
@@ -115,9 +115,9 @@ const HOLD_LOG_COOLDOWN: Duration = Duration::from_secs(30);
 const PLACE_DUMP_MIN_INTERVAL: Duration = Duration::from_secs(30);
 const PROMOTE_UTIL_PCT: f32 = 25.0;
 const LITTLE_HIGH_WATER: f32 = 0.70;
-/// balance 模式关键线程组绑定的解除水位（迟滞下沿，防乒乓）
+/// default 模式关键线程组绑定的解除水位（迟滞下沿，防乒乓）
 const KEY_BIND_RELEASE_WATER: f32 = 0.50;
-/// balance 小核高水位时，非关键前台线程「忙」判定阈值（%）：窗口 util 连续
+/// default 小核高水位时，非关键前台线程「忙」判定阈值（%）：窗口 util 连续
 /// 两窗达此值即抬到 big∪prime。8550 实测 little 常有一颗核被单个非关键前台
 /// 线程打满（util 0.70~0.95）而 big 平均有 3+ 核空闲、prime 近空转——仅绑关键
 /// 线程不足以解除小核饱和
@@ -262,6 +262,58 @@ pub(crate) fn restore_excluded_cpusets(snapshot: Vec<(String, String)>) {
     for (group, cpus) in snapshot {
         write_cpuset_cpus(&group, &cpus);
     }
+}
+
+// [lab_groups]
+/// 实验室静态分组（contingency/babel）：组级写 cpus 并把原值记入快照（每组只记
+/// 一次，防止框架重写后的中间值覆盖真实原始值）。组不存在或写失败则跳过。
+fn set_groups_cpus_tracked(groups: &[&str], value: &str, snapshot: &mut Vec<(String, String)>) {
+    for group in groups {
+        let Some(cur) = read_cpuset_cpus(group) else {
+            continue;
+        };
+        if !snapshot.iter().any(|(g, _)| g == group) {
+            snapshot.push((group.to_string(), cur));
+        }
+        write_cpuset_cpus(group, value);
+    }
+}
+
+/// 小核列表（babel 的后台组）
+fn little_list() -> String {
+    let r = crate::common::chiri_core_ranges().little;
+    format!("{}-{}", r.start, r.end - 1)
+}
+
+/// 小核前两颗（contingency 的后台收敛目标：0-1 两颗小核）
+fn little_pair_list() -> String {
+    let r = crate::common::chiri_core_ranges().little;
+    format!("{}-{}", r.start, r.start + 1)
+}
+
+/// 大核列表（babel 的系统进程组）
+fn big_list() -> String {
+    let r = crate::common::chiri_core_ranges().big;
+    format!("{}-{}", r.start, r.end - 1)
+}
+
+/// 大核 + 超大核列表（babel 的前台/顶部组）；无 prime 的机型（8998）退化为大核
+fn big_plus_prime_list() -> String {
+    let r = crate::common::chiri_core_ranges();
+    if r.prime.start < r.prime.end {
+        format!("{}-{}", r.big.start, r.prime.end - 1)
+    } else {
+        format!("{}-{}", r.big.start, r.big.end - 1)
+    }
+}
+
+/// 全核列表：读根组 `/dev/cpuset/cpus`（全部允许核），失败按机型区间拼 0-(最大核)
+fn all_cores_list() -> String {
+    read_cpuset_cpus("").unwrap_or_else(|| {
+        let r = crate::common::chiri_core_ranges();
+        let last = r.prime.end.max(r.big.end);
+        format!("0-{}", last - 1)
+    })
 }
 
 /// 自身所在 cpuset 组的相对路径（"/"=根组；None = 无 cpuset 层级/读取失败）
@@ -537,7 +589,7 @@ pub struct AffinityManager {
     /// 前台进程 cmdline 缓存（每轮 rebalance 刷新一次，aff/place 行共用，
     /// 避免每次钉核重读 /proc/<pid>/cmdline）
     fg_cmdline: String,
-    /// balance（非 boost）little 高水位的迟滞锁存：>HIGH_WATER 激活、
+    /// default（非 boost）little 高水位的迟滞锁存：>HIGH_WATER 激活、
     /// <RELEASE_WATER 解除，防阈值边缘绑定/恢复乒乓
     key_bind_active: bool,
     /// 非关键前台线程升核（normal_busy）采样的轮转游标：压力窗口内每轮只扫
@@ -553,6 +605,10 @@ pub struct AffinityManager {
     last_place_sig: String,
     /// 上次 place 快照输出时刻
     last_place_dump: Instant,
+    /// 实验室静态分组（contingency/babel）：当前模式（None = 未启用）
+    lab_static_mode: Option<String>,
+    /// 静态分组改动过的 (组名, 原 cpus) 快照，退出时恢复
+    lab_group_snapshot: Vec<(String, String)>,
 }
 
 impl AffinityManager {
@@ -581,6 +637,8 @@ impl AffinityManager {
             boost_uclamp_prev: None,
             last_place_sig: String::new(),
             last_place_dump: Instant::now() - PLACE_DUMP_MIN_INTERVAL,
+            lab_static_mode: None,
+            lab_group_snapshot: Vec::new(),
         }
     }
 
@@ -940,9 +998,9 @@ impl AffinityManager {
                 !fg_cmdline.is_empty() && !crate::common::is_affinity_blacklisted(&fg_cmdline);
             let pin_fg = fg_ok && boost && screen_on;
 
-            // balance（非 boost）轻量前台保护：little 高水位时把关键线程
+            // default（非 boost）轻量前台保护：little 高水位时把关键线程
             // （主线程/RenderThread 等白名单）组绑定到性能核 big∪prime。
-            // 8550 balance 实测：后台压小核 + EAS 把前台任务也堆在小核，
+            // 8550 default 实测：后台压小核 + EAS 把前台任务也堆在小核，
             // little p50=88~99% 排队而 prime p50=0% 空转、大核半闲——现有
             // 后台 promote 只救后台组线程，前台关键线程无人救援。迟滞：
             // >HIGH_WATER 激活、<RELEASE_WATER 解除；boost/息屏强制解除
@@ -968,7 +1026,7 @@ impl AffinityManager {
                 match std::fs::read_dir(&task_dir) {
                     Ok(rd) => {
                         let mut seen = HashSet::new();
-                        // balance 小核高水位下待升核的非关键前台线程（本轮限量采样）
+                        // default 小核高水位下待升核的非关键前台线程（本轮限量采样）
                         let mut scan_pool: Vec<i32> = Vec::new();
                         for entry in rd.flatten() {
                             let tid: i32 =
@@ -1144,14 +1202,14 @@ impl AffinityManager {
                             } else if home >= 0 {
                                 self.unpin_core(tid, home, fg_pid, &pkg);
                             } else if group_bind != GroupBind::None {
-                                // 组掩码兜底恢复：boost 退出，或 balance 压力
+                                // 组掩码兜底恢复：boost 退出，或 default 压力
                                 // 解除/息屏（key_pressure 活跃时保持绑定；
                                 // Busy 绑定的空闲回落由下方采样块单独处理）
                                 if !key_pressure {
                                     self.restore_group_mask(tid, fg_pid, &pkg);
                                 }
                             } else if key_pressure && is_key {
-                                // little 高水位的 balance 模式：关键线程组绑定
+                                // little 高水位的 default 模式：关键线程组绑定
                                 // 到 big∪prime（与 boost 的 fg_group 同款机制、
                                 // 不同触发条件）。不钉单核、不占钉核计数，
                                 // EAS 在性能核组内继续自调度省电摆放
@@ -1185,7 +1243,7 @@ impl AffinityManager {
                             self.cleanup_thread(tid);
                         }
 
-                        // —— balance 小核高水位：非关键前台线程升核（限量采样） ——
+                        // —— default 小核高水位：非关键前台线程升核（限量采样） ——
                         // 对应 8550 实测「单颗小核被一个非关键前台线程打满、big 3+ 核
                         // 空闲、prime 近空转」——只绑关键线程不足以解除小核饱和
                         if key_pressure && !scan_pool.is_empty() {
@@ -1519,7 +1577,7 @@ impl AffinityManager {
         }
     }
 
-    /// balance 小核高水位下的非关键前台线程升核（normal_busy）。
+    /// default 小核高水位下的非关键前台线程升核（normal_busy）。
     /// 仅在压力窗口内调用（窗口外零采样、零写入）；每轮最多采样 FG_SCAN_WINDOW 个
     /// （游标轮转）以限制新增文件 IO。判定复用共享的 `busy_window_update`（两窗防抖），
     /// 绑定后 util 跌到 FG_BUSY_RELEASE_UTIL_PCT 以下连续 DEMOTE_STREAK 轮才回落全核——
@@ -1618,6 +1676,65 @@ impl AffinityManager {
             "{}",
             t_with_args("affinity-demoted", &fluent_args!("tid" => tid.to_string()))
         );
+    }
+
+    //  实验室静态分组（contingency/babel）
+
+    /// 进入/纠偏静态分组：停线程迁移与动态分组（release 恢复此前接管），按模式写
+    /// 各业务组 cpus。已在同模式时仅重写（框架写回的周期纠偏），快照不重复记录。
+    pub fn lab_static_apply(&mut self, mode: &str) {
+        if self.lab_static_mode.as_deref() != Some(mode) {
+            // 先恢复此前接管的收窄（top-app cpus/uclamp/线程绑定回到系统值），
+            // lab 快照记录的才是真实原值
+            self.release();
+            self.lab_group_snapshot.clear();
+            self.lab_static_mode = Some(mode.to_string());
+        }
+        match mode {
+            "contingency" => {
+                // 后台进程全部压到 0-1 两颗小核；前台/顶部用全部核心
+                let bg = little_pair_list();
+                let all = all_cores_list();
+                set_groups_cpus_tracked(
+                    &[GROUP_TOP_APP, GROUP_FOREGROUND],
+                    &all,
+                    &mut self.lab_group_snapshot,
+                );
+                set_groups_cpus_tracked(
+                    BACKGROUND_GROUPS.as_slice(),
+                    &bg,
+                    &mut self.lab_group_snapshot,
+                );
+            }
+            "babel" => {
+                // 规整化：后台→小核，前台/顶部→大核+超大核，系统进程→大核
+                let bg = little_list();
+                let fg = big_plus_prime_list();
+                let sys = big_list();
+                set_groups_cpus_tracked(
+                    &[GROUP_TOP_APP, GROUP_FOREGROUND],
+                    &fg,
+                    &mut self.lab_group_snapshot,
+                );
+                set_groups_cpus_tracked(&["system-background"], &sys, &mut self.lab_group_snapshot);
+                set_groups_cpus_tracked(
+                    &["background", "restricted"],
+                    &bg,
+                    &mut self.lab_group_snapshot,
+                );
+            }
+            _ => {}
+        }
+    }
+
+    /// 退出静态分组：恢复各组原值（此后接管方自行 apply）
+    pub fn lab_static_deactivate(&mut self) {
+        if self.lab_static_mode.take().is_none() {
+            return;
+        }
+        for (group, cpus) in self.lab_group_snapshot.drain(..) {
+            write_cpuset_cpus(&group, &cpus);
+        }
     }
 
     //  cgroup 布局 / uclamp / 释放

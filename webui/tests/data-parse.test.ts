@@ -12,7 +12,7 @@ function row(overrides: Partial<Record<string, string>> = {}): string {
   const base: Record<string, string> = {
     timestamp: '12:00:01.000',
     type: 'snap',
-    mode: 'balance',
+    mode: 'default',
     package: 'com.tencent.mm',
     charge: 'discharging',
     screen_on: '1',
@@ -72,7 +72,7 @@ describe('status.csv 解析', () => {
     expect(rows).toHaveLength(1)
     const r = rows[0]
     expect(r.timestamp).toBe('12:00:01.000')
-    expect(r.mode).toBe('balance')
+    expect(r.mode).toBe('default')
     expect(r.pkg).toBe('com.tencent.mm')
     expect(r.screenOn).toBe(true)
     expect(r.clgActive).toBe(true)
@@ -103,7 +103,7 @@ describe('status.csv 解析', () => {
   })
 
   it('窗口截断产生的残缺行与非 snap 行都被过滤', () => {
-    const partial = '12:00:02.000,snap,balance'
+    const partial = '12:00:02.000,snap,default'
     const other = row({ type: 'fg' })
     const rows = parseStatusCsv([partial, other, row()].join('\n'))
     expect(rows).toHaveLength(1)

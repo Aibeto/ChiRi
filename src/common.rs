@@ -6,6 +6,7 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::env;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -239,6 +240,36 @@ pub fn scenemode_enabled() -> bool {
     SCENEMODE_ENABLED.load(Ordering::Acquire)
 }
 
+// 实验室（rhine）运行时覆盖层：实验室模式启用时，把两项「没有持久化载体」的影响收在这里。
+// global_mode 在 rules.yaml 里是编译期嵌入，磁盘副本不生效，写文件没用；special_tuned
+// 白名单同样是 include_str! 嵌入，没有任何外部开关。fas_enabled / scenemode_enabled 不走
+// 这里——它们有 meta.yaml 载体，实验室直接改写文件，WebUI 的开关才能同步显示为关。
+// 读取方（determine_mode / 特调判定）都在高频路径上，只读原子量，运行时不碰磁盘。
+static LAB_GLOBAL_MODE: Mutex<Option<String>> = Mutex::new(None);
+static LAB_SPECIAL_TUNED_DISABLED: AtomicBool = AtomicBool::new(false);
+
+/// 实验室覆盖的全局模式（None = 无覆盖，按 rules.yaml 的 global_mode）
+pub fn lab_global_mode() -> Option<String> {
+    LAB_GLOBAL_MODE.lock().ok().and_then(|g| g.clone())
+}
+
+/// 设置或清除实验室的全局模式覆盖
+pub fn set_lab_global_mode(mode: Option<String>) {
+    if let Ok(mut g) = LAB_GLOBAL_MODE.lock() {
+        *g = mode;
+    }
+}
+
+/// 实验室是否关闭了所有场景特调
+pub fn lab_special_tuned_disabled() -> bool {
+    LAB_SPECIAL_TUNED_DISABLED.load(Ordering::Acquire)
+}
+
+/// 设置实验室的场景特调总闸（true = 所有特调判定失效）
+pub fn set_lab_special_tuned_disabled(disabled: bool) {
+    LAB_SPECIAL_TUNED_DISABLED.store(disabled, Ordering::Release);
+}
+
 /// 返回当前应加载的配置文件路径：
 /// - 命中 Chiri 目标 SoC 且存在处理器子目录 `config/{命中片段}/meta.yaml` 时，使用该文件
 /// - 否则回退到默认 `config/meta.yaml`
@@ -338,7 +369,12 @@ pub fn special_tuned_entries() -> &'static [SpecialTunedEntry] {
 
 /// 查询包名命中的白名单条目：先按精确包名匹配（文件顺序），未命中再按正则条目。
 /// 调度优先级：rules.yaml 用户自定义 app_modes > 特调白名单回退模式 > global_mode。
+/// 实验室（rhine）关闭全部场景特调期间恒返回 None（`special_tuned_mode` 与
+/// `is_special_mode_allowed` 都由本函数派生，一并失效）。
 pub fn special_tuned_entry(pkg: &str) -> Option<&'static SpecialTunedEntry> {
+    if lab_special_tuned_disabled() {
+        return None;
+    }
     let list = special_tuned_entries();
     list.iter()
         .find(|e| e.regex.is_none() && e.package == pkg)
@@ -350,8 +386,13 @@ pub fn special_tuned_mode(pkg: &str) -> Option<String> {
     special_tuned_entry(pkg).map(|e| e.fallback.clone())
 }
 
-/// 判断模式名是否为特调模式（任一白名单条目的 modes 列表中出现）
+/// 判断模式名是否为特调模式（任一白名单条目的 modes 列表中出现）。
+/// 实验室关闭全部场景特调期间恒 false——chiri 主循环里所有 `is_special_mode(current_mode)`
+/// 分支随之走普通模式路径，正在跑的特调模式会被当作普通模式收尾。
 pub fn is_special_mode(mode: &str) -> bool {
+    if lab_special_tuned_disabled() {
+        return false;
+    }
     special_tuned_entries()
         .iter()
         .any(|e| e.modes.iter().any(|m| m == mode))
@@ -582,6 +623,12 @@ pub fn embedded_akmode_str() -> &'static str {
     embedded_config_file("normal/akmode.yaml").unwrap_or_default()
 }
 
+/// 嵌入的 rhine-init.yaml（实验室模式定义）：只给守护进程读，不落盘也不对外暴露
+/// （xtask 的 BIN_ONLY 会在打包时移除）。WebUI 的模式列表与文案是硬编码的。
+pub fn embedded_rhine_init_str() -> &'static str {
+    embedded_config_file("rhine-init.yaml").unwrap_or_default()
+}
+
 /// 嵌入的 rules.yaml（模块根，编译期打包进二进制）：与其他只读文件（akmode/scenemode/
 /// fas 配置）同口径——运行时一律读嵌入内容，磁盘文件仅作对外展示副本（启动时复制出去，
 /// 被篡改不影响调度行为）。
@@ -616,9 +663,11 @@ pub fn embedded_ftl_str(lang: &str) -> &'static str {
     embedded_config_file(rel).unwrap_or_default()
 }
 
-/// 磁盘 meta.yaml 的严格结构：七个字段全部必填、拒绝未知字段。
+/// 磁盘 meta.yaml 的严格结构：八个字段全部必填、拒绝未知字段。
 /// 任一缺失/多余/类型不符，或取值不在白名单内，整文件判非法——
 /// 由 sync_meta_snapshot 用二进制内嵌默认值整体覆盖修正。
+/// **新增字段时四个 meta.yaml 模板（config/meta.yaml 与三个 {soc}/meta.yaml）与 WebUI
+/// 的 META_FIELDS 必须同步**：全必填意味着漏改一处就会让整个文件判非法、用户设置一起丢。
 // [external_meta]
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -630,10 +679,12 @@ struct MetaYamlFile {
     dev_record: bool,
     fas_enabled: bool,
     scenemode_enabled: bool,
+    /// 线程摆放总开关（affinity + core_ctl），详见 ExternalMetaOverrides
+    thread_bind: bool,
 }
 
 /// 磁盘 meta.yaml 校验通过后交给 Config::load 的覆盖值（全字段必有效）。
-/// daemon 只消费其中 5 项（name/author 仅 WebUI 展示，直接读文件即可）。
+/// daemon 只消费其中 6 项（name/author 仅 WebUI 展示，直接读文件即可）。
 #[derive(Debug, Clone)]
 pub struct ExternalMetaOverrides {
     pub loglevel: String,
@@ -641,6 +692,11 @@ pub struct ExternalMetaOverrides {
     pub dev_record: bool,
     pub fas_enabled: bool,
     pub scenemode_enabled: bool,
+    /// 线程摆放总开关：false = 关闭线程功能，CPU 亲和/绑核与 core_ctl 核心在线
+    /// 接管全部交还系统（**把所有绑定分配改成全核心**）。与机型内嵌 config.yaml 的
+    /// `Affinity.enabled` / `CoreCtl.enabled` 取「与」——任一为假即视为关闭线程功能，
+    /// 见 chiri/config.rs::Config::load。
+    pub thread_bind: bool,
 }
 
 impl Default for ExternalMetaOverrides {
@@ -651,6 +707,7 @@ impl Default for ExternalMetaOverrides {
             dev_record: false,
             fas_enabled: true,
             scenemode_enabled: true,
+            thread_bind: true,
         }
     }
 }
@@ -711,6 +768,7 @@ fn parse_disk_meta(text: &str) -> Option<ExternalMetaOverrides> {
         dev_record: f.dev_record,
         fas_enabled: f.fas_enabled,
         scenemode_enabled: f.scenemode_enabled,
+        thread_bind: f.thread_bind,
     })
 }
 
@@ -782,7 +840,7 @@ pub fn sync_rules_snapshot(path: &Path) -> bool {
 
 /// 无 panic 的原子文件写：tmp + rename 失败时回退 try_write_file，全程不 panic。
 /// 供快照复制使用（调用方自行决定失败后的跳过策略）。
-fn write_file_no_panic(path: &Path, bytes: &[u8]) -> bool {
+pub(crate) fn write_file_no_panic(path: &Path, bytes: &[u8]) -> bool {
     let file_name = path
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
@@ -795,4 +853,90 @@ fn write_file_no_panic(path: &Path, bytes: &[u8]) -> bool {
         let _ = std::fs::remove_file(&tmp_path);
     }
     atomic_ok || crate::utils::try_write_file(path, bytes).is_ok()
+}
+
+/// meta.yaml 顶层行替换：只匹配缩进为 0 的 `键: 值` 行，保留键名大小写、分隔空白与
+/// 行内注释。字段不存在返回 None，调用方据此放弃写入，绝不退化成整文件重排。
+///
+/// 为什么不直接 serde 反序列化再序列化整份：`MetaYamlFile` 是 8 字段全必填 +
+/// deny_unknown_fields，整文件重排会吃掉用户写的注释；而且只要漏掉一个字段，
+/// 下一次 sync_meta_snapshot 就会判非法，用内嵌默认把整个文件覆盖掉。
+/// 口径与 WebUI `contract/meta.ts::replaceTopLevelField` 一致，两边不要各写一套。
+pub(crate) fn replace_top_level_bool(content: &str, field: &str, value: bool) -> Option<String> {
+    let want = field.to_ascii_lowercase();
+    let mut lines: Vec<String> = content.split('\n').map(str::to_string).collect();
+    for line in lines.iter_mut() {
+        let trimmed = line.trim_start();
+        if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with('-') {
+            continue;
+        }
+        // 只认顶层：有缩进的行（嵌套段）跳过
+        if line.len() != trimmed.len() {
+            continue;
+        }
+        let Some(colon) = trimmed.find(':') else {
+            continue;
+        };
+        let key = trimmed[..colon].trim();
+        if key.is_empty() || key.contains(char::is_whitespace) || key.contains('#') {
+            continue;
+        }
+        if key.to_ascii_lowercase() != want {
+            continue;
+        }
+        let rest = &trimmed[colon + 1..];
+        let sep: String = rest.chars().take_while(|c| c.is_whitespace()).collect();
+        let tail = &rest[sep.len()..];
+        let comment = match tail.find(" #") {
+            Some(i) => &tail[i..],
+            None => "",
+        };
+        *line = format!("{key}:{sep}{value}{comment}");
+        return Some(lines.join("\n"));
+    }
+    None
+}
+
+/// 一次写盘改掉 meta.yaml 的三个总开关（None = 该项不动）。
+///
+/// 返回 false 表示文件没有被改到期望状态（字段缺失 / 读写失败），调用方据此放弃
+/// 本次实验室套用。多个开关必须一次写完：分两次写会触发两轮 config_watcher 热重载，
+/// 中间态（只关了一半）会真的被 apply_system_tweaks 执行一遍。
+pub(crate) fn rewrite_meta_toggles(
+    path: &Path,
+    fas: Option<bool>,
+    scenemode: Option<bool>,
+    thread_bind: Option<bool>,
+) -> bool {
+    if fas.is_none() && scenemode.is_none() && thread_bind.is_none() {
+        return true;
+    }
+    let Ok(original) = std::fs::read_to_string(path) else {
+        log::warn!("[Rhine] meta.yaml unreadable: {}", path.display());
+        return false;
+    };
+    let mut text = original.clone();
+    for (field, value) in [
+        ("fas_enabled", fas),
+        ("scenemode_enabled", scenemode),
+        ("thread_bind", thread_bind),
+    ] {
+        let Some(v) = value else { continue };
+        match replace_top_level_bool(&text, field, v) {
+            Some(next) => text = next,
+            None => {
+                log::warn!("[Rhine] meta.yaml has no `{field}` field, give up writing");
+                return false;
+            }
+        }
+    }
+    // 值本来就对：不写盘，省掉一次无谓的热重载
+    if text == original {
+        return true;
+    }
+    if !write_file_no_panic(path, text.as_bytes()) {
+        log::warn!("[Rhine] meta.yaml write failed: {}", path.display());
+        return false;
+    }
+    true
 }

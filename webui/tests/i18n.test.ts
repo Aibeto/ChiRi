@@ -45,10 +45,11 @@ describe('文案完整性', () => {
     }
     for (const lang of ['zh', 'en']) expect(`lang.${lang}` in zh).toBe(true)
     for (const mode of [
-      'powersave',
-      'balance',
-      'performance',
-      'fast',
+      'reduce',
+      'default',
+      'boost',
+      'vector',
+      'down',
       'fas',
       'special',
       'unknown'

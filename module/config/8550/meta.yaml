@@ -6,3 +6,4 @@ loglevel: "INFO"
 dev_record: true
 fas_enabled: true
 scenemode_enabled: true
+thread_bind: true

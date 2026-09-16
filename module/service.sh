@@ -1,5 +1,5 @@
 #!/system/bin/sh
-# service.sh: [boot-wait] [paths] [cleanup] [permissions] [watchdog-start]
+# service.sh: [boot-wait] [paths] [cleanup] [lab-reset] [permissions] [watchdog-start]
 #
 # yumi 模块启动脚本 (service.sh)
 #
@@ -52,6 +52,13 @@ if [ -f "$LOG_DIR/watchdog.pid" ]; then
   rm -f "$LOG_DIR/watchdog.pid"
 fi
 killall -9 yumi > /dev/null 2>&1
+
+# [lab-reset] 
+# 实验室（rhine）状态不跨重启：开机先清掉 rhine.chr，重启后实验室即为关闭。
+# 只删 rhine.chr，不碰 rhine-back.chr —— 「上次启用过实验室」的唯一信号就是残留的
+# 快照文件，daemon 启动时读到它会按它把改动还原回去，还原完自己删除。
+# action.sh（手动重启调度）刻意不删：实验室状态在设备重启前一直保留。
+rm -f "$MODDIR/rhine.chr"
 
 # [permissions] 
 # 设置权限

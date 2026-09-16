@@ -160,15 +160,15 @@ impl FasController {
     // [decay] 
     // Phase 6: 快速衰减
 
-    fn apply_fast_decay(&mut self, avg_fps: f32) {
+    fn apply_steady_decay(&mut self, avg_fps: f32) {
         let floor = self.effective_perf_floor();
         let ceil = self.effective_perf_ceil();
-        let thresh = scale_frames(self.cfg.fast_decay_frame_threshold, self.current_target_fps);
+        let thresh = scale_frames(self.cfg.steady_decay_frame_threshold, self.current_target_fps);
         let high_fps_factor = (self.current_target_fps / 60.0).powf(0.70).max(1.0);
         let adjusted_thresh = (thresh as f32 * high_fps_factor) as u32;
 
         // 阈值随 fps 升高而升高，120fps 时约 0.75，144fps 时约 0.80
-        let dynamic_decay_threshold = self.cfg.fast_decay_perf_threshold
+        let dynamic_decay_threshold = self.cfg.steady_decay_perf_threshold
             + ((self.current_target_fps - 60.0).max(0.0) * 0.002).min(0.15);
 
         if self.consecutive_normal_frames >= adjusted_thresh
@@ -185,12 +185,12 @@ impl FasController {
                 1.0
             };
             let step = ((self.perf_index - 0.50) / 0.50
-                * self.cfg.fast_decay_max_step
+                * self.cfg.steady_decay_max_step
                 * fps_dampen
                 * decay_scale)
                 .clamp(
-                    self.cfg.fast_decay_min_step * fps_dampen,
-                    self.cfg.fast_decay_max_step * fps_dampen * decay_scale,
+                    self.cfg.steady_decay_min_step * fps_dampen,
+                    self.cfg.steady_decay_max_step * fps_dampen * decay_scale,
                 );
             self.perf_index -= step;
             self.consecutive_normal_frames = 0;
@@ -339,7 +339,7 @@ impl FasController {
         let act = self.update_pid_and_jank(actual_ms);
 
         // Phase 6: 衰减
-        self.apply_fast_decay(avg_fps);
+        self.apply_steady_decay(avg_fps);
         self.update_stability_forgiveness(avg_fps);
 
         // 心跳日志

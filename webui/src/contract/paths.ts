@@ -28,6 +28,12 @@ export const REL = {
   rules: 'rules.yaml',
   specialTuned: 'special_tuned.yaml',
   fasWhitelist: 'fas_whitelist.yaml',
+  /** 实验室状态（对外暴露，可手改；空/只有注释 = 未启用） */
+  rhine: 'rhine.chr',
+  /** 实验室原值快照，只在启用期间存在（界面只读展示，写入方是守护进程） */
+  rhineBack: 'rhine-back.chr',
+  /** DOWN 停摆状态（对外暴露，可手改；写了 down = 调度停摆） */
+  down: 'down.chr',
   moduleProp: 'module.prop',
   actionSh: 'action.sh',
   daemonLog: 'logs/daemon.log',

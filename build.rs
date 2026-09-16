@@ -209,6 +209,7 @@ fn assert_required_configs() {
         "normal/akmode.yaml",
         "normal/scenemode.yaml",
         "normal/fas.yaml",
+        "rhine-init.yaml",
         "i18n/zh.ftl",
         "i18n/en.ftl",
     ];

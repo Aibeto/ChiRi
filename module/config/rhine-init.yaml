@@ -1,0 +1,49 @@
+# rhine-init.yaml: 实验室（rhine）模式定义。编译期嵌入守护进程二进制，不落盘、不对外暴露。
+#
+# 每个实验室模式启用时，守护进程按这里的条目去改其它调度模式；改动前的原值备份到
+# 模块根的 rhine-back.chr，关闭实验室或重启设备时按备份还原。
+#
+# 影响项（缺省的条目 = 该项不变更，只有写出值的项才会被套用）：
+#   global_mode: <模式名>          运行时覆盖 rules.yaml 的 global_mode，不改文件
+#   fas_enabled: true|false        改写生效 meta.yaml 的 fas_enabled，WebUI 开关同步变化
+#   scenemode_enabled: true|false  改写生效 meta.yaml 的 scenemode_enabled
+#   special_tuned: true|false      运行时开关，false 时所有场景特调判定失效
+#   thread_bind: true|false        改写生效 meta.yaml 的 thread_bind，false = 关闭线程
+#                                  功能：CPU 亲和/绑核与 core_ctl 核心在线接管全部交还
+#                                  系统（所有绑定分配改成全核心），WebUI 开关同步变化
+#
+# 新增模式在这里追加条目即可（key 就是写进 rhine.chr 的模式名），但 WebUI 的模式列表
+# 与文案是硬编码的（webui/src/data/lab.ts、webui/src/i18n/locales/*.ts），要一起改。
+
+# key 就是写进 rhine.chr 的模式名，同时点明它实际做了什么（界面上显示的是另一个名字）。
+# `off` 是保留字（= 强制关闭，见 module/rhine.chr 的说明），模式 key 不得取这个名字。
+
+# vector：把全局模式固定到 vector，同时关掉帧感知调度、息屏场景模式与所有场景特调，
+# 用最干净的性能模式跑高难图、排查干扰项。界面上显示 Vector Breakthrough。
+vector:
+  global_mode: vector
+  fas_enabled: false
+  scenemode_enabled: false
+  special_tuned: false
+
+# contingency：危机合约（实验室）。界面上显示 Contingency Contract。生效期间：
+# CPU+GPU 全核最高频、performance 内核调速器、停止线程亲和迁移、后台进程压到
+# 0-1 两颗小核、前台/顶部使用全部核心——行为在 chiri 按 current_mode=contingency
+# 分支实现；这里的开关项确保实验室期间不被 FAS/scenemode/特调抢接管。
+contingency:
+  global_mode: contingency
+  fas_enabled: false
+  scenemode_enabled: false
+  special_tuned: false
+
+# babel：规整化模式（实验室）。界面上显示 Babel。生效期间：停止线程亲和迁移，
+# 所有后台放到小核、前台/顶部放到大核+超大核、系统进程放到大核——行为在 chiri
+# 按 current_mode=babel 分支实现；开关项同上（防 FAS/scenemode/特调抢接管）。
+babel:
+  global_mode: babel
+  fas_enabled: false
+  scenemode_enabled: false
+  special_tuned: false
+
+# frozen：预留条目，当前不产生任何影响。界面上显示 Frozen。
+frozen: {}

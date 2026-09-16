@@ -1,6 +1,6 @@
 // meta.ts: [fields] [active] [read] [validate] [write]
 // meta.yaml 是唯一可写配置。守护进程侧规则（src/common.rs::parse_disk_meta +
-// sync_meta_snapshot）：7 字段全必填、拒绝未知键、类型必须严格（布尔只能是
+// sync_meta_snapshot）：8 字段全必填、拒绝未知键、类型必须严格（布尔只能是
 // YAML 字面量 true/false），任一异常 → 整个文件被内嵌默认覆盖（用户其他键一起丢）。
 // 因此写入策略是「单次读-改-写 + 顶层行替换」，只动目标字段、保留注释与其他键。
 import { load as loadYaml } from 'js-yaml'
@@ -17,7 +17,8 @@ export const META_FIELDS = [
   'loglevel',
   'dev_record',
   'fas_enabled',
-  'scenemode_enabled'
+  'scenemode_enabled',
+  'thread_bind'
 ] as const
 export type MetaField = (typeof META_FIELDS)[number]
 
@@ -27,7 +28,8 @@ export const WRITABLE_FIELDS = [
   'loglevel',
   'dev_record',
   'fas_enabled',
-  'scenemode_enabled'
+  'scenemode_enabled',
+  'thread_bind'
 ] as const
 export type WritableField = (typeof WRITABLE_FIELDS)[number]
 
@@ -140,7 +142,7 @@ export function validateMeta(values: Record<string, unknown>): string[] {
       problems.push(`loglevel 只能是 ${LOG_LEVELS.join('/')}`)
     }
   }
-  for (const f of ['dev_record', 'fas_enabled', 'scenemode_enabled'] as const) {
+  for (const f of ['dev_record', 'fas_enabled', 'scenemode_enabled', 'thread_bind'] as const) {
     if (f in values && typeof values[f] !== 'boolean') {
       problems.push(`${f} 必须是布尔值 true/false`)
     }
@@ -160,6 +162,7 @@ export function validateFieldValue(field: WritableField, value: string | boolean
     case 'dev_record':
     case 'fas_enabled':
     case 'scenemode_enabled':
+    case 'thread_bind':
       return typeof value === 'boolean' ? null : `${field} 必须是布尔值`
   }
 }
@@ -198,7 +201,7 @@ export function replaceTopLevelField(
   return null
 }
 
-function utf8ToBase64(input: string): string {
+export function utf8ToBase64(input: string): string {
   const bytes = new TextEncoder().encode(input)
   let bin = ''
   const CHUNK = 0x8000

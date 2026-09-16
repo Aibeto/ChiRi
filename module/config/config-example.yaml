@@ -5,19 +5,19 @@
 #
 # 注意：调优配置编译期嵌入二进制（module/config 目录整体 include_dir!），磁盘文件只是
 # "嵌入内容 + meta 覆盖"的快照。daemon 启动/重载时会把嵌入内容
-# 写回磁盘，篡改会被还原。允许外部修改的字段只有四个：
-# meta.loglevel / meta.dev_record / meta.fas_enabled / meta.scenemode_enabled
-# （WebUI 日志等级/开发记录/FAS/场景模式开关落点）。
+# 写回磁盘，篡改会被还原。允许外部修改的字段只有六个：
+# meta.language / meta.loglevel / meta.dev_record / meta.fas_enabled /
+# meta.scenemode_enabled / meta.thread_bind（WebUI 开关落点）。
 # 改调优参数要改这份模板源文件再重新编译。
 
 # [meta]
-# 允许外部修改的字段：loglevel + dev_record + fas_enabled + scenemode_enabled
-# （WebUI 开关，热重载生效）
-# language 等其余 meta 字段固定，外部修改无效且被快照自愈还原
+# 允许外部修改的字段：language + loglevel + dev_record + fas_enabled +
+# scenemode_enabled + thread_bind（WebUI 开关，热重载生效）
+# name/author 固定，外部修改无效且被快照自愈还原
 meta:
   name: "example_config" # 仅供文档参考，代码不解析
   author: "ChiRi" # 仅供文档参考
-  language: "zh" # en / zh；以嵌入值为准，外部修改无效（会被快照自愈还原）
+  language: "zh" # en / zh；WebUI 语言开关（守护进程热重载生效）
   loglevel: "INFO" # DEBUG / INFO / WARN / ERROR
   # 开发记录开关：true 时守护进程向 devimp/devimp_<前台包名>_<毫秒时间戳>.log
   # 写入按核调度诊断日志（tick/snap/place/aff/core/event），前台包名切换自动
@@ -28,11 +28,17 @@ meta:
   # ── 功能总开关（缺省 true，允许外部修改：手改后热重载即时生效；布尔值必须裸写）──
   # fas_enabled：FAS 帧感知调度总闸。false 后 fas_available() 恒为 false——
   #   determine_mode 不再产生 fas 模式、FAS 监测线程不启动、运行中 FAS 实例立即
-  #   注销并按屏幕状态恢复 balance/doze 接管。
+  #   注销并按屏幕状态恢复 default/doze 接管。
   fas_enabled: true
   # scenemode_enabled：息屏场景模式总闸。false 后息屏不再进入 scenemode；
   # 已激活的下个负载 tick 自动退出并恢复 affinity/core_ctl 快照 + doze 配置。
   scenemode_enabled: true
+  # thread_bind：线程摆放总闸。false 后 CPU 亲和/绑核（cpuset / uclamp /
+  #   sched_setaffinity）与 core_ctl 核心在线接管全部交还系统（所有绑定分配改成
+  #   全核心）：Affinity 走 release() 逐线程恢复全核 + cpuset/uclamp 快照回写，
+  #   CoreCtl 回 Normal 恢复 min_cpus/online 快照。与机型内嵌 config.yaml 的
+  #   Affinity.enabled / CoreCtl.enabled 取「与」。
+  thread_bind: true
 
 # [function]
 function:
@@ -70,7 +76,7 @@ scene_mode_delay_secs: 300
 
 # [affinity]
 # CPU 亲和与线程迁移（ChiRi 专属）
-# boost 模式（performance/fast/特调/fas）下收窄 top-app/foreground cpuset
+# boost 类模式（boost/vector/特调/fas）下收窄 top-app/foreground cpuset
 # 到大核+超大核、后台分组压小核；线程层按核心粒度做 sched_setaffinity
 # 单核放置（前台关键线程→prime、普通→big；后台繁忙线程动态 promote，
 # 空闲 demote；选核排除离线核）。
@@ -102,7 +108,7 @@ CoreCtl:
   # 小核 + 大核全开常驻（频率上限由 scenemode CLG 配置压到 0.15 档），
   # 编号最大的小核独占给调度服务（从业务 cpuset 组移除 + 自身线程移入
   # 根组 + 自钉，后台任务堵塞不了调度服务）。常驻簇（小核+大核）util
-  # 持续 10s 顶满 70% 视为饱和 → 自动退回 powersave 并进入 300s 冷却
+  # 持续 10s 顶满 70% 视为饱和 → 自动退回 reduce 并进入 300s 冷却
   # （期间不得重进 scenemode）；重进前还须负载回落到阈值下方。亮屏/退出
   # 按快照恢复，维持期每 2s 纠偏（厂商偷拉起的核重新下线、框架加回
   # 保留核重新移除）。逐核回读验证，内核拒绝的核自动跳过。与 boost 互斥。
@@ -114,7 +120,7 @@ CoreCtl:
 # 电池温度是主参考（壳体发热由电池主导，温升慢但持续）；
 # CPU 温度只在极端热时参与（内核 95°C 温控才是主力）。
 # 豁免档 free_above：当前性能比已高于该值时不压制——高负载不挡路。
-# 仅对 CLG 模式生效（fast/akmode 不受影响）。
+# 仅对 CLG 模式生效（vector/akmode 不受影响）。
 # 温度输入经滤波（物理范围门 + 毛刺丢弃 + 3 样本中值 + 斜率限制）：
 # soc_max 等合成温区读数跳变极大（实测 2s 内 ±25°C），不滤波会让 cap
 # 以 ~8s 周期反复跳变（bang-bang 振荡，高负载游戏周期性卡顿）。
@@ -142,7 +148,7 @@ Thermal:
 # [modes]
 # 性能模式（CLG 调频参数）
 #
-# 四档模式：powersave / balance / performance / fast。
+# 四档模式：reduce / default / boost / vector。
 # 每档独立一组 cpu_load_governor 参数，结构完全相同。
 #
 # CLG 调频语义（动态上限）：
@@ -154,10 +160,10 @@ Thermal:
 #   perf_floor / perf_ceil / perf_init 约束的是"上限"，
 #   实际空闲频率由 schedutil 自己决定。
 #
-# fast 模式不走 CLG：min=max=硬件最高频硬锁，见 src/chiri/fast.rs。
+# vector 模式不走 CLG：min=max=硬件最高频硬锁，见 src/chiri/fast.rs。
 
-# 替换成 powersave / balance / performance
-powersave:
+# 替换成 reduce / default / boost
+reduce:
   cpu_load_governor:
     # 升频阈值：cluster 最大 util >= 此值时进入升频区间（0..1）
     # 调大更难触发升频，省电但响应慢

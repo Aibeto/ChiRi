@@ -314,13 +314,13 @@ pub struct Config {
 
     // 按场景划分的性能模式
     #[serde(default)]
-    pub powersave: Mode,
+    pub reduce: Mode,
     #[serde(default)]
-    pub balance: Mode,
+    pub default: Mode,
     #[serde(default)]
-    pub performance: Mode,
+    pub boost: Mode,
     #[serde(default)]
-    pub fast: Mode,
+    pub vector: Mode,
 }
 
 impl Config {
@@ -342,10 +342,10 @@ impl Config {
 
     pub fn get_mode(&self, mode_name: &str) -> Option<&Mode> {
         match mode_name {
-            "powersave" => Some(&self.powersave),
-            "balance" => Some(&self.balance),
-            "performance" => Some(&self.performance),
-            "fast" => Some(&self.fast),
+            "reduce" => Some(&self.reduce),
+            "default" => Some(&self.default),
+            "boost" => Some(&self.boost),
+            "vector" => Some(&self.vector),
             _ => None,
         }
     }

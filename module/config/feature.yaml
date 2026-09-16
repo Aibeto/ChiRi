@@ -1,5 +1,5 @@
 # yumi 配置文件，不能动
-# config.yaml: [meta] [function] [io-settings] [cpu-idle] [powersave] [balance] [performance] [fast]
+# config.yaml: [meta] [function] [io-settings] [cpu-idle] [reduce] [default] [boost] [vector]
 
 # [function]
 # 主要功能开关
@@ -20,9 +20,10 @@ IO_Settings:
 CpuIdle:
   current_governor: ""
 
-# [powersave]
-# 省电模式
-powersave:
+# [reduce]
+# 省电模式（CLG 家族）：较 default 升频更保守（up 0.85>0.80）、降频更激进
+# （down 0.60>0.50、rate_limit 2），频率上限压到 0.70
+reduce:
   cpu_load_governor:
     up_threshold: 0.85
     down_threshold: 0.60
@@ -43,9 +44,9 @@ powersave:
     spike_jump_threshold: 0.35
     spike_decay: 0.30
 
-# [balance]
-# 均衡模式
-balance:
+# [default]
+# 均衡模式（CLG 家族）：默认档兼参考基线
+default:
   cpu_load_governor:
     up_threshold: 0.80
     down_threshold: 0.50
@@ -66,9 +67,10 @@ balance:
     spike_jump_threshold: 0.35
     spike_decay: 0.30
 
-# [performance]
-# 性能模式
-performance:
+# [boost]
+# 性能模式（CLG 家族）：较 default 升频更激进（up 0.65<0.80）、降频略消极
+# （down 0.40<0.50、rate_limit 5），headroom 1.40 给线程/核心更大余量
+boost:
   cpu_load_governor:
     up_threshold: 0.65
     down_threshold: 0.40
@@ -89,9 +91,10 @@ performance:
     spike_jump_threshold: 0.35
     spike_decay: 0.30
 
-# [fast]
-# 极速模式
-fast:
+# [vector]
+# 极速模式（rhine 家族，仅实验室）：全核最高频——运行时走 fast_lock 硬锁
+# （min=max=hw_max、governor 保持 schedutil），不读本段参数；本段仅为缺省值来源
+vector:
   cpu_load_governor:
     up_threshold: 0.01
     down_threshold: 0.01

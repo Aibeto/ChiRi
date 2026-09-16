@@ -210,10 +210,10 @@ fas_rules:
   downgrade_boost_perf_inc: 0.18
   downgrade_boost_duration: 45
 
-  fast_decay_frame_threshold: 75
-  fast_decay_perf_threshold: 0.70
-  fast_decay_max_step: 0.022
-  fast_decay_min_step: 0.004
+  steady_decay_frame_threshold: 75
+  steady_decay_perf_threshold: 0.70
+  steady_decay_max_step: 0.022
+  steady_decay_min_step: 0.004
 
   jank_cooldown_frames: 15
   max_inc_damped: 0.045
@@ -260,10 +260,10 @@ fas_rules:
 | `gear_dampen_frames`               | int     | 60                 | Dampen frames after gear switch; no new gear switch during this period.                                           |
 | `downgrade_boost_perf_inc`         | float   | 0.18               | Emergency perf boost increment before a downgrade.                                                                |
 | `downgrade_boost_duration`         | int     | 45                 | Duration (frames) of the emergency boost before a downgrade.                                                      |
-| `fast_decay_frame_threshold`       | int     | 75                 | Consecutive normal frames threshold to trigger fast decay.                                                        |
-| `fast_decay_perf_threshold`        | float   | 0.70               | Perf threshold below which fast decay is suppressed.                                                              |
-| `fast_decay_max_step`              | float   | 0.022              | Maximum fast decay step size.                                                                                     |
-| `fast_decay_min_step`              | float   | 0.004              | Minimum fast decay step size.                                                                                     |
+| `steady_decay_frame_threshold`       | int     | 75                 | Consecutive normal frames threshold to trigger steady decay.                                                        |
+| `steady_decay_perf_threshold`        | float   | 0.70               | Perf threshold below which steady decay is suppressed.                                                              |
+| `steady_decay_max_step`              | float   | 0.022              | Maximum steady decay step size.                                                                                     |
+| `steady_decay_min_step`              | float   | 0.004              | Minimum steady decay step size.                                                                                     |
 | `jank_cooldown_frames`             | int     | 15                 | Jank cooldown frames; maintains higher frequency during cooldown.                                                 |
 | `max_inc_damped`                   | float   | 0.045              | Maximum PID output in damped state.                                                                               |
 | `max_inc_normal`                   | float   | 0.075              | Maximum PID output in normal state.                                                                               |
@@ -344,8 +344,8 @@ CpuIdle:
 Each performance mode can independently configure CPU Load Governor (CLG) parameters:
 
 ```yaml
-# Powersave — maximize battery life
-powersave:
+# reduce — maximize battery life
+reduce:
   cpu_load_governor:
     up_threshold: 0.85
     down_threshold: 0.60
@@ -364,8 +364,8 @@ powersave:
     down_fast_threshold: 0.10
     down_fast_mult: 2.5
 
-# Balance — daily use
-balance:
+# default — daily use
+default:
   cpu_load_governor:
     up_threshold: 0.80
     down_threshold: 0.50
@@ -384,8 +384,8 @@ balance:
     down_fast_threshold: 0.10
     down_fast_mult: 2.5
 
-# Performance — prioritize responsiveness
-performance:
+# boost — prioritize responsiveness
+boost:
   cpu_load_governor:
     up_threshold: 0.65
     down_threshold: 0.40
@@ -404,8 +404,8 @@ performance:
     down_fast_threshold: 0.10
     down_fast_mult: 2.5
 
-# Fast — maximum performance
-fast:
+# vector — maximum performance
+vector:
   cpu_load_governor:
     up_threshold: 0.01
     down_threshold: 0.01

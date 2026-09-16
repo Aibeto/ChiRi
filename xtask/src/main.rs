@@ -122,11 +122,13 @@ fn build(sh: &Shell, no_pack: bool) -> Result<()> {
     // 4.5 从模块包移除仅二进制使用的配置：运行时只读嵌入内容，磁盘上无任何读取方，
     //     取消对外暴露以缩小可篡改面（feature.yaml 为不可修改调优段，同理不落盘）。
     //     meta.yaml / rules.yaml / 特调与 FAS 导出文件有 WebUI 读取方，保留。
-    const BIN_ONLY: [&str; 4] = [
+    const BIN_ONLY: [&str; 5] = [
         "config/feature.yaml",
         "config/normal/akmode.yaml",
         "config/normal/scenemode.yaml",
         "config/normal/fas.yaml",
+        // 实验室模式定义：只给守护进程读，WebUI 不读（模式 key 与文案在 WebUI 侧硬编码）
+        "config/rhine-init.yaml",
     ];
     for rel in BIN_ONLY {
         let _ = fs::remove_file(temp_dir.join(rel));

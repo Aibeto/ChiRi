@@ -1,4 +1,4 @@
-# en.ftl: [main-monitor] [app-detect] [screen-detect] [monitors] [scheduler] [scheduler-config-watcher] [sysfs] [clg] [akmode] [touch] [fas] [fas-whitelist] [scheduler-settings] [fast-lock] [logger] [affinity] [corectl] [telemetry] [config-reload]
+# en.ftl: [main-monitor] [app-detect] [screen-detect] [monitors] [scheduler] [scheduler-config-watcher] [sysfs] [clg] [akmode] [touch] [fas] [fas-whitelist] [scheduler-settings] [fast-lock] [logger] [affinity] [corectl] [telemetry] [config-reload] [governor] [gpu]
 # --- Main & Monitor ---
 yumi-module-starting = yumi-module Unified Starting...
 scheduler-module-started = Scheduler module started.
@@ -22,6 +22,7 @@ main-chiri-scheduler-selected = [Main] Specific SoC detected, enabling Chiri sch
 main-special-tuned-exported = [Main] exported { $count } internal special-tuned whitelist entries to special_tuned.yaml
 main-log-archive-submitted = [Main] previous logs archived, packing in background to logd/{ $zip }
 main-devimp-archive-submitted = [Main] previous devimp diagnostics archived, packing in background to logd/{ $zip }
+main-log-short-session-discarded = [Main] previous session lived less than 30s; its logs were discarded without packing
 monitor-thread-start-screen = [Main] Starting screen state watcher thread...
 monitor-thread-start-config-watch = [Main] Starting config watcher thread...
 monitor-thread-start-fps = [Main] Starting eBPF FPS monitor thread...
@@ -47,7 +48,7 @@ app-detect-special-override = [AppDetect] Special profile applied: { $pkg } -> {
 app-detect-special-rejected = [AppDetect] Non-whitelisted app { $pkg } mapped to special profile { $mode }, rejected, falling back to global mode
 app-detect-special-unavailable = [AppDetect] Special tuning unavailable (akmode.yaml missing/corrupt), { $pkg } mapped { $mode } not applied, falling back to global mode
 app-detect-special-fallback = [AppDetect] Special whitelist hit: { $pkg } uses fallback profile { $mode }
-app-detect-special-global-rejected = [AppDetect] Global mode { $mode } is a special profile and does not apply to non-whitelisted app { $pkg }, falling back to balance
+app-detect-special-global-rejected = [AppDetect] Global mode { $mode } is a special profile and does not apply to non-whitelisted app { $pkg }, falling back to default
 
 # --- ScreenDetect ---
 screen-state-change-detected = [Screen] State change detected via '{ $source }'.
@@ -119,7 +120,14 @@ scheduler-scene-mode-enter = [Scheduler] Screen off past threshold, switching to
 scheduler-scene-mode-exit-fas = [Scheduler] FAS re-activated, exiting scenemode early (all cores restored)
 scheduler-scene-mode-exit-switch = [Scheduler] scenemode_enabled disabled, exiting scenemode and restoring screen-off power-saving config
 scheduler-fas-switch-off = [Scheduler] fas_enabled disabled, deactivating all FAS instances and restoring scheduler takeover
-scheduler-scene-mode-saturation = [Scheduler] scenemode perf ceiling saturated (little util { $util }%), falling back to powersave with 300s cooldown
+scheduler-scene-mode-saturation = [Scheduler] scenemode perf ceiling saturated (little util { $util }%), falling back to reduce with 300s cooldown
+
+# --- Scheduler: DOWN (halt) ---
+scheduler-down-enter = [Scheduler] DOWN halt enabled: CLG/akmode/FAS/fast_lock/thread placement/core_ctl all released, collection and logs only
+scheduler-down-exit = [Scheduler] DOWN halt lifted, scheduling resumes
+down-enabled = [Down] down.chr says down, scheduling halted
+down-disabled = [Down] down.chr cleared, scheduling back to normal
+down-watch-error = [Down] down.chr watch failed: { $error }
 
 # --- Scheduler: Config Watcher ---
 config-reloading = [Config] Config file change detected, reloading...
@@ -128,6 +136,21 @@ config-reload-fail = [Config] Config reload failed: { $error }
 config-special-load-failed = [Config] Failed to read special-tuned config: { $path } ({ $error }) — special tuning unavailable, whitelisted apps fall back to CLG
 config-special-parse-failed = [Config] Failed to parse special-tuned config: { $path } ({ $error }) — special tuning unavailable, whitelisted apps fall back to CLG
 config-special-merged = [Config] Merged special-tuned config: { $path }
+
+# --- Governor (performance take-over, FAS/contingency) ---
+governor-switched = [Governor] P{ $pid } governor { $from } -> performance
+governor-restored = [Governor] P{ $pid } governor performance -> { $to }
+governor-switch-failed = [Governor] failed to switch governor on policy { $pid }
+governor-restore-failed = [Governor] failed to restore governor { $governor } on policy { $pid }
+governor-residue-cleanup = [Governor] leftover performance governor detected (abnormal exit?), restored to schedutil
+
+# --- GPU frequency lock (contingency) ---
+gpu-locked = [GPU] locked to max frequency { $khz } kHz ({ $nodes } nodes)
+gpu-released = [GPU] original frequency limits restored
+gpu-detect-miss = [GPU] no usable GPU frequency node found; contingency GPU lock skipped
+
+# --- SysFS generic ---
+sysfs-write-failed = [SysFS] failed to write { $path }: { $error }
 config-scenemode-merged = [Config] Merged scenemode config: { $path }
 config-watch-error = [Config] Failed to watch config directory: { $error }
 config-apply-mode-failed = [Config] Failed to apply reloaded mode settings: { $error }
@@ -204,11 +227,11 @@ fas-policy-writer-invalid = [FAS] P{ $pid } policy writer invalid (max_valid: { 
 main-fas-whitelist-exported = [Main] exported { $count } FAS whitelist entries to fas_whitelist.yaml
 app-detect-fas-fallback = [AppDetect] foreground app hit FAS whitelist, entering FAS mode: { $pkg }
 app-detect-fas-rejected = [AppDetect] non-whitelisted app { $pkg } mapped to FAS mode { $mode }, rejected, falling back to global mode
-app-detect-fas-global-rejected = [AppDetect] global mode { $mode } is a FAS mode and does not apply to non-whitelisted app { $pkg }, falling back to balance
+app-detect-fas-global-rejected = [AppDetect] global mode { $mode } is a FAS mode and does not apply to non-whitelisted app { $pkg }, falling back to default
 scheduler-fas-activate = [Scheduler] FAS instance activated: { $pkg } (pid={ $pid })
 scheduler-fas-switch = [Scheduler] FAS instance hot-switched: { $old } -> { $new }
 scheduler-fas-deactivate = [Scheduler] FAS instance deactivated (frequencies restored): { $pkg }
-scheduler-fas-destroy = [Scheduler] FAS instance destroyed (not foregrounded for 60s): { $pkg }
+scheduler-fas-delayed-exit = [Scheduler] FAS delayed exit expired; governor restored, taking over as { $mode }
 scheduler-fas-init-failed = [Scheduler] FAS instance init failed, falling back to CLG: { $pkg }
 scheduler-fas-cooldown = [Scheduler] FAS init failed, entering { $secs }s cooldown; CLG takes over during cooldown
 
@@ -231,6 +254,22 @@ fast-watchdog-release = [Fast] load source timeout ({ $secs }s), releasing fast 
 # --- Logger ---
 log-level-updated = Log level updated to: { $level }
 logger-log-restart-for-archive = [Logger] { $dir } reached { $mb }MB, restarting scheduler to archive logs
+
+# --- Rhine (Lab) ---
+rhine-state-created = [Rhine] rhine.chr missing, created with default content (not enabled)
+rhine-state-invalid = [Rhine] rhine.chr content invalid ({ $value }), reset to default (not enabled)
+rhine-mode-enabled = [Rhine] Lab mode enabled: { $mode }
+rhine-mode-disabled = [Rhine] Lab mode disabled, changes reverted from backup
+rhine-restored = [Rhine] reverted { $origin } changes from rhine-back.chr
+rhine-restore-invalid = [Rhine] rhine-back.chr invalid, reverted with built-in defaults and cleared lab overrides
+rhine-restore-meta-failed = [Rhine] failed to revert meta.yaml; rhine-back.chr kept for the next attempt
+rhine-lock-unavailable = [Rhine] neither /tmp nor /dev is writable; lab lock not created (the lab still works)
+rhine-lock-refused = [Rhine] lab is locked: turning it off needs a device reboot, request ignored
+rhine-lock-lost = [Rhine] lock file exists but the locked mode is unknown, lock cleared
+rhine-force-off = [Rhine] rhine.chr says off: lab force-disabled and original values restored (reboot skipped - reboot soon to verify)
+rhine-lock-note-no-backup = rhine-back.chr was missing (the original state of the last enable is unknown), rebuilt from built-in defaults
+rhine-apply-failed = [Rhine] Failed to enable lab mode: { $mode } ({ $error })
+rhine-watch-error = [Rhine] rhine.chr watch failed: { $error }
 
 # --- Affinity (CPU affinity & thread migration) ---
 affinity-boost-applied = [Affinity] boost layout applied: top-app/foreground → { $big }, background groups → { $little }

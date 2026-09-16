@@ -9,7 +9,7 @@ use anyhow::Result;
 // [consts] 
 // CLG 看门狗：SystemLoadUpdate 常规 120ms（Chiri 特调 40ms）投喂一次，若超过 CLG_STALE_MAX 时长
 // 未收到任何事件，视为负载源失效（eBPF 加载失败/探针崩溃/通道断开），主动 release()
-// 回滚到系统原生调频，避免 CPU 永久锁频在最后写入值上（8550 balance 等 perf_init=1.0
+// 回滚到系统原生调频，避免 CPU 永久锁频在最后写入值上（8550 default 等 perf_init=1.0
 // 的配置下会锁满全核高频）。
 const CLG_STALE_MAX: Duration = Duration::from_secs(5);
 /// 看门狗巡检间隔：事件循环无事件时的轮询周期
@@ -114,15 +114,15 @@ pub fn start_scheduler_thread(
     let config_path = common::get_config_path();
     let config_dir = root.join("config");
 
-    // 初始模式透传 rules.yaml 的 global_mode：此前硬编码 "balance" 会导致开机到首个
-    // ModeChange（约 2 秒）前按错误的模式接管 CPU（8550 上 balance perf_init=1.0 会锁满频），
-    // 且与用户配置的 global_mode 不一致。global_mode 未配置或不是已注册模式时回退 balance。
+    // 初始模式透传 rules.yaml 的 global_mode：此前硬编码 "default" 会导致开机到首个
+    // ModeChange（约 2 秒）前按错误的模式接管 CPU（8550 上 default perf_init=1.0 会锁满频），
+    // 且与用户配置的 global_mode 不一致。global_mode 未配置或不是已注册模式时回退 default。
     let initial_mode = {
         // 嵌入 rules.yaml 为唯一规则来源（编译期打包，防篡改；磁盘文件仅展示副本）
         let rules = crate::common::embedded_rules();
         let m = rules.global_mode.clone();
         if m.is_empty() || shared_config.read().unwrap().get_mode(&m).is_none() {
-            "balance".to_string()
+            "default".to_string()
         } else {
             m
         }
@@ -330,7 +330,7 @@ pub fn start_scheduler_thread(
 
                             // 强行让 CLG 接管，并动态生成一个极致省电配置
                             let config_lock = config_clone.read().unwrap();
-                            let mut doze_cfg = get_clg_cfg(&config_lock, "powersave"); 
+                            let mut doze_cfg = get_clg_cfg(&config_lock, "reduce"); 
                             doze_cfg.enabled = true;
                             doze_cfg.perf_floor = 0.0;
                             doze_cfg.perf_ceil = doze_cfg.perf_ceil.min(0.40); // 锁死天花板最高只给 40% 性能

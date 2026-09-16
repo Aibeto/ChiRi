@@ -1,4 +1,4 @@
-# zh.ftl: [main-monitor] [app-detect] [screen-detect] [monitors] [scheduler] [scheduler-config-watcher] [sysfs] [clg] [akmode] [touch] [fas] [fas-whitelist] [scheduler-settings] [fast-lock] [logger] [affinity] [corectl] [telemetry] [config-reload]
+# zh.ftl: [main-monitor] [app-detect] [screen-detect] [monitors] [scheduler] [scheduler-config-watcher] [sysfs] [clg] [akmode] [touch] [fas] [fas-whitelist] [scheduler-settings] [fast-lock] [logger] [affinity] [corectl] [telemetry] [config-reload] [governor] [gpu]
 # --- Main & Monitor ---
 yumi-module-starting = yumi-module 统一启动中...
 scheduler-module-started = 调度器模块已启动
@@ -21,6 +21,7 @@ main-chiri-scheduler-selected = [Main] 检测到特定处理器，已启用 Chir
 main-special-tuned-exported = [Main] 已导出 { $count } 个内部特调白名单条目到 special_tuned.yaml
 main-log-archive-submitted = [Main] 上一轮日志已归档，后台打包至 logd/{ $zip }
 main-devimp-archive-submitted = [Main] 上一轮 devimp 诊断日志已归档，后台打包至 logd/{ $zip }
+main-log-short-session-discarded = [Main] 上一轮会话存活不足 30 秒，已直接丢弃其日志（未打包）
 monitor-thread-start-screen = [Main] 启动屏幕状态监控线程...
 monitor-thread-start-config-watch = [Main] 启动配置监控线程...
 monitor-thread-start-fps = [Main] 启动 eBPF FPS 监控线程...
@@ -46,7 +47,7 @@ app-detect-special-override = [AppDetect] 特调模式应用: { $pkg } -> { $mod
 app-detect-special-rejected = [AppDetect] 非白名单应用 { $pkg } 映射到特调模式 { $mode } 已拒绝，回退全局模式
 app-detect-special-unavailable = [AppDetect] 特调配置不可用（akmode.yaml 缺失/损坏），{ $pkg } 映射的 { $mode } 不生效，回退全局模式
 app-detect-special-fallback = [AppDetect] 特调白名单命中: { $pkg } 使用优先回退模式 { $mode }
-app-detect-special-global-rejected = [AppDetect] 全局模式 { $mode } 为特调模式，不适用于非白名单应用 { $pkg }，回退 balance
+app-detect-special-global-rejected = [AppDetect] 全局模式 { $mode } 为特调模式，不适用于非白名单应用 { $pkg }，回退 default
 
 # --- ScreenDetect ---
 screen-state-change-detected = [Screen] 通过 '{ $source }' 检测到状态变更
@@ -118,7 +119,14 @@ scheduler-scene-mode-enter = [Scheduler] 息屏已超过阈值，切换到 scene
 scheduler-scene-mode-exit-fas = [Scheduler] FAS 重新激活，提前退出 scenemode（恢复全部在线核）
 scheduler-scene-mode-exit-switch = [Scheduler] scenemode_enabled 已关闭，退出 scenemode 并恢复息屏低功耗配置
 scheduler-fas-switch-off = [Scheduler] fas_enabled 已关闭，注销全部 FAS 实例并恢复调度接管
-scheduler-scene-mode-saturation = [Scheduler] scenemode 持续顶满性能上限（little util { $util }%），退回 powersave 并进入 300s 冷却
+scheduler-scene-mode-saturation = [Scheduler] scenemode 持续顶满性能上限（little util { $util }%），退回 reduce 并进入 300s 冷却
+
+# --- Scheduler: DOWN（停摆） ---
+scheduler-down-enter = [Scheduler] DOWN 停摆已启用：CLG/akmode/FAS/fast_lock/线程摆放/core_ctl 全部释放，只保留采集与日志
+scheduler-down-exit = [Scheduler] DOWN 停摆已解除，调度恢复接管
+down-enabled = [Down] down.chr 写着 down，调度进入停摆
+down-disabled = [Down] down.chr 已清空，调度恢复正常
+down-watch-error = [Down] down.chr 监听失败: { $error }
 
 # --- Scheduler: Config Watcher ---
 config-reloading = [Config] 检测到配置文件变更，正在重载...
@@ -127,6 +135,21 @@ config-reload-fail = [Config] 配置重载失败: { $error }
 config-special-load-failed = [Config] 特调配置文件读取失败: { $path } ({ $error }) — 特调不可用，白名单应用回退 CLG
 config-special-parse-failed = [Config] 特调配置文件解析失败: { $path } ({ $error }) — 特调不可用，白名单应用回退 CLG
 config-special-merged = [Config] 已合并特调配置文件: { $path }
+
+# --- Governor (performance 接管，FAS/contingency) ---
+governor-switched = [Governor] P{ $pid } 调速器 { $from } -> performance
+governor-restored = [Governor] P{ $pid } 调速器 performance -> { $to }
+governor-switch-failed = [Governor] policy { $pid } 切换调速器失败
+governor-restore-failed = [Governor] policy { $pid } 恢复调速器 { $governor } 失败
+governor-residue-cleanup = [Governor] 检测到残留 performance 调速器（上次可能异常退出），已恢复 schedutil
+
+# --- GPU 频率锁（contingency） ---
+gpu-locked = [GPU] 已锁最高频 { $khz } kHz（{ $nodes } 个节点）
+gpu-released = [GPU] 已恢复原频率上限
+gpu-detect-miss = [GPU] 未找到可用的 GPU 频率节点，contingency 的 GPU 锁频跳过
+
+# --- SysFS 通用 ---
+sysfs-write-failed = [SysFS] 写入 { $path } 失败: { $error }
 config-scenemode-merged = [Config] 已合并息屏场景配置文件: { $path }
 config-watch-error = [Config] 监控配置目录失败: { $error }
 config-apply-mode-failed = [Config] 应用重载的模式设置失败: { $error }
@@ -203,11 +226,11 @@ fas-policy-writer-invalid = [FAS] P{ $pid } 策略写入器无效 (max_valid: { 
 main-fas-whitelist-exported = [Main] 已导出 { $count } 个 FAS 白名单条目到 fas_whitelist.yaml
 app-detect-fas-fallback = [AppDetect] 前台应用命中 FAS 白名单，进入 FAS 模式: { $pkg }
 app-detect-fas-rejected = [AppDetect] 非白名单应用 { $pkg } 映射到 FAS 模式 { $mode } 已拒绝，回退全局模式
-app-detect-fas-global-rejected = [AppDetect] 全局模式 { $mode } 为 FAS 模式，不适用于非白名单应用 { $pkg }，回退 balance
+app-detect-fas-global-rejected = [AppDetect] 全局模式 { $mode } 为 FAS 模式，不适用于非白名单应用 { $pkg }，回退 default
 scheduler-fas-activate = [Scheduler] FAS 实例激活: { $pkg } (pid={ $pid })
 scheduler-fas-switch = [Scheduler] FAS 实例热切换: { $old } -> { $new }
 scheduler-fas-deactivate = [Scheduler] FAS 实例去激活（频率已恢复）: { $pkg }
-scheduler-fas-destroy = [Scheduler] FAS 实例已注销（超过 60 秒未回前台）: { $pkg }
+scheduler-fas-delayed-exit = [Scheduler] FAS 延迟退出到期，已恢复原调速器并按 { $mode } 重新接管
 scheduler-fas-init-failed = [Scheduler] FAS 实例初始化失败，已回退 CLG: { $pkg }
 scheduler-fas-cooldown = [Scheduler] FAS 初始化失败已冷却，{ $secs } 秒内由 CLG 接管
 
@@ -230,6 +253,22 @@ fast-watchdog-release = [Fast] 负载源超时 ({ $secs }s)，释放极速锁频
 # --- Logger ---
 log-level-updated = 日志级别已更新为: { $level }
 logger-log-restart-for-archive = [Logger] { $dir } 已达到 { $mb }MB，立即重启调度以打包日志
+
+# --- Rhine（实验室）---
+rhine-state-created = [Rhine] rhine.chr 不存在，已补建默认内容（未启用）
+rhine-state-invalid = [Rhine] rhine.chr 内容非法（{ $value }），已重置为默认内容（未启用）
+rhine-mode-enabled = [Rhine] 实验室已启用: { $mode }
+rhine-mode-disabled = [Rhine] 实验室已关闭，改动已按快照还原
+rhine-restored = [Rhine] 已按 rhine-back.chr 还原 { $origin } 的改动
+rhine-restore-invalid = [Rhine] rhine-back.chr 内容非法，已用内置默认值还原并清除实验室覆盖
+rhine-restore-meta-failed = [Rhine] 还原 meta.yaml 失败，已保留 rhine-back.chr 待下次重试
+rhine-apply-failed = [Rhine] 实验室启用失败: { $mode } ({ $error })
+rhine-watch-error = [Rhine] rhine.chr 监听失败: { $error }
+rhine-lock-unavailable = [Rhine] /tmp 与 /dev 均不可写，本次不建立实验室锁定标记（实验室仍可正常开关）
+rhine-lock-refused = [Rhine] 实验室已锁定：关闭需要重启设备，本次关闭请求已忽略
+rhine-lock-lost = [Rhine] 锁定标记存在但无法确定锁定的模式，已清除锁定
+rhine-force-off = [Rhine] rhine.chr 写了 off：已强制关闭实验室并还原原值（无视「关闭需重启」的风险，未重启设备——建议尽快重启复核）
+rhine-lock-note-no-backup = rhine-back.chr 缺失（上次启用时的原始状态已不可知），已用内置默认值补一份快照
 
 # --- Affinity（CPU 亲和与线程迁移）---
 affinity-boost-applied = [Affinity] boost 布局已应用: top-app/foreground → { $big }，后台分组 → { $little }

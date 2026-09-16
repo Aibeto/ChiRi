@@ -11,12 +11,12 @@ describe('白名单解析', () => {
     const text = [
       '# 注释行',
       'com.hypergryph.arknights:akmode:akmode',
-      'com.example.multi:powersave,akmode:powersave',
+      'com.example.multi:reduce,akmode:reduce',
       'com.example.nofallback:akmode'
     ].join('\n')
     const map = parseSpecialTuned(text)
     expect(map.get('com.hypergryph.arknights')).toEqual({ modes: ['akmode'], fallback: 'akmode' })
-    expect(map.get('com.example.multi')?.modes).toEqual(['powersave', 'akmode'])
+    expect(map.get('com.example.multi')?.modes).toEqual(['reduce', 'akmode'])
     // 缺回退模式时取模式列表首项（与守护进程导出语义一致）
     expect(map.get('com.example.nofallback')?.fallback).toBe('akmode')
     expect(map.has('# 注释行')).toBe(false)
@@ -45,16 +45,16 @@ describe('rules.yaml 解析', () => {
       [
         'yumi_scheduler: true',
         'dynamic_enabled: true',
-        'global_mode: "balance"',
+        'global_mode: "default"',
         'app_modes:',
-        '  com.tencent.tmgp.sgame: performance',
+        '  com.tencent.tmgp.sgame: boost',
         'ignored_apps:',
         '  - com.android.systemui'
       ].join('\n')
     )
     expect(info.ok).toBe(true)
-    expect(info.globalMode).toBe('balance')
-    expect(info.appModes['com.tencent.tmgp.sgame']).toBe('performance')
+    expect(info.globalMode).toBe('default')
+    expect(info.appModes['com.tencent.tmgp.sgame']).toBe('boost')
     expect(info.ignoredApps).toEqual(['com.android.systemui'])
   })
 
@@ -63,7 +63,7 @@ describe('rules.yaml 解析', () => {
     expect(info.ok).toBe(true)
     expect(info.yumiScheduler).toBe(true)
     expect(info.dynamicEnabled).toBe(true)
-    expect(info.globalMode).toBe('balance')
+    expect(info.globalMode).toBe('default')
   })
 
   it('非法 YAML 返回 ok=false 并带原因', () => {
@@ -92,10 +92,16 @@ describe('module.prop 解析', () => {
 describe('模式派生', () => {
   const special = new Set(['akmode'])
 
-  it('CLG 四档识别为 clg', () => {
-    for (const id of CLG_MODE_IDS) {
-      expect(describeMode(id, special).kind).toBe('clg')
-    }
+  it('CLG 三档识别为 clg；vector 归 rhine 家族（lab）', () => {
+    expect(describeMode('reduce', special).kind).toBe('clg')
+    expect(describeMode('default', special).kind).toBe('clg')
+    expect(describeMode('boost', special).kind).toBe('clg')
+    expect(describeMode('vector', special).kind).toBe('lab')
+  })
+
+  it('contingency/babel 归 rhine 家族（lab）', () => {
+    expect(describeMode('contingency', special).kind).toBe('lab')
+    expect(describeMode('babel', special).kind).toBe('lab')
   })
 
   it('fas 与特调模式分别归类（特调需命中所见模式集合）', () => {
@@ -125,7 +131,7 @@ describe('应用标签合成与过滤', () => {
   const ctx = {
     specialTuned: parseSpecialTuned('com.hypergryph.arknights:akmode:akmode\n'),
     fasWhitelist: parseFasWhitelist('com.miHoYo.Yuanshen:endfield\n'),
-    appModes: { 'com.tencent.mm': 'balance' }
+    appModes: { 'com.tencent.mm': 'default' }
   }
 
   it('只对命中的包打标签，未命中的不臆造', () => {
@@ -134,7 +140,7 @@ describe('应用标签合成与过滤', () => {
     expect(entries[0].fasConfig).toBeUndefined()
     expect(entries[1].fasConfig).toBe('endfield')
     expect(entries[1].special).toBeUndefined()
-    expect(entries[2].appMode).toBe('balance')
+    expect(entries[2].appMode).toBe('default')
   })
 
   it('按包名或应用名即时过滤', () => {

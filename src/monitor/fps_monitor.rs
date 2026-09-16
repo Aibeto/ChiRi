@@ -406,7 +406,7 @@ pub async fn start_fps_loop(
                 // 全量投喂本窗口新产生的帧间隔。此前每 100ms 只发送
                 // latest_frametime() 一条：60fps 下 6 帧丢 5 帧，所有以
                 // 「帧数」为单位的控制常数（upgrade/downgrade_confirm、
-                // jank_cooldown、fast_decay 阈值、freq_hold_frames 等）的
+                // jank_cooldown、steady_decay 阈值、freq_hold_frames 等）的
                 // 实际时间尺度被拉长 6 倍，PID/防抖/jank 响应全面钝化，
                 // 表现为平均帧下降且 1% Low 崩塌；且无新帧时会把同一条
                 // 陈旧 delta 反复投喂——静态 UI/暂停场景一条 heavy 帧被

@@ -186,6 +186,12 @@ fn determine_mode(config: &RulesConfig, current_package: &str) -> String {
     let chiri = crate::common::is_chiri_soc();
     let special_enabled = chiri && crate::common::is_akmode_available();
 
+    // 全局模式兜底值：实验室（rhine）启用期间用它的模式覆盖，其余时候就是 rules.yaml
+    // 里的 global_mode。只换兜底值——FAS 白名单和 app_modes 的优先级都不动，
+    // 用户显式给某个应用配的模式仍然优先。
+    let global_mode: String =
+        crate::common::lab_global_mode().unwrap_or_else(|| config.global_mode.clone());
+
     // FAS 白名单最高优先（ChiRi 专属）：命中白名单且对应应用配置可用时直接进入 fas 模式，
     // 不受 rules.yaml app_modes/global_mode 影响。
     if chiri && crate::common::fas_available() {
@@ -218,7 +224,7 @@ fn determine_mode(config: &RulesConfig, current_package: &str) -> String {
         }
     }
     if !config.dynamic_enabled {
-        return config.global_mode.clone();
+        return global_mode;
     }
     // 特调体系为 ChiRi 专属：仅命中 CHIRI_SOC_HINTS 的 SoC 上白名单/特调模式才生效，
     // 非 ChiRi SoC 上特调映射一律回退全局模式（Yumi 调度器未注册特调模式）。
@@ -236,7 +242,7 @@ fn determine_mode(config: &RulesConfig, current_package: &str) -> String {
                         &fluent_args!("pkg" => current_package, "mode" => mode.as_str())
                     )
                 );
-                return config.global_mode.clone();
+                return global_mode.clone();
             }
             if special_enabled && crate::common::is_special_mode_allowed(current_package, mode) {
                 debug!(
@@ -266,7 +272,7 @@ fn determine_mode(config: &RulesConfig, current_package: &str) -> String {
                     )
                 );
             }
-            return config.global_mode.clone();
+            return global_mode.clone();
         }
         return mode.clone();
     }
@@ -282,7 +288,7 @@ fn determine_mode(config: &RulesConfig, current_package: &str) -> String {
             return mode;
         }
     }
-    let global = config.global_mode.clone();
+    let global = global_mode;
     // 全局模式不允许指定为 FAS（FAS 仅白名单驱动）
     if crate::common::is_fas_mode(&global) {
         warn!(
@@ -292,9 +298,9 @@ fn determine_mode(config: &RulesConfig, current_package: &str) -> String {
                 &fluent_args!("pkg" => current_package, "mode" => global.as_str())
             )
         );
-        return "balance".to_string();
+        return "default".to_string();
     }
-    // 全局模式本身不允许直接指定特调：非白名单应用回退 balance（默认模式）
+    // 全局模式本身不允许直接指定特调：非白名单应用回退 default（默认模式）
     if crate::common::is_special_mode(&global)
         && !(special_enabled && crate::common::is_special_mode_allowed(current_package, &global))
     {
@@ -305,9 +311,22 @@ fn determine_mode(config: &RulesConfig, current_package: &str) -> String {
                 &fluent_args!("pkg" => current_package, "mode" => global.as_str())
             )
         );
-        return "balance".to_string();
+        return "default".to_string();
     }
     global
+}
+
+/// 外部请求重算一次模式（实验室 rhine 套用/还原后调用）。
+///
+/// 规则热重载走的是 `watch_config_file` 手里那个 `force_refresh_arc`，实验室在调度
+/// 线程侧拿不到它，这里补一个进程级标志，app_detection_loop 下一轮一起 swap 消费。
+/// 效果是：用户在界面上点了启用，模式当场按新规则重算一遍（该变才发 ModeChange），
+/// 不用等下一次前台切换。
+static FORCE_MODE_REFRESH: AtomicBool = AtomicBool::new(false);
+
+/// 请求 app_detection_loop 重新判定模式（模式实际变化时照常发 ModeChange 事件）
+pub fn request_mode_refresh() {
+    FORCE_MODE_REFRESH.store(true, Ordering::SeqCst);
 }
 
 // [cfgwatch]
@@ -395,7 +414,10 @@ pub fn app_detection_loop(
         // （亮屏仍为 false），先按 backlight sysfs 校正一次，保证后续 ScreenStateChange
         // 事件与真实屏幕一致——避免亮屏期间 scenemode 计时器被误触发、亮屏后无法退出。
         super::screen_detect::verify_screen_state(&screen_state_arc);
-        let force_refresh = force_refresh_arc.swap(false, Ordering::SeqCst);
+        // 两条刷新来源合并：规则热重载（watch_config_file 置位）与实验室套用/还原
+        // （request_mode_refresh 置位），任一为真都重算一次模式
+        let force_refresh = force_refresh_arc.swap(false, Ordering::SeqCst)
+            | FORCE_MODE_REFRESH.swap(false, Ordering::SeqCst);
         let current_screen_state = { *screen_state_arc.lock().unwrap() };
 
         if current_screen_state != last_screen_state {
@@ -492,7 +514,7 @@ pub fn app_detection_loop(
                 let new_mode = determine_mode(&config_snapshot, &final_pkg);
 
                 // force_refresh（配置重载/亮屏恢复）只驱动外层重新计算模式；
-                // 模式未变时不重发 ModeChange，避免 "balance -> balance" 冗余事件。
+                // 模式未变时不重发 ModeChange，避免 "default -> default" 冗余事件。
                 // 同模式应用切换对 CLG 无影响（按模式调频），但 ChiRi 的 FAS 需要
                 // 热切换 uprobe 目标，故下方分支补发 PackageSwitch 事件。
                 if last_mode != new_mode {

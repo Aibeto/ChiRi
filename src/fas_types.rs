@@ -166,14 +166,19 @@ pub struct FasRulesConfig {
     #[serde(default = "d_boost_dur")]
     pub downgrade_boost_duration: u32,
 
-    #[serde(default = "d_fd_thresh")]
-    pub fast_decay_frame_threshold: u32,
-    #[serde(default = "d_fd_perf")]
-    pub fast_decay_perf_threshold: f32,
-    #[serde(default = "d_fd_max")]
-    pub fast_decay_max_step: f32,
-    #[serde(default = "d_fd_min")]
-    pub fast_decay_min_step: f32,
+    #[serde(default = "d_sd_thresh")]
+    pub steady_decay_frame_threshold: u32,
+    #[serde(default = "d_sd_perf")]
+    pub steady_decay_perf_threshold: f32,
+    #[serde(default = "d_sd_max")]
+    pub steady_decay_max_step: f32,
+    #[serde(default = "d_sd_min")]
+    pub steady_decay_min_step: f32,
+
+    /// 失去白名单前台后的延迟退出秒数：期间切回白名单应用无缝续期，
+    /// 超时才真正退出（恢复频率与调速器）。缺省 15。
+    #[serde(default = "d_fas_exit_delay")]
+    pub deactivate_delay_secs: u32,
 
     #[serde(default = "d_jank_cd")]
     pub jank_cooldown_frames: u32,
@@ -285,17 +290,20 @@ fn d_boost_inc() -> f32 {
 fn d_boost_dur() -> u32 {
     45
 }
-fn d_fd_thresh() -> u32 {
+fn d_sd_thresh() -> u32 {
     75
 }
-fn d_fd_perf() -> f32 {
+fn d_sd_perf() -> f32 {
     0.70
 }
-fn d_fd_max() -> f32 {
+fn d_sd_max() -> f32 {
     0.022
 }
-fn d_fd_min() -> f32 {
+fn d_sd_min() -> f32 {
     0.004
+}
+fn d_fas_exit_delay() -> u32 {
+    15
 }
 fn d_jank_cd() -> u32 {
     15
@@ -343,7 +351,7 @@ impl FasRulesConfig {
     /// 校验并规范化配置：
     /// - 非有限值（NaN/±Inf）回退默认，防止污染 PID 控制链
     /// - perf_floor/ceil/init/cold_boot 交叉约束，保证 f32::clamp 永不 panic
-    /// - fast_decay 步长 min<=max
+    /// - steady_decay 步长 min<=max
     /// - fps_gears 过滤非法值（0/负/NaN），空时回退默认档位
     pub fn normalize(&mut self) {
         if !self.perf_floor.is_finite() {
@@ -358,11 +366,11 @@ impl FasRulesConfig {
         if !self.perf_cold_boot.is_finite() {
             self.perf_cold_boot = d_perf_cold();
         }
-        if !self.fast_decay_max_step.is_finite() {
-            self.fast_decay_max_step = d_fd_max();
+        if !self.steady_decay_max_step.is_finite() {
+            self.steady_decay_max_step = d_sd_max();
         }
-        if !self.fast_decay_min_step.is_finite() {
-            self.fast_decay_min_step = d_fd_min();
+        if !self.steady_decay_min_step.is_finite() {
+            self.steady_decay_min_step = d_sd_min();
         }
         if !self.freq_hysteresis.is_finite() {
             self.freq_hysteresis = d_hysteresis();
@@ -445,13 +453,15 @@ impl FasRulesConfig {
             .app_switch_resume_perf
             .clamp(self.perf_floor, self.perf_ceil);
 
-        // fast_decay 步长约束：min <= max*0.6（decay_scale 最坏 0.6），
+        // steady_decay 步长约束：min <= max*0.6（decay_scale 最坏 0.6），
         // 否则 frame_pipeline 的 clamp 边界可能反转导致 panic
-        self.fast_decay_max_step = self.fast_decay_max_step.max(0.0);
-        self.fast_decay_min_step = self.fast_decay_min_step.max(0.0);
-        if self.fast_decay_min_step > self.fast_decay_max_step * 0.6 {
-            self.fast_decay_min_step = self.fast_decay_max_step * 0.6;
+        self.steady_decay_max_step = self.steady_decay_max_step.max(0.0);
+        self.steady_decay_min_step = self.steady_decay_min_step.max(0.0);
+        if self.steady_decay_min_step > self.steady_decay_max_step * 0.6 {
+            self.steady_decay_min_step = self.steady_decay_max_step * 0.6;
         }
+        // 延迟退出：1s 下限防抖，10 分钟上限防呆（配得再大也不该常驻接管）
+        self.deactivate_delay_secs = self.deactivate_delay_secs.clamp(1, 600);
     }
 
     /// 将旧的 per_app_margins 迁移到 per_app_profiles
@@ -489,10 +499,11 @@ impl Default for FasRulesConfig {
             gear_dampen_frames: d_dampen(),
             downgrade_boost_perf_inc: d_boost_inc(),
             downgrade_boost_duration: d_boost_dur(),
-            fast_decay_frame_threshold: d_fd_thresh(),
-            fast_decay_perf_threshold: d_fd_perf(),
-            fast_decay_max_step: d_fd_max(),
-            fast_decay_min_step: d_fd_min(),
+            steady_decay_frame_threshold: d_sd_thresh(),
+            steady_decay_perf_threshold: d_sd_perf(),
+            steady_decay_max_step: d_sd_max(),
+            steady_decay_min_step: d_sd_min(),
+            deactivate_delay_secs: d_fas_exit_delay(),
             jank_cooldown_frames: d_jank_cd(),
             max_inc_damped: d_max_inc_d(),
             max_inc_normal: d_max_inc_n(),

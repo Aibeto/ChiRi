@@ -1,4 +1,4 @@
-# 8998/feature.yaml: [function] [io-settings] [cpu-idle] [affinity] [corectl] [thermal] [powersave] [balance] [performance]
+# 8998/feature.yaml: [function] [io-settings] [cpu-idle] [affinity] [corectl] [thermal] [reduce] [default] [boost]
 
 # [function]
 function:
@@ -48,8 +48,8 @@ Thermal:
   free_above: 0.80
   hysteresis_c: 3
 
-# [powersave]
-powersave:
+# [reduce]
+reduce:
   cpu_load_governor:
     up_threshold: 0.90
     down_threshold: 0.50
@@ -70,8 +70,8 @@ powersave:
     touch_boost_ms: 350
     touch_boost_tiers: 1
 
-# [balance]
-balance:
+# [default]
+default:
   cpu_load_governor:
     up_threshold: 0.72
     down_threshold: 0.55
@@ -92,8 +92,8 @@ balance:
     touch_boost_ms: 400
     touch_boost_tiers: 1
 
-# [performance]
-performance:
+# [boost]
+boost:
   cpu_load_governor:
     up_threshold: 0.55
     down_threshold: 0.40

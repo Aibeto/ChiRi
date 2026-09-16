@@ -46,6 +46,7 @@ describe('meta.yaml 顶层行改写', () => {
     'dev_record: false # 保留我',
     'fas_enabled: true',
     'scenemode_enabled: true',
+    'thread_bind: true',
     'nested:',
     '  dev_record: true'
   ].join('\n')
@@ -84,7 +85,8 @@ describe('meta.yaml 校验（复刻守护进程口径）', () => {
     loglevel: 'INFO',
     dev_record: true,
     fas_enabled: true,
-    scenemode_enabled: false
+    scenemode_enabled: false,
+    thread_bind: true
   }
 
   it('合法文件无问题', () => {

@@ -1,23 +1,17 @@
-//! FAS（帧感知调度）实例管理器 —— ChiRi 专属。
-//! 区块索引: [types] [activate] [deactivate] [events] [helpers]
+//! FAS（帧感知调度）管理器 —— 单实例（2026-09-17 重构，原「一个进程绑一个 FAS 实例」
+//! 的多实例架构已废弃）。
+//! 区块索引: [types] [activate] [deactivate] [delayed_exit] [events]
 //!
-//! 解耦多实例架构：每个 FAS 白名单应用对应一个独立 FasInstance（逻辑 FAS 进程），
-//! 应用进入前台时立即创建/复用（C1），失去激活时立即恢复频率但保留实例 60 秒（C2/C3），
-//! 超时注销。帧/负载/温度事件只喂当前活跃实例（C6）。
+//! 白名单前台判断 + 延迟进出：
+//! - 白名单应用进入前台 → activate（governor 切 performance + 接管频率）；
+//! - 失去前台不立即退出：request_delayed_exit 进入 15s 延迟期（时长来自应用配置
+//!   `deactivate_delay_secs`），期间 FAS 仍持有接管（mode 保持 fas、频率停在最后
+//!   状态）；切回白名单应用（activate）即取消延迟无缝续期；
+//! - 超时由 tick()（1s 周期调用）完成真正退出：恢复频率 + governor 快照，返回 true
+//!   让调用方按延迟期记住的目标模式重新接管。
 //!
-//! 生命周期规则：
-//! - C1 创建/复用：activate() —— 无实例则 FasController::new + load_policies（快照真实系统状态），
-//!   有实例（60s 内切回）则复用：set_game 挂回包名 + apply_freqs 重写频率。
-//! - C2 去激活：deactivate_active() —— 仅对活跃实例 reset_all_freqs + clear_game，
-//!   必须先于任何其他 governor（CLG/akmode/fast）的 init，保证对方快照到真实状态；
-//!   非活跃实例的频率已在各自去激活时恢复，绝不再写（避免踩坏后续 governor）。
-//! - C3 注销：reap() —— 非活跃实例 last_fg 超过 FAS_INSTANCE_TTL 后移除（纯内存清理）。
-//! - C4 息屏接管（2026-09 起，原「息屏释放」已废弃）：FAS 与屏幕状态完全解耦——
-//!   息屏不释放实例、不切 CLG doze；FAS 活跃即持有接管权，仅前台切换驱动
-//!   去激活。任意 FAS 实例存在（含后台保留实例，has_any_instance）期间
-//!   scenemode 禁止进入；FAS（重新）激活时优先于 scenemode（调用方负责先退出）。
-//! - C5 收尾：deactivate_all() —— panic/线程退出时恢复全部频率。
-//! - C6 事件路由：on_frame/on_load_update/温度刷新只作用于活跃实例。
+//! governor（performance）归 GovernorGuard 管，频率归 FasController 管，职责分离：
+//! 引擎的 load_policies 只快照 min/max/频点表，不碰 governor，两套快照互不踩踏。
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -26,12 +20,11 @@ use std::time::{Duration, Instant};
 
 use log::info;
 
+use crate::chiri::governor::GovernorGuard;
 use crate::fluent_args;
 use crate::i18n::t_with_args;
 use crate::scheduler::fas::FasController;
 
-/// 非活跃实例保留时长：丢失前台后 60s 内切回可复用（免重建 policies 快照）
-const FAS_INSTANCE_TTL: Duration = Duration::from_secs(60);
 /// 活跃实例温度刷新周期（喂给 FAS 引擎内部限温逻辑，core_temp_threshold=0 时无效）
 const FAS_TEMP_REFRESH: Duration = Duration::from_secs(3);
 
@@ -39,12 +32,17 @@ const FAS_TEMP_REFRESH: Duration = Duration::from_secs(3);
 struct FasInstance {
     package: String,
     controller: FasController,
-    last_fg: Instant,
 }
 
 pub struct FasManager {
-    instances: Vec<FasInstance>,
-    active_pkg: Option<String>,
+    /// 单实例：同一时刻至多一个白名单应用被接管
+    instance: Option<FasInstance>,
+    /// 延迟退出的截止时刻：失去白名单前台后 Some(截止)；在前台/未接管为 None
+    exit_deadline: Option<Instant>,
+    /// 延迟时长（activate 时从应用配置刷新；normalize 已夹在 1..=600s）
+    exit_delay: Duration,
+    /// performance 调速器接管（activate 时切，deactivate 时按快照恢复）
+    governor: GovernorGuard,
     last_temp: f64,
     last_temp_read: Instant,
     /// FAS 温度源节点路径。原始读数刻度因内核而异，除数不在此固化——
@@ -63,8 +61,10 @@ impl FasManager {
     /// fas_active_flag 由 main.rs 创建、monitor 与 chiri 两层共享。
     pub fn new(temp_path: Option<PathBuf>, fas_active_flag: Arc<AtomicBool>) -> Self {
         Self {
-            instances: Vec::new(),
-            active_pkg: None,
+            instance: None,
+            exit_deadline: None,
+            exit_delay: Duration::from_secs(15),
+            governor: GovernorGuard::new(),
             last_temp: 0.0,
             last_temp_read: Instant::now(),
             temp_path,
@@ -72,19 +72,14 @@ impl FasManager {
         }
     }
 
-    /// C1：创建或复用实例并激活。返回 false = 白名单/配置不可用或 load_policies 后无可用 policy
+    /// C1：激活。返回 false = 白名单/配置不可用或 load_policies 后无可用 policy
     /// （调用方走冷却回退）。
     ///
-    /// - 已是活跃实例 → 仅刷新 last_fg 与 set_game（重复 activate 不重复打点）；
-    /// - 已有实例（60s 内切回）→ 复用：set_game 挂回包名 + apply_freqs 按 perf_index 重写频率。
-    ///   引擎状态复位由引擎自带的应用切换语义完成：去激活时已 clear_game，复活后首个
-    ///   真实帧的帧间隔必然跨越失去前台的整段时长、超过 `app_switch_gap_ms`，
-    ///   `handle_early_exit` 会内部 reset_runtime 并落 `app_switch_resume_perf`；
-    /// - 新建 → FasController::new + load_policies，policies 为空返回 false。
+    /// - 已是同一包 → 仅刷新 set_game（重复 activate 不重复打点）；
+    /// - 另一白名单包 → fas→fas 热切换（scheduler-fas-switch 打点）；
+    /// - 首次 → FasController::new + load_policies，policies 为空返回 false。
     ///
-    /// 随后 set_game(pid, pkg) + set_temperature(last_temp) + set_temp_threshold(rules.core_temp_threshold)，
-    /// active_pkg = Some(pkg)，info 打点 scheduler-fas-activate（fluent 参数 pkg、pid）
-    /// + devimp event("fas", pkg, "activate")。
+    /// 激活同时接管 governor（performance）。延迟退出请求在此被取消（无缝续期）。
     // [activate]
     pub fn activate(&mut self, pkg: &str, pid: i32) -> bool {
         // 白名单复查：包名 → 白名单配置名 → FAS 规则（'static，normalize 已在缓存时完成）
@@ -93,107 +88,76 @@ impl FasManager {
         else {
             return false;
         };
+        self.exit_delay = Duration::from_secs(u64::from(rules.deactivate_delay_secs.max(1)));
 
-        // fas→fas 热切换来源包（在防御性去激活之前捕获，否则 active_pkg 已被清空）
+        // 单实例不变量：另一包仍活跃，先按 C2 去激活（防御调用方未显式调用）
         let switch_from = self
-            .active_pkg
-            .as_deref()
-            .filter(|a| *a != pkg)
-            .map(str::to_string);
-
-        // 单活跃不变量：若另一实例仍活跃，先按 C2 去激活（防御调用方未显式调用）
+            .instance
+            .as_ref()
+            .map(|i| i.package.clone())
+            .filter(|a| a != pkg);
         if switch_from.is_some() {
             self.deactivate_active();
         }
 
-        // 已是活跃实例：仅刷新 last_fg 与 set_game
-        if self.active_pkg.as_deref() == Some(pkg) {
-            if let Some(inst) = self.active_instance_mut() {
-                inst.last_fg = Instant::now();
-                inst.controller.set_game(pid, pkg);
-            }
-            self.fas_active_flag.store(true, Ordering::Release);
-            return true;
-        }
-
-        // 已有实例（60s 内切回）：复用，免重建 policies 快照
-        if let Some(pos) = self.instances.iter().position(|i| i.package == pkg) {
-            let inst = &mut self.instances[pos];
-            inst.last_fg = Instant::now();
+        if let Some(inst) = self.instance.as_mut() {
+            // 同包续期：刷新 set_game 并取消延迟退出
             inst.controller.set_game(pid, pkg);
-            inst.controller.set_temperature(self.last_temp);
-            inst.controller
-                .set_temp_threshold(rules.core_temp_threshold);
-            inst.controller.apply_freqs();
-            self.active_pkg = Some(pkg.to_string());
+            self.exit_deadline = None;
             self.fas_active_flag.store(true, Ordering::Release);
-            // fas→fas 切换与首次激活区分打点
-            match switch_from.as_deref() {
-                Some(old) => info!(
-                    "{}",
-                    t_with_args(
-                        "scheduler-fas-switch",
-                        &fluent_args!("old" => old, "new" => pkg)
-                    )
-                ),
-                None => info!(
-                    "{}",
-                    t_with_args(
-                        "scheduler-fas-activate",
-                        &fluent_args!("pkg" => pkg, "pid" => pid.to_string())
-                    )
-                ),
-            }
-            crate::logger::devimp_event("fas", pkg, "activate");
             return true;
         }
 
-        // 新建：FasController::new + load_policies（快照真实系统状态：governor/min/max/频点表）
         let mut controller = FasController::new();
         controller.load_policies(rules);
         if controller.policies.is_empty() {
             return false;
         }
+        // governor 先切 performance：本层快照在写入前完成，与引擎的频率快照互不干扰
+        self.governor.activate();
         controller.set_game(pid, pkg);
         controller.set_temperature(self.last_temp);
         controller.set_temp_threshold(rules.core_temp_threshold);
-        self.instances.push(FasInstance {
-            package: pkg.to_string(),
-            controller,
-            last_fg: Instant::now(),
-        });
-        self.active_pkg = Some(pkg.to_string());
+        self.instance = Some(FasInstance { package: pkg.to_string(), controller });
+        self.exit_deadline = None;
         self.fas_active_flag.store(true, Ordering::Release);
-        info!(
-            "{}",
-            t_with_args(
-                "scheduler-fas-activate",
-                &fluent_args!(
-                    "pkg" => pkg,
-                    "pid" => pid.to_string()
+        match switch_from.as_deref() {
+            Some(old) => info!(
+                "{}",
+                t_with_args(
+                    "scheduler-fas-switch",
+                    &fluent_args!("old" => old, "new" => pkg)
                 )
-            )
-        );
+            ),
+            None => info!(
+                "{}",
+                t_with_args(
+                    "scheduler-fas-activate",
+                    &fluent_args!("pkg" => pkg, "pid" => pid.to_string())
+                )
+            ),
+        }
         crate::logger::devimp_event("fas", pkg, "activate");
         true
     }
 
-    /// C2：去激活当前活跃实例（reset_all_freqs + clear_game），并清零
+    /// C2：立即去激活（reset_all_freqs + clear_game + governor 按快照恢复），并清零
     /// fas_active 共享标志（fps_monitor 摘除 uprobe 回到零开销待机）。
-    /// 无活跃实例时为无操作。
+    /// 无活跃实例时为 no-op。延迟退出请求一并取消。
     /// info 打点 scheduler-fas-deactivate（pkg）+ devimp event("fas", pkg, "deactivate")。
     // [deactivate]
     pub fn deactivate_active(&mut self) {
-        let Some(pkg) = self.active_pkg.take() else {
+        let Some(mut inst) = self.instance.take() else {
             return;
         };
+        self.exit_deadline = None;
         self.fas_active_flag.store(false, Ordering::Release);
-        if let Some(inst) = self.instances.iter_mut().find(|i| i.package == pkg) {
-            // 先恢复频率再清状态：调用方随后 init 其他 governor（CLG/akmode/fast）时，
-            // 对方才能快照到真实的系统状态
-            inst.controller.reset_all_freqs();
-            inst.controller.clear_game();
-        }
+        // 先恢复频率再清状态：调用方随后 init 其他 governor（CLG/akmode/fast）时，
+        // 对方才能快照到真实的系统状态；governor 快照与频率互不依赖，最后恢复
+        inst.controller.reset_all_freqs();
+        inst.controller.clear_game();
+        self.governor.release();
+        let pkg = inst.package;
         info!(
             "{}",
             t_with_args(
@@ -204,103 +168,87 @@ impl FasManager {
         crate::logger::devimp_event("fas", &pkg, "deactivate");
     }
 
-    /// C5：收尾/失败路径——先 deactivate_active 再清空全部实例（非活跃实例零频率写入）。
+    /// C5：收尾/失败路径（panic 自愈、DOWN、fas_enabled=false 热重载）——立即全退。
     pub fn deactivate_all(&mut self) {
         self.deactivate_active();
-        self.instances.clear();
     }
 
     pub fn is_active(&self) -> bool {
-        self.active_pkg.is_some()
+        self.instance.is_some()
     }
 
     pub fn active_pkg(&self) -> Option<&str> {
-        self.active_pkg.as_deref()
+        self.instance.as_ref().map(|i| i.package.as_str())
     }
 
-    /// 是否存在任意 FAS 实例（活跃或后台保留）。
-    /// scenemode 入口门控依据：任意实例存在期间 scenemode 禁止进入；
-    /// 后台保留实例经 reap（60s TTL）移除后自动放行。
+    /// 是否存在 FAS 接管（含延迟退出期）。scenemode 入口门控依据：接管期间
+    /// scenemode 禁止进入；延迟到期退出后自动放行。
     pub fn has_any_instance(&self) -> bool {
-        !self.instances.is_empty()
+        self.instance.is_some()
     }
 
-    /// C6：帧事件（仅活跃实例）。内部每 FAS_TEMP_REFRESH 读一次 temp_path
+    // [delayed_exit]
+    /// 失去白名单前台：进入延迟退出期。FAS 仍持有接管（mode 保持 fas），
+    /// 期间 activate（切回白名单）会取消延迟。未活跃时无操作。
+    pub fn request_delayed_exit(&mut self) {
+        if self.instance.is_some() {
+            self.exit_deadline = Some(Instant::now() + self.exit_delay);
+        }
+    }
+
+    /// 同包回到前台：取消延迟退出。延迟期内切回**同一个**白名单应用不走 activate
+    /// （PackageSwitch 同包去重 / 1s 巡检同包 no-op），必须由调用方显式续期，
+    /// 否则到期会把正在前台的游戏拆掉重建（局内卡顿）。
+    pub fn renew_if_same_pkg(&mut self, pkg: &str) {
+        if self.exit_deadline.is_some()
+            && self.instance.as_ref().is_some_and(|i| i.package == pkg)
+        {
+            self.exit_deadline = None;
+        }
+    }
+
+    /// 1s 周期调用：延迟退出到期则完成退出（恢复频率 + governor 快照）。
+    /// 返回 true = 刚完成退出，调用方需按延迟期记住的目标模式重新接管。
+    pub fn tick(&mut self) -> bool {
+        match self.exit_deadline {
+            Some(deadline) if Instant::now() >= deadline => {
+                self.deactivate_active();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// 帧事件（仅活跃实例）。内部每 FAS_TEMP_REFRESH 读一次 temp_path
     /// （按全局预识别刻度换算后存 last_temp 并 set_temperature）。
     // [events]
     pub fn on_frame(&mut self, delta_ns: u64) {
         if !self.is_active() {
             return;
         }
-        if let Some(inst) = self.active_instance_mut() {
-            inst.last_fg = Instant::now();
-        }
         self.refresh_temperature();
-        if let Some(inst) = self.active_instance_mut() {
+        if let Some(inst) = self.instance.as_mut() {
             inst.controller.update_frame(delta_ns);
         }
     }
 
-    /// C6：负载事件（仅活跃实例）update_cpu_util(fg_util) + update_core_utils(core_utils)。
+    /// 负载事件（仅活跃实例）update_cpu_util(fg_util) + update_core_utils(core_utils)。
     pub fn on_load_update(&mut self, fg_util: f32, core_utils: &[f32]) {
-        if let Some(inst) = self.active_instance_mut() {
+        if let Some(inst) = self.instance.as_mut() {
             inst.controller.update_cpu_util(fg_util);
             inst.controller.update_core_utils(core_utils);
         }
     }
 
-    /// 当前活跃实例的帧率（fps）：FAS 未启动（无活跃实例）或窗口尚无样本时
-    /// 返回 None——调用方据此在 status.csv 的 fps 列写 "-"。
-    /// 只读快照，不推进任何引擎状态（不得用 active_instance_mut）。
+    /// 当前活跃实例的帧率（fps）：FAS 未启动或窗口尚无样本时返回 None——
+    /// 调用方据此在 status.csv 的 fps 列写 "-"。只读快照，不推进引擎状态。
     pub fn current_fps(&self) -> Option<f32> {
-        self.active_instance()?.controller.current_fps()
-    }
-
-    /// C3：注销超时非活跃实例（活跃实例豁免——长前台也可能超 60s，last_fg 不作注销依据）。
-    /// 1s 周期调用，先收集被删包名再 retain。
-    pub fn reap(&mut self) {
-        let active = self.active_pkg.clone();
-        let expired: Vec<String> = self
-            .instances
-            .iter()
-            .filter(|i| {
-                Some(&i.package) != active.as_ref() && i.last_fg.elapsed() >= FAS_INSTANCE_TTL
-            })
-            .map(|i| i.package.clone())
-            .collect();
-        if expired.is_empty() {
-            return;
-        }
-        self.instances.retain(|i| {
-            Some(&i.package) == active.as_ref() || i.last_fg.elapsed() < FAS_INSTANCE_TTL
-        });
-        for pkg in expired {
-            info!(
-                "{}",
-                t_with_args(
-                    "scheduler-fas-destroy",
-                    &fluent_args!("pkg" => pkg.as_str())
-                )
-            );
-            crate::logger::devimp_event("fas", &pkg, "destroy");
-        }
+        self.instance.as_ref()?.controller.current_fps()
     }
 
     // [helpers]
-    /// 只读版活跃实例查找（current_fps 等只读快照用）
-    fn active_instance(&self) -> Option<&FasInstance> {
-        let pkg = self.active_pkg.as_ref()?;
-        self.instances.iter().find(|i| &i.package == pkg)
-    }
-
-    fn active_instance_mut(&mut self) -> Option<&mut FasInstance> {
-        let pkg = self.active_pkg.as_ref()?;
-        self.instances.iter_mut().find(|i| &i.package == pkg)
-    }
-
     /// 每 FAS_TEMP_REFRESH 读一次温度源（按全局预识别的刻度换算为 ℃），
-    /// 缓存 last_temp 并喂给活跃实例的引擎内部限温逻辑
-    /// （core_temp_threshold=0 时引擎侧无效，此处照常喂）。
+    /// 缓存 last_temp 并喂给引擎内部限温逻辑（core_temp_threshold=0 时无效，此处照常喂）。
     fn refresh_temperature(&mut self) {
         let Some(path) = self.temp_path.as_ref() else {
             return;
@@ -316,7 +264,7 @@ impl FasManager {
         let divisor = crate::utils::battery_temp_divisor().unwrap_or(10.0);
         let temp = raw / divisor;
         self.last_temp = temp;
-        if let Some(inst) = self.active_instance_mut() {
+        if let Some(inst) = self.instance.as_mut() {
             inst.controller.set_temperature(temp);
         }
     }

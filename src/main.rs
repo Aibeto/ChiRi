@@ -4,8 +4,10 @@ mod chiri;
 mod common;
 pub mod fas_types;
 pub mod i18n;
+mod down;
 mod logger;
 mod monitor;
+mod rhine;
 mod scheduler;
 pub mod utils;
 use crate::i18n::{load_language, t, t_with_args};
@@ -178,6 +180,19 @@ fn main() -> Result<()> {
         }
     }
 
+    // [rhine]
+    // 实验室（rhine）启动期处理：先按 rhine-back.chr 还原上次的改动，再按 rhine.chr
+    // 决定要不要重新套用。必须排在下面首次 Config::load 之前——还原写的就是 meta.yaml，
+    // 晚了本轮就读到旧值（要等下一次热重载才纠正）。
+    // 开机路径的意义：service.sh 已经把 rhine.chr 清空，光看它看不出要不要还原，
+    // 唯一信号是残留的 rhine-back.chr。
+    // 只有 Chiri 走这条（实验室是 Chiri 专属，非 Chiri 连文件都不生成）。
+    let rhine_report = if chiri_active {
+        rhine::on_startup(&root, &config_path)
+    } else {
+        rhine::StartupReport::default()
+    };
+
     // [lang_logger]
     // 4. 立即加载语言与日志（两套 Config 的 meta 结构一致，先用它初始化）
     let (language, loglevel) = if chiri_active {
@@ -241,6 +256,13 @@ fn main() -> Result<()> {
             )
         );
     }
+    // 上一轮存活不足 30s（崩溃循环）：其日志已被直接丢弃、未打包。归档发生在
+    // logger::init 之前，当时无日志可打，这里补一条说明，否则日志凭空消失无从解释
+    if logger::short_session_discarded() {
+        info!("{}", t("main-log-short-session-discarded"));
+    }
+    // 实验室启动期结果：同样发生在 init 之前，这里补打
+    rhine::report_startup(&rhine_report);
 
     // 白名单导出结果（文件写入在 logger::init 之前完成，日志延后到此处才可见）
     if let Some(count) = exported_special {
@@ -314,6 +336,8 @@ fn main() -> Result<()> {
             Arc::new(RwLock::new(cfg)),
             ak_active.clone(),
             fas_active.clone(),
+            // 启动期收敛后的实验室模式：监听线程据此判断「文件没变就不重复套用」
+            rhine_report.enabled.clone(),
         )
     } else {
         let cfg = Config::load(config_path.to_str().unwrap()).unwrap_or_default();

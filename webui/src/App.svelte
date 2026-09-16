@@ -6,13 +6,16 @@
   import LiveStatus from '@/components/LiveStatus.svelte'
   import AppsView from '@/views/AppsView.svelte'
   import ConfigView from '@/views/ConfigView.svelte'
+  import LabView from '@/views/LabView.svelte'
   import LogsView from '@/views/LogsView.svelte'
   import OverviewView from '@/views/OverviewView.svelte'
   import { i18n, t, toggleLocale } from '@/i18n/index.svelte'
-  import { go, initRouter, router, VIEW_IDS } from '@/router.svelte'
+  import { go, initRouter, navOwner, router, VIEW_IDS } from '@/router.svelte'
   import { app } from '@/state.svelte'
 
   const navItems = $derived(VIEW_IDS.map(id => ({ id, label: t(`nav.${id}`) })))
+  // 二级视图（实验室）挂在配置页下，导航高亮跟着父视图走
+  const navActive = $derived(navOwner(router.view))
   const daemonLabel = $derived(t(`daemon.${app.daemonState}`))
 
   onMount(() => {
@@ -49,8 +52,10 @@
       <ConfigView />
     {:else if router.view === 'apps'}
       <AppsView />
-    {:else}
+    {:else if router.view === 'logs'}
       <LogsView />
+    {:else}
+      <LabView />
     {/if}
   </main>
 
@@ -58,8 +63,8 @@
     {#each navItems as item (item.id)}
       <button
         type="button"
-        class="ak-button nav {router.view === item.id ? 'nav--active' : ''}"
-        aria-current={router.view === item.id ? 'page' : undefined}
+        class="ak-button nav {navActive === item.id ? 'nav--active' : ''}"
+        aria-current={navActive === item.id ? 'page' : undefined}
         onclick={() => go(item.id)}
       >
         {item.label}

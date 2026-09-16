@@ -1356,8 +1356,145 @@ fn collect_staging_dirs(root: &Path) -> Vec<PathBuf> {
     out
 }
 
+/// 短会话判定阈值：上一轮 daemon 启动距本次启动不足该秒数 → 丢弃其日志、不打包。
+/// 崩溃循环（启动即崩，看门狗 3→10→30→60s 退避重拉）每轮只产生几行日志，
+/// 逐轮打包会把 logd/ 塞满几 KB 的空壳归档，且把真正的崩溃现场淹掉。
+const SHORT_SESSION_SECS: i64 = 30;
+
+/// 本轮是否因「上一轮为短会话」而丢弃了日志（供 main 在 logger::init 之后打点，
+/// 归档发生在 init 之前，当时无日志可打；不打点则日志凭空消失无从解释）
+static SHORT_SESSION_DISCARDED: AtomicBool = AtomicBool::new(false);
+
+/// 本轮是否丢弃了上一轮短会话日志（main 在 logger::init 后查询打点）
+pub fn short_session_discarded() -> bool {
+    SHORT_SESSION_DISCARDED.load(Ordering::Acquire)
+}
+
+/// 当前 epoch 秒（与 mktime 结果同基准）
+fn now_epoch_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// 解析 daemon.log 行首的 `[YYYY-MM-DD HH:MM:SS]` → epoch 秒。
+///
+/// **时区口径**：log4rs 1.4 的 `{d(...)}` 走 chrono，默认**设备本地时间**
+/// （仅显式传第二个参数 `utc` 才是 UTC），本项目的 pattern 未指定 → 本地时间。
+/// 因此这里必须用 `mktime`（按本地时区解释）而不是 `timegm`（按 UTC 解释），
+/// 否则解析结果会偏一个时区（东八区即 -8h），30s 判定彻底失效。
+/// `tm_isdst = -1`：交给 libc 按当前 DST 规则判定，避免夏令时切换期差一小时。
+#[cfg(unix)]
+fn parse_log_ts_secs(line: &str) -> Option<i64> {
+    let s = line.trim_start().strip_prefix('[')?;
+    let ts = &s[..s.find(']')?];
+    let (date, time) = ts.split_once(' ')?;
+    let (y, rest) = date.split_once('-')?;
+    let (mo, d) = rest.split_once('-')?;
+    let (h, rest) = time.split_once(':')?;
+    let (mi, se) = rest.split_once(':')?;
+    let (y, mo, d, h, mi, se): (i32, i32, i32, i32, i32, i32) = (
+        y.parse().ok()?,
+        mo.parse().ok()?,
+        d.parse().ok()?,
+        h.parse().ok()?,
+        mi.parse().ok()?,
+        se.parse().ok()?,
+    );
+    unsafe {
+        let mut tm: libc::tm = std::mem::zeroed();
+        tm.tm_year = y - 1900;
+        tm.tm_mon = mo - 1;
+        tm.tm_mday = d;
+        tm.tm_hour = h;
+        tm.tm_min = mi;
+        tm.tm_sec = se;
+        tm.tm_isdst = -1;
+        let t = libc::mktime(&mut tm);
+        if t < 0 { None } else { Some(t) }
+    }
+}
+
+#[cfg(not(unix))]
+fn parse_log_ts_secs(_line: &str) -> Option<i64> {
+    None
+}
+
+/// 读 `logs/daemon.log` 首行时间戳（epoch 秒）。daemon.log 单文件可达 50MB，
+/// **只读前 256 字节**（首行必然完整），绝不整读。
+fn first_log_line_secs(path: &Path) -> Option<i64> {
+    let mut f = fs::File::open(path).ok()?;
+    let mut buf = [0u8; 256];
+    let n = f.read(&mut buf).ok()?;
+    if n == 0 {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&buf[..n]);
+    parse_log_ts_secs(text.lines().next()?)
+}
+
+/// 上一轮是否为短会话（存活 < SHORT_SESSION_SECS）。
+/// 读不到/解析失败时返回 false —— 保守走正常归档，绝不因判定失败而丢日志。
+fn is_short_session(daemon_log: &Path) -> bool {
+    let Some(start) = first_log_line_secs(daemon_log) else {
+        return false;
+    };
+    // 时钟回拨（用户改时间/NTP 校正）时差值为负：不当作短会话，避免误删
+    (0..SHORT_SESSION_SECS).contains(&now_epoch_secs().saturating_sub(start))
+}
+
+/// 清空目录内容（**保留 `keep` 里的文件名**，目录本身不删）。
+fn clear_dir_keep(dir: &Path, keep: &[&str]) {
+    let Ok(rd) = fs::read_dir(dir) else {
+        return;
+    };
+    for e in rd.flatten() {
+        let p = e.path();
+        let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if keep.contains(&name) {
+            continue;
+        }
+        if p.is_dir() {
+            let _ = fs::remove_dir_all(&p);
+        } else {
+            let _ = fs::remove_file(&p);
+        }
+    }
+}
+
+/// 串行打包一批 staging 目录：每个目录打成 `logd/<目录名>.zip`（沿用目录名即
+/// 保留其原始时间戳），成功则删除目录，失败保留并写 ARCHIVE_FAILED.txt；
+/// 空目录直接丢弃，不留空 zip。
+fn pack_staging_dirs(logd: &Path, dirs: Vec<PathBuf>) {
+    for dir in dirs {
+        let mut files = Vec::new();
+        if collect_files(&dir, &mut files).is_ok() && files.is_empty() {
+            let _ = fs::remove_dir_all(&dir);
+            continue;
+        }
+        let stem = dir
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| STAGING_PREFIX.to_string());
+        let zip_path = unique_path(logd, &stem, "zip");
+        match pack_dir_stored_zip(&dir, &zip_path) {
+            Ok(()) => {
+                let _ = fs::remove_dir_all(&dir);
+            }
+            Err(_) => {
+                let _ = fs::write(
+                    dir.join("ARCHIVE_FAILED.txt"),
+                    "zip packing failed; this directory was kept for inspection\n",
+                );
+            }
+        }
+    }
+}
+
 /// 启动归档入口。返回 (logs 归档 zip 名, devimp 归档 zip 名)（logger::init 后供
-/// main info 打点）；未归档（首次安装 / 空目录 / rename 失败）对应项为 None。
+/// main info 打点）；未归档（首次安装 / 空目录 / rename 失败 / 短会话丢弃）
+/// 对应项为 None。
 pub fn archive_on_startup(root: &Path) -> (Option<String>, Option<String>) {
     // 归档命名用本地时间 MMDD-HHmmss（人眼可辨）；同秒内两次启动会重名，
     // 由 unique_staging 补 -N 后缀（重名会让 rename 失败、本次整个不归档）
@@ -1366,9 +1503,36 @@ pub fn archive_on_startup(root: &Path) -> (Option<String>, Option<String>) {
     // 先把上一轮遗留的 staging 目录收进本轮打包队列（必须在 rename 之前扫描）
     let orphans = collect_staging_dirs(root);
 
+    let src_logs = root.join("logs");
+    let src_devimp = root.join("devimp");
+
+    // ── 短会话丢弃：上一轮存活不足 30s 直接清空两目录、不打包 ──
+    // 判据取自 logs/daemon.log 首行（上一轮进程的首条日志 ≈ 其启动时刻，本地时间）。
+    // 必须在 rename 之前判定：rename 后 logs/ 已被换成空目录，就读不到上一轮日志了。
+    if is_short_session(&src_logs.join("daemon.log")) {
+        // watchdog.pid 必须保留：看门狗先于 daemon 启动、WebUI stopScheduler 靠它
+        // 终止看门狗，清掉会导致「关闭调度」失效（与归档路径同口径）
+        clear_dir_keep(&src_logs, &["watchdog.pid"]);
+        clear_dir_keep(&src_devimp, &[]);
+        SHORT_SESSION_DISCARDED.store(true, Ordering::Release);
+        // 遗留 staging 目录仍照常回收打包——它们属于更早的会话，不是本轮垃圾，
+        // 且在崩溃循环里正是最有价值的那份现场
+        if !orphans.is_empty() {
+            let logd = root.join("logd");
+            let _ = fs::create_dir_all(&logd);
+            let root = root.to_path_buf();
+            let _ = std::thread::Builder::new()
+                .name("log_archiver".to_string())
+                .spawn(move || {
+                    pack_staging_dirs(&logd, orphans);
+                    enforce_dir_limits(&root);
+                });
+        }
+        return (None, None);
+    }
+
     // ── logs/：rename → 新建 logs/ → 复制回 watchdog.pid ──
     let mut logs_tmp: Option<PathBuf> = None;
-    let src_logs = root.join("logs");
     let logs_has_entries = fs::read_dir(&src_logs)
         .map(|mut d| d.next().is_some())
         .unwrap_or(false);
@@ -1387,7 +1551,6 @@ pub fn archive_on_startup(root: &Path) -> (Option<String>, Option<String>) {
 
     // ── devimp/：rename → 新建空目录接住本进程新写入 ──
     let mut devimp_tmp: Option<PathBuf> = None;
-    let src_devimp = root.join("devimp");
     let devimp_has_entries = fs::read_dir(&src_devimp)
         .map(|mut d| d.next().is_some())
         .unwrap_or(false);
@@ -1420,30 +1583,7 @@ pub fn archive_on_startup(root: &Path) -> (Option<String>, Option<String>) {
             .name("log_archiver".to_string())
             .spawn(move || {
                 // 遗留目录先打：本轮数据即便再次被打断，下次启动还能回收
-                for dir in orphans {
-                    let mut files = Vec::new();
-                    if collect_files(&dir, &mut files).is_ok() && files.is_empty() {
-                        // 空目录（rename 成功但内无文件）直接丢弃，不留空 zip
-                        let _ = fs::remove_dir_all(&dir);
-                        continue;
-                    }
-                    let stem = dir
-                        .file_name()
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_else(|| STAGING_PREFIX.to_string());
-                    let zip_path = unique_path(&logd, &stem, "zip");
-                    match pack_dir_stored_zip(&dir, &zip_path) {
-                        Ok(()) => {
-                            let _ = fs::remove_dir_all(&dir);
-                        }
-                        Err(_) => {
-                            let _ = fs::write(
-                                dir.join("ARCHIVE_FAILED.txt"),
-                                "zip packing failed; this directory was kept for inspection\n",
-                            );
-                        }
-                    }
-                }
+                pack_staging_dirs(&logd, orphans);
                 if let Some(dir) = logs_tmp {
                     let zip_path = logd.join(&logs_zip_name);
                     match pack_dir_stored_zip(&dir, &zip_path) {

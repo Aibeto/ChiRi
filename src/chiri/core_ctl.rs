@@ -3,7 +3,7 @@
 /// 核心在线控制器接管（ChiRi 专属）。
 ///
 /// 三态状态机（互斥，按「最近一次 apply」切换，内部去重）：
-/// - **Boost**（performance/fast/特调）：各 cluster 的 core_ctl `min_cpus` 抬到
+/// - **Boost**（boost/vector/特调）：各 cluster 的 core_ctl `min_cpus` 抬到
 ///   全组常在线，防止厂商热插拔把大核下线、与 ChiRi 升降频决策打架；
 /// - **Scenemode 离线**（息屏 5 分钟后的深度省电）：解除 boost 后直接写
 ///   `/sys/devices/system/cpu/cpuN/online`——**小核 + 大核全开常驻**（频率

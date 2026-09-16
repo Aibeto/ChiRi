@@ -404,7 +404,7 @@ impl CoreGroupWorker {
             }
         } else {
             self.cluster.up_wait = 0;
-            // 先算降频落点：与当前频点相同（ceiling/floor 钳制稳态，如 powersave
+            // 先算降频落点：与当前频点相同（ceiling/floor 钳制稳态，如 reduce
             // little ceiling 0.60 卡住时 util=1.00、tgt 略低于 current 但落点同一档
             // OPP）则写频无效果——不计数、不写频，decision 标 hold。此前该稳态
             // 每 tick 标 down 且 deb_down 无限增长，devimp 出现「满载却 decision=down」

@@ -74,12 +74,17 @@ const WATCH_SETTLE: Duration = Duration::from_millis(100);
 impl DirWatcher {
     /// 监听 `dir` 目录（不递归）。目录不存在/无权限时返回 Err，由调用方退避重试。
     pub fn new(dir: &Path) -> Result<Self> {
-        let mut inotify = Inotify::init()?;
         // CLOSE_WRITE 覆盖直接写入；MOVED_TO 覆盖原子替换（WebUI 用临时文件 + mv
         // 保存配置时是 rename 而非写打开，只有 MOVED_TO 能感知）
-        inotify
-            .watches()
-            .add(dir, WatchMask::CLOSE_WRITE | WatchMask::MOVED_TO)?;
+        Self::new_with_mask(dir, WatchMask::CLOSE_WRITE | WatchMask::MOVED_TO)
+    }
+
+    /// 自定义事件掩码。**只有「删掉文件也算一次状态变更」时才需要更多事件**：
+    /// 配置与实验室那两条链路不需要（文件被删会被自愈补建，仍走 CLOSE_WRITE），
+    /// 多给它反而会因误删触发一轮重载。
+    pub fn new_with_mask(dir: &Path, mask: WatchMask) -> Result<Self> {
+        let inotify = Inotify::init()?;
+        inotify.watches().add(dir, mask)?;
         Ok(Self {
             inotify,
             buffer: [0u8; 1024],

@@ -11,9 +11,9 @@ pub fn get_rules_path() -> PathBuf {
     common::get_module_root().join("rules.yaml")
 }
 
-/// global_mode 缺省时使用模块模板中的均衡（balance）模式
+/// global_mode 缺省时使用模块模板中的默认（default）模式
 fn default_global_mode() -> String {
-    "balance".to_string()
+    "default".to_string()
 }
 
 /// app_modes 缺失或为 null 时按空表处理：WebUI 旧版本会把空 app_modes 写成
@@ -47,7 +47,7 @@ pub struct RulesConfig {
     // serde 报 missing field，read_config 回退 Default（dynamic_enabled=false）
     // 进而 dynamic 模式失效、CLG 无法按规则启动。
     // 缺省值需与模块随附 rules.yaml 模板保持一致：
-    //   dynamic_enabled 缺省 true、global_mode 缺省 "balance"，
+    //   dynamic_enabled 缺省 true、global_mode 缺省 "default"，
     // 否则删除字段后仍会进入空模式导致 CLG 不接管 CPU。
     #[serde(default = "crate::utils::default_true")]
     pub dynamic_enabled: bool,

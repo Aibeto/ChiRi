@@ -80,13 +80,13 @@ function fakeDaemonLog(): string {
     ['INFO', 'yumi::main', 'yumi-module-starting 调度开始启动'],
     ['INFO', 'yumi::main', 'main-chiri-scheduler-selected 选择 ChiRi 调度'],
     ['INFO', 'yumi::monitor::app_detect', 'app-detect-init 前台检测已就绪'],
-    ['DEBUG', 'yumi::chiri', 'scheduler-event-mode-change pkg=com.tencent.tmgp.sgame old=balance new=performance'],
-    ['INFO', 'yumi::chiri', 'scheduler-clg-init mode=performance'],
+    ['DEBUG', 'yumi::chiri', 'scheduler-event-mode-change pkg=com.tencent.tmgp.sgame old=default new=boost'],
+    ['INFO', 'yumi::chiri', 'scheduler-clg-init mode=boost'],
     ['DEBUG', 'yumi::logger', 'status-log-snapshot 写入成功'],
     ['WARN', 'yumi::chiri::thermal', 'thermal-cap 温度接近软限，已压制性能上限'],
     ['INFO', 'yumi::chiri::fas_manager', 'fas instance activated pkg=com.miHoYo.Yuanshen'],
     ['ERROR', 'yumi::chiri::fas', 'fas policy load failed: missing embedded config'],
-    ['DEBUG', 'yumi::chiri::clg', 'clg-tick mode=performance target=2200000'],
+    ['DEBUG', 'yumi::chiri::clg', 'clg-tick mode=boost target=2200000'],
     ['INFO', 'yumi::logger', 'log-archive-submitted zip=logd/ziped_0913-120000.zip']
   ]
   const lines: string[] = []
@@ -102,7 +102,7 @@ function fakeStatusCsv(): string {
     'timestamp,type,mode,package,charge,screen_on,batt_temp,cpu_temp,thermal_cap_pct,thermal_free_pct,' +
     'clg_active,psi_cpu_some,psi_io_some,psi_mem_some,gpu_busy_pct,batt_voltage_v,batt_current_ma,' +
     'batt_power_w,wakeups,migrations,freq_trans,fps'
-  const modes = ['balance', 'performance', 'balance', 'fas', 'balance']
+  const modes = ['default', 'boost', 'default', 'fas', 'default']
   const pkgs = ['com.tencent.mm', 'com.tencent.tmgp.sgame', '', 'com.miHoYo.Yuanshen', 'com.tencent.mm']
   const rows: string[] = [header]
   for (let i = 0; i < 60; i++) {
@@ -119,7 +119,7 @@ function fakeStatusCsv(): string {
         (42 + (i % 10) * 0.5).toFixed(1),
         '80',
         '72',
-        modes[idx] === 'balance' ? '1' : '1',
+        modes[idx] === 'default' ? '1' : '1',
         (i % 5) * 1.3,
         (i % 4) * 0.8,
         (i % 3) * 0.4,
@@ -182,11 +182,14 @@ function seed(): void {
   if (isChiri) {
     put('special_tuned.yaml', specialTunedExport())
     put('fas_whitelist.yaml', fasWhitelistExport())
+    // 实验室状态：正常形态是只有注释（语义为空 = 未启用），点「启用」后会被写成模式 key。
+    // 放在 empty 分支之前，`?state=empty` 时该文件缺失，正好覆盖「文件不存在 = 未启用」。
+    put('rhine.chr', '# rhine.chr: 实验室状态。没启用时只有注释，启用了就写入模式名。\n')
   }
 
   if (empty) return
 
-  put('current_mode.chr', 'balance')
+  put('current_mode.chr', 'default')
   put('logs/watchdog.pid', '12345\n')
   put('logs/daemon.log', fakeDaemonLog())
   if (isChiri) put('logs/status.csv', fakeStatusCsv())
@@ -228,9 +231,17 @@ const TAIL_CMD = /^tail -c (\d+) (.+)$/
 const LS_CMD = /^ls -1 (.+)$/
 const WRITE_CMD = /^printf '%s' (\S+) \| base64 -d > (.+) && mv -f (.+) (.+) \|\| \{ rm -f (.+); exit 1; \}$/
 const KILL_CMD = /killall -9 yumi/
+// 导出历史日志：启动命令与轮询探测。mock 直接回「gzip 回退产物已生成」，
+// 免得在无设备预览里要等满轮询超时
+const EXPORT_START_CMD = /^nohup sh -c /
+const EXPORT_POLL_CMD = /\/sdcard\/Download\/devimp_\d{4}-\d{6}\.tar\.xz/
 
 function handle(cmd: string): ExecResult | null {
   if (FLOCK_CMD.test(cmd)) return ok('1\n')
+
+  if (EXPORT_START_CMD.test(cmd)) return ok('started\n')
+  // 回放探测命令：直接给「gzip 回退产物已生成」+ 一份进度行，预览里不必等超时
+  if (EXPORT_POLL_CMD.test(cmd)) return ok('s:gz\nb:2097152\nd:1\nt:1\n')
 
   if (FLOCK_PROBE.test(cmd)) {
     return ok(daemonRunning ? 'HELD\n' : 'FREE\n')

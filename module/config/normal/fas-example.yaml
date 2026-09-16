@@ -9,11 +9,11 @@
 #       未列出的字段自动取 src/fas_types.rs::FasRulesConfig 默认值）
 #
 #  运行时行为速览（详见 AGENTS.md「FAS 帧感知调度」小节）：
-#    - 白名单应用前台 → 独立 FAS 实例接管（CLG/akmode/fast 全暂停，
-#      温控/触摸升频豁免），丢失前台 60 秒后实例注销
+#    - 白名单应用前台 → 单实例 FAS 接管（governor 切 performance，退出时按快照恢复；
+#      CLG/akmode/vector 全暂停，温控/触摸升频豁免）
+#    - 失去前台进入 15 秒延迟期（deactivate_delay_secs）：FAS 仍持有接管，期间切回
+#      白名单应用无缝续期；到期才恢复频率与 governor、交回 CLG
 #    - 帧事件驱动 per-policy 锁频（min=max）+ 容量加权分频 + PID/Jank
-#    - 息屏释放（频率与 governor 恢复），降载交由 CLG doze / scenemode，
-#      亮屏后 ModeChange / 1s 兜底重新激活（实例保留 60s 复用）
 
 # [whitelist]  fas.yaml 的结构参考
 # 精确包名 → 配置名映射；配置名对应 module/config/normal/fas/<配置名>.yaml
@@ -86,14 +86,21 @@ fas_rules:
   downgrade_boost_perf_inc: 0.18 # 提升的 perf 量
   downgrade_boost_duration: 45 # 持续帧数
 
-  # ── 连续稳态快速衰减（省电核心：稳帧后逐步降频）─────────────
-  fast_decay_frame_threshold: 75 # 连续稳态帧数触发
-  fast_decay_perf_threshold: 0.70 # perf 高于此值才衰减
-  fast_decay_max_step: 0.022 # 单帧最大衰减步长
-  fast_decay_min_step: 0.004 # 单帧最小衰减步长
+  # ── 连续稳态衰减（省电核心：稳帧后逐步降频）─────────────
+  # 2026-09-17 由 `fast_decay_*` 改名：`fast` 已不是档位名（档位改名 reduce/default/
+  # boost/vector），继续叫 fast 会和「极速档」混淆；FAS 只是帧感知调度，与它无关。
+  steady_decay_frame_threshold: 75 # 连续稳态帧数触发
+  steady_decay_perf_threshold: 0.70 # perf 高于此值才衰减
+  steady_decay_max_step: 0.022 # 单帧最大衰减步长
+  steady_decay_min_step: 0.004 # 单帧最小衰减步长
 
   # ── Jank 卡顿保护 ────────────────────────────────────────
   jank_cooldown_frames: 15 # Jank 抢救后的冷却帧数
+
+  # ── 延迟退出 ──────────────────────────────────────────────
+  # 失去白名单前台后的延迟退出秒数：期间切回白名单应用无缝续期，超时才真正
+  # 退出（恢复频率，并把调速器从 performance 按快照恢复）。
+  deactivate_delay_secs: 15
 
   # ── PID 输出限幅（防过冲）────────────────────────────────
   max_inc_damped: 0.045 # 阻尼期单帧最大升频

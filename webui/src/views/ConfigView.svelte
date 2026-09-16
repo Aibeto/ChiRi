@@ -1,6 +1,6 @@
 <script lang="ts">
   // ConfigView.svelte: [header] [fields] [commit]
-  // meta.yaml 只有 5 个字段可写；每次写入都会触发守护进程全量热重载，
+  // meta.yaml 只有 6 个字段可写；每次写入都会触发守护进程全量热重载，
   // 因此改动先落草稿、由「保存」一次性提交（单次读-改-写）。
   import { onMount } from 'svelte'
   import Panel from '@/components/Panel.svelte'
@@ -8,6 +8,7 @@
   import ToggleField from '@/components/ToggleField.svelte'
   import { LOG_LEVELS, LANGUAGES, type WritableField } from '@/contract/meta'
   import { t } from '@/i18n/index.svelte'
+  import { go } from '@/router.svelte'
   import { app } from '@/state.svelte'
 
   const values = $derived((app.metaSnapshot?.values ?? {}) as Record<string, unknown>)
@@ -35,9 +36,28 @@
   const devRecord = $derived(Boolean(value('dev_record', false)))
   const fasEnabled = $derived(Boolean(value('fas_enabled', true)))
   const scenemodeEnabled = $derived(Boolean(value('scenemode_enabled', true)))
+  const threadBind = $derived(Boolean(value('thread_bind', true)))
+
+  /** 实验室接管的开关：置灰不可切换（守护进程正按实验室定义写它，手改也会被写回去） */
+  const takeover = $derived(new Set(app.labTakeover))
+
+  /** 被接管时在提示里点名原因——只看到「灰了」却不知道为什么，最容易被当成 bug */
+  function hint(field: WritableField, base: string): string {
+    if (!takeover.has(field)) return base
+    const mode = app.labMode ? t(`lab.mode.${app.labMode}`) : ''
+    return `${base} · ${t('config.labTakenOver', { mode })}`
+  }
 
   onMount(() => {
-    if (!app.ready) void app.loadOverview()
+    // 顺序不能颠倒：isChiri 由 loadOverview 得出，冷启动直接落在本页时它还是 false，
+    // 先判就会漏掉 loadLab —— 实验室接管的开关不会置灰，用户改完还会被守护进程写回去
+    void (async () => {
+      if (!app.ready) await app.loadOverview()
+      // 实验室入口要显示当前有没有启用，进配置页时顺手读一次
+      if (app.isChiri) await app.loadLab()
+    })()
+    // DOWN 停摆开关（高级设置）显示的是 down.chr 的实际内容
+    void app.loadDown()
   })
 </script>
 
@@ -119,20 +139,29 @@
 
       <ToggleField
         label={t('config.fasEnabled')}
-        hint={t('config.fasEnabled.hint')}
+        hint={hint('fas_enabled', t('config.fasEnabled.hint'))}
         checked={fasEnabled}
         pending={app.draft.fas_enabled !== undefined}
-        disabled={!app.metaValid}
+        disabled={!app.metaValid || takeover.has('fas_enabled')}
         onchange={next => app.setDraft('fas_enabled', next)}
       />
 
       <ToggleField
         label={t('config.scenemodeEnabled')}
-        hint={t('config.scenemodeEnabled.hint')}
+        hint={hint('scenemode_enabled', t('config.scenemodeEnabled.hint'))}
         checked={scenemodeEnabled}
         pending={app.draft.scenemode_enabled !== undefined}
-        disabled={!app.metaValid}
+        disabled={!app.metaValid || takeover.has('scenemode_enabled')}
         onchange={next => app.setDraft('scenemode_enabled', next)}
+      />
+
+      <ToggleField
+        label={t('config.threadBind')}
+        hint={hint('thread_bind', t('config.threadBind.hint'))}
+        checked={threadBind}
+        pending={app.draft.thread_bind !== undefined}
+        disabled={!app.metaValid || takeover.has('thread_bind')}
+        onchange={next => app.setDraft('thread_bind', next)}
       />
     </div>
 
@@ -170,12 +199,79 @@
       </div>
     </div>
   </Panel>
+
+  <!-- 高级设置：直接写调度进程的状态文件，不经过 meta.yaml 草稿/保存那套 -->
+  <Panel signal="action" title={t('config.advanced')} desc={t('config.advanced.hint')}>
+    <ToggleField
+      label={t('config.down')}
+      hint={t('config.down.hint')}
+      checked={app.downActive}
+      disabled={app.downPending}
+      onchange={next => app.setDown(next)}
+    />
+    {#if app.downError}
+      <p class="advanced__error">{app.downError}</p>
+    {/if}
+  </Panel>
+
+  {#if app.isChiri}
+    <!-- 实验室：二级页面入口。只显示「有没有启用」这一个事实，具体在实验室页里管 -->
+    <Panel
+      signal={app.labMode ? 'danger' : ''}
+      title={t('lab.entry')}
+      desc={t('lab.entry.hint')}
+    >
+      <div class="entry">
+        <p class="entry__state" data-on={app.labMode ? 'yes' : undefined}>
+          {app.labMode
+            ? t('lab.entry.on', { mode: t(`lab.mode.${app.labMode}`) })
+            : t('lab.entry.off')}
+        </p>
+        <button
+          type="button"
+          class="ak-button btn btn--ghost entry__open"
+          onclick={() => go('lab')}
+        >
+          {t('lab.entry.open')}
+        </button>
+      </div>
+    </Panel>
+  {/if}
 </div>
 
 <style>
   .stack {
     display: grid;
     gap: var(--ak-space-4);
+  }
+
+  .advanced__error {
+    margin: var(--ak-space-2) 0 0;
+    color: var(--ak-signal-danger);
+    font-size: 0.72rem;
+    line-height: 1.5;
+  }
+
+  .entry {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--ak-space-3);
+  }
+
+  .entry__state {
+    margin: 0;
+    color: var(--ak-text-secondary);
+    font-size: 0.8125rem;
+    line-height: 1.5;
+  }
+
+  .entry__state[data-on='yes'] {
+    color: var(--ak-signal-danger);
+  }
+
+  .entry__open {
+    flex: 0 0 auto;
   }
 
   .fields {

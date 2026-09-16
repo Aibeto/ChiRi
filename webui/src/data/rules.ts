@@ -25,7 +25,7 @@ export interface RulesInfo {
 export const EMPTY_RULES: RulesInfo = {
   yumiScheduler: true,
   dynamicEnabled: true,
-  globalMode: 'balance',
+  globalMode: 'default',
   appModes: {},
   ignoredApps: [],
   ok: false
@@ -67,7 +67,7 @@ export function parseRules(text: string): RulesInfo {
     return {
       yumiScheduler: asBool(obj.yumi_scheduler, true),
       dynamicEnabled: asBool(obj.dynamic_enabled, true),
-      globalMode: asString(obj.global_mode, 'balance'),
+      globalMode: asString(obj.global_mode, 'default'),
       appModes: asStringMap(obj.app_modes),
       ignoredApps: asStringList(obj.ignored_apps),
       ok: true
