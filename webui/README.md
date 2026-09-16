@@ -14,7 +14,7 @@ ksu.exec → kernel/shell（可注入） → contract（契约层） → data（
 | --- | --- |
 | `src/kernel/` | KernelSU 桥（`ksu.ts`）与可注入的 `ShellRunner`（`shell.ts`） |
 | `src/contract/` | 与守护进程的接口：路径与安全校验、三分类读取、meta 读写、存活探测、关闭调度 |
-| `src/data/` | 纯解析：status.csv（21 列）、daemon.log、白名单、rules、模式派生、应用标签 |
+| `src/data/` | 纯解析：status.csv（22 列，末列 fps 为 FAS 预留列）、daemon.log、白名单、rules、模式派生、应用标签 |
 | `src/views/` | 四屏：状态总览 / 配置 / 应用与规则 / 日志 |
 | `src/components/` | 面板、状态占位、开关、分段切换、确认弹层 |
 | `src/i18n/` | 界面文案（界面语言与 daemon 日志语言互不影响） |

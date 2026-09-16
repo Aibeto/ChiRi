@@ -6,7 +6,7 @@ import { filterByLevel, parseDaemonLog } from '@/data/daemon-log'
 const HEADER =
   'timestamp,type,mode,package,charge,screen_on,batt_temp,cpu_temp,thermal_cap_pct,thermal_free_pct,' +
   'clg_active,psi_cpu_some,psi_io_some,psi_mem_some,gpu_busy_pct,batt_voltage_v,batt_current_ma,' +
-  'batt_power_w,wakeups,migrations,freq_trans'
+  'batt_power_w,wakeups,migrations,freq_trans,fps'
 
 function row(overrides: Partial<Record<string, string>> = {}): string {
   const base: Record<string, string> = {
@@ -30,7 +30,8 @@ function row(overrides: Partial<Record<string, string>> = {}): string {
     batt_power_w: '-1.95',
     wakeups: '210',
     migrations: '6',
-    freq_trans: '902'
+    freq_trans: '902',
+    fps: '-'
   }
   return [
     'timestamp',
@@ -53,16 +54,17 @@ function row(overrides: Partial<Record<string, string>> = {}): string {
     'batt_power_w',
     'wakeups',
     'migrations',
-    'freq_trans'
+    'freq_trans',
+    'fps'
   ]
     .map(col => overrides[col] ?? base[col])
     .join(',')
 }
 
 describe('status.csv 解析', () => {
-  it('列数常量与守护进程表头一致（21 列）', () => {
-    expect(STATUS_COLUMN_COUNT).toBe(21)
-    expect(HEADER.split(',')).toHaveLength(21)
+  it('列数常量与守护进程表头一致（22 列）', () => {
+    expect(STATUS_COLUMN_COUNT).toBe(22)
+    expect(HEADER.split(',')).toHaveLength(22)
   })
 
   it('跳过表头并按列名取值', () => {
@@ -77,6 +79,13 @@ describe('status.csv 解析', () => {
     expect(r.battTemp).toBeCloseTo(35.5)
     expect(r.thermalCap).toBe(80)
     expect(r.battPower).toBeCloseTo(-1.95)
+    // FAS 未启动：fps 预留列为 '-' → null
+    expect(r.fps).toBeNull()
+  })
+
+  it('FAS 激活时 fps 列取实测值', () => {
+    const rows = parseStatusCsv([HEADER, row({ mode: 'fas', fps: '59.8' })].join('\n'))
+    expect(rows[0].fps).toBeCloseTo(59.8)
   })
 
   it('缺测占位为 null，空包名保留空串', () => {

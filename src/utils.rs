@@ -10,6 +10,8 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use std::thread;
+use std::time::Duration;
 
 use crate::fluent_args;
 use crate::i18n::t_with_args;
@@ -47,18 +49,67 @@ pub fn enable_perm<P: AsRef<Path>>(path: P) -> Result<()> {
     Ok(())
 }
 
-/// 监控指定路径的文件/目录事件
-pub fn watch_path<P: AsRef<Path>>(path_to_watch: P) -> Result<()> {
-    let mut inotify = Inotify::init()?;
-    // CLOSE_WRITE 覆盖直接写入；MOVED_TO 覆盖原子替换（WebUI 用临时文件 + mv 保存配置时
-    // 是 rename 而非写打开，只有 MOVED_TO 能感知），两者任一触发即返回并触发重载
-    inotify
-        .watches()
-        .add(path_to_watch, WatchMask::CLOSE_WRITE | WatchMask::MOVED_TO)?;
+/// 目录内**单个文件**的变更监听（配置热重载用）。
+///
+/// 两条硬约束（2026-09-16 修复「WebUI 改 meta 后热重载不生效」，详见下方注释）：
+/// 1. **跨重载复用同一个 inotify 实例**。此前每轮 `Inotify::init() → add_watch →
+///    read_events_blocking → 返回即 drop`，两轮之间没有任何 watch 在册，这期间
+///    到达的事件被内核直接丢弃。WebUI 保存是「先写同名 .webui.tmp 再 mv 覆盖」，
+///    产生 CLOSE_WRITE(tmp) 与 MOVED_TO(meta.yaml) 两条事件：监听器被前者唤醒、
+///    读到的是**覆盖前**的旧内容（INFO），而真正的 MOVED_TO 恰好落在重载窗口内
+///    被丢掉 —— 表现就是「日志显示重载成功，但级别仍是旧值」。
+/// 2. **按文件名过滤**。目录级 watch 会收到目录内所有文件的事件，不过滤就会在
+///    tmp 落盘那一刻提前重载；过滤后只在目标文件被 CLOSE_WRITE/MOVED_TO 时返回。
+///
+/// 命中后额外做 100ms 静默 + 清空积压（与 app_detect::watch_config_file 同口径）：
+/// 连续多次写入只触发一次重载，且读到的一定是最终内容。
+pub struct DirWatcher {
+    inotify: Inotify,
+    buffer: [u8; 1024],
+}
 
-    let mut buffer = [0u8; 1024];
-    inotify.read_events_blocking(&mut buffer)?;
-    Ok(())
+/// 命中事件后的静默合并窗口
+const WATCH_SETTLE: Duration = Duration::from_millis(100);
+
+impl DirWatcher {
+    /// 监听 `dir` 目录（不递归）。目录不存在/无权限时返回 Err，由调用方退避重试。
+    pub fn new(dir: &Path) -> Result<Self> {
+        let mut inotify = Inotify::init()?;
+        // CLOSE_WRITE 覆盖直接写入；MOVED_TO 覆盖原子替换（WebUI 用临时文件 + mv
+        // 保存配置时是 rename 而非写打开，只有 MOVED_TO 能感知）
+        inotify
+            .watches()
+            .add(dir, WatchMask::CLOSE_WRITE | WatchMask::MOVED_TO)?;
+        Ok(Self {
+            inotify,
+            buffer: [0u8; 1024],
+        })
+    }
+
+    /// 阻塞等待 `file_name` 发生变更；目录内其它文件的事件一律忽略并继续等待。
+    pub fn wait_change(&mut self, file_name: &str) -> Result<()> {
+        let target = std::ffi::OsStr::new(file_name);
+        loop {
+            let hit = {
+                let events = self.inotify.read_events_blocking(&mut self.buffer)?;
+                events
+                    .into_iter()
+                    .any(|ev| ev.name.as_deref() == Some(target))
+            };
+            if hit {
+                break;
+            }
+        }
+        // 静默窗口 + 清空积压：连续写入合并为一次重载（inotify fd 为非阻塞，
+        // 无事件时 read_events 返回 WouldBlock，循环随之结束）
+        thread::sleep(WATCH_SETTLE);
+        while let Ok(events) = self.inotify.read_events(&mut self.buffer) {
+            if events.peekable().peek().is_none() {
+                break;
+            }
+        }
+        Ok(())
+    }
 }
 
 // 读取文件内容解析为 f64

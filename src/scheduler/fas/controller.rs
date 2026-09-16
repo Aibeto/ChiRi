@@ -235,6 +235,18 @@ impl FasController {
         (1_000_000_000.0 / self.max_gear()) as u64 / 2
     }
 
+    /// 当前帧率（fps）——取 fps_window 窗口均值，与齿轮决策所用的 avg_fps
+    /// 同口径（窗口 120 帧，60fps 下约 2s）。
+    /// 供状态日志 status.csv 的 fps 列读取：FAS 未启动写 "-"，故窗口无样本
+    /// （尚未收到帧、加载退出/应用切换后已 clear）时返回 None。
+    pub fn current_fps(&self) -> Option<f32> {
+        if self.fps_window.count() == 0 {
+            None
+        } else {
+            Some(self.fps_window.mean())
+        }
+    }
+
     pub(super) fn refresh_cached_values(&mut self) {
         self.cached_norm = fps_norm(self.current_target_fps);
         self.cached_budget_ms = 1000.0 / self.current_target_fps.max(1.0);

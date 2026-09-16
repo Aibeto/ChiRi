@@ -229,6 +229,7 @@ fast-watchdog-release = [Fast] 负载源超时 ({ $secs }s)，释放极速锁频
 
 # --- Logger ---
 log-level-updated = 日志级别已更新为: { $level }
+logger-log-restart-for-archive = [Logger] { $dir } 已达到 { $mb }MB，立即重启调度以打包日志
 
 # --- Affinity（CPU 亲和与线程迁移）---
 affinity-boost-applied = [Affinity] boost 布局已应用: top-app/foreground → { $big }，后台分组 → { $little }

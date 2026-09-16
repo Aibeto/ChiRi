@@ -62,11 +62,21 @@ fi
 WATCHDOG_CMD="sh -c '
   PIDFILE=\"\$1\"; DAEMON=\"\$2\"; FLAG=\"\$3\"
   echo \$\$ > \"\$PIDFILE\"
+  BACKOFF=3
   while :; do
    [ -f \"\$FLAG\" ] && break      # 卸载标记 → 退出，不残留
    [ -f \"\$DAEMON\" ] || break    # 二进制被删 → 退出，不残留
-    \"\$DAEMON\"                    # 崩溃/退出后返回，sleep 后再拉起
-    sleep 3
+    started=\$(date +%s 2>/dev/null)
+    \"\$DAEMON\"                    # 崩溃/退出后返回，退避后再拉起
+    ended=\$(date +%s 2>/dev/null)
+    # 崩溃退避：退出用时 <60s 判为异常短命（启动即崩），sleep 3→10→30→60s 递增封顶，
+    # 防「3s 一次的重启风暴」把日志/IO 放大；活过 60s 或 date 不可用时回到 3s
+    if [ -n \"\$started\" ] && [ -n \"\$ended\" ] && [ \$(( ended - started )) -lt 60 ]; then
+      case \$BACKOFF in 3) BACKOFF=10 ;; 10) BACKOFF=30 ;; *) BACKOFF=60 ;; esac
+    else
+      BACKOFF=3
+    fi
+    sleep \$BACKOFF
   done
   rm -f \"\$PIDFILE\"
   exit 0

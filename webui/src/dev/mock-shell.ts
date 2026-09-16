@@ -101,7 +101,7 @@ function fakeStatusCsv(): string {
   const header =
     'timestamp,type,mode,package,charge,screen_on,batt_temp,cpu_temp,thermal_cap_pct,thermal_free_pct,' +
     'clg_active,psi_cpu_some,psi_io_some,psi_mem_some,gpu_busy_pct,batt_voltage_v,batt_current_ma,' +
-    'batt_power_w,wakeups,migrations,freq_trans'
+    'batt_power_w,wakeups,migrations,freq_trans,fps'
   const modes = ['balance', 'performance', 'balance', 'fas', 'balance']
   const pkgs = ['com.tencent.mm', 'com.tencent.tmgp.sgame', '', 'com.miHoYo.Yuanshen', 'com.tencent.mm']
   const rows: string[] = [header]
@@ -129,7 +129,9 @@ function fakeStatusCsv(): string {
         (i % 5 === 0 ? 5.2 : -1.95).toFixed(2),
         (200 + i * 3).toString(),
         (5 + (i % 9)).toString(),
-        (900 + i * 2).toString()
+        (900 + i * 2).toString(),
+        // fps 预留列：仅 fas 模式有实测值，其余为 '-'
+        modes[idx] === 'fas' ? (58 + (i % 5) * 0.6).toFixed(1) : '-'
       ].join(',')
     )
   }

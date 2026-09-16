@@ -249,6 +249,13 @@ impl FasManager {
         }
     }
 
+    /// 当前活跃实例的帧率（fps）：FAS 未启动（无活跃实例）或窗口尚无样本时
+    /// 返回 None——调用方据此在 status.csv 的 fps 列写 "-"。
+    /// 只读快照，不推进任何引擎状态（不得用 active_instance_mut）。
+    pub fn current_fps(&self) -> Option<f32> {
+        self.active_instance()?.controller.current_fps()
+    }
+
     /// C3：注销超时非活跃实例（活跃实例豁免——长前台也可能超 60s，last_fg 不作注销依据）。
     /// 1s 周期调用，先收集被删包名再 retain。
     pub fn reap(&mut self) {
@@ -280,6 +287,12 @@ impl FasManager {
     }
 
     // [helpers]
+    /// 只读版活跃实例查找（current_fps 等只读快照用）
+    fn active_instance(&self) -> Option<&FasInstance> {
+        let pkg = self.active_pkg.as_ref()?;
+        self.instances.iter().find(|i| &i.package == pkg)
+    }
+
     fn active_instance_mut(&mut self) -> Option<&mut FasInstance> {
         let pkg = self.active_pkg.as_ref()?;
         self.instances.iter_mut().find(|i| &i.package == pkg)

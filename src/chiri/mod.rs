@@ -415,6 +415,13 @@ pub fn start_scheduler_thread(
     let config_clone = shared_config.clone();
     let sys_path_clone = sys_path_exist.clone();
     let dirty_clone = config_dirty.clone();
+    // 只关心生效 meta 文件自身的事件：同目录下的临时文件（WebUI 的
+    // `meta.yaml.webui.tmp`、daemon 自愈的 `meta.yaml.tmp`）必须忽略，
+    // 否则会在原子替换完成前提前重载，读到旧内容（详见 utils::DirWatcher）
+    let config_file_name = config_path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "meta.yaml".to_string());
 
     thread::Builder::new()
         .name("config_watcher".to_string())
@@ -427,8 +434,28 @@ pub fn start_scheduler_thread(
                 .parent()
                 .map(|p| p.to_path_buf())
                 .unwrap_or(config_dir);
+            // inotify 实例跨重载复用（旧实现每轮重建，重载窗口内到达的事件被丢弃）
+            let mut watcher: Option<utils::DirWatcher> = None;
             loop {
-                if let Err(e) = utils::watch_path(&watch_dir) {
+                if watcher.is_none() {
+                    match utils::DirWatcher::new(&watch_dir) {
+                        Ok(w) => watcher = Some(w),
+                        Err(e) => {
+                            log::error!(
+                                "{}",
+                                t_with_args(
+                                    "config-watch-error",
+                                    &fluent_args!("error" => e.to_string())
+                                )
+                            );
+                            // 退避后再重试，避免持续错误时忙循环刷 CPU
+                            thread::sleep(std::time::Duration::from_secs(2));
+                            continue;
+                        }
+                    }
+                }
+                let waited = watcher.as_mut().unwrap().wait_change(&config_file_name);
+                if let Err(e) = waited {
                     log::error!(
                         "{}",
                         t_with_args(
@@ -436,7 +463,8 @@ pub fn start_scheduler_thread(
                             &fluent_args!("error" => e.to_string())
                         )
                     );
-                    // 退避后再重试，避免持续错误时忙循环刷 CPU
+                    // 丢弃异常实例（目录被重建/ fd 异常），下轮重新建立监听
+                    watcher = None;
                     thread::sleep(std::time::Duration::from_secs(2));
                     continue;
                 }
@@ -778,6 +806,9 @@ pub fn start_scheduler_thread(
                     crate::logger::set_devimp_package(&fg_package);
                     // 充放电状态：1s 一次读 status 节点（电流符号厂商方向不一，不可靠）
                     let charge_state = read_battery_charge_state();
+                    // fps 预留列：仅 FAS 激活时取活跃实例的窗口均值，
+                    // 其余（FAS 未启动/后台保留实例/窗口无样本）为 None → 写 "-"
+                    let fas_fps = fas_mgr.current_fps();
                     crate::logger::status_log_snapshot(
                         &current_mode,
                         &fg_package,
@@ -798,6 +829,7 @@ pub fn start_scheduler_thread(
                         last_bpf_stats.0,
                         last_bpf_stats.1,
                         last_bpf_stats.2,
+                        fas_fps,
                     );
                     telemetry_log_counter += 1;
                     // 开发记录 snap 行（1s）：环境上下文（开启 dev_record 才有 IO；

@@ -230,6 +230,7 @@ fast-watchdog-release = [Fast] load source timeout ({ $secs }s), releasing fast 
 
 # --- Logger ---
 log-level-updated = Log level updated to: { $level }
+logger-log-restart-for-archive = [Logger] { $dir } reached { $mb }MB, restarting scheduler to archive logs
 
 # --- Affinity (CPU affinity & thread migration) ---
 affinity-boost-applied = [Affinity] boost layout applied: top-app/foreground → { $big }, background groups → { $little }

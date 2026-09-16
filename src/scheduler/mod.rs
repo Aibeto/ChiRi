@@ -136,13 +136,33 @@ pub fn start_scheduler_thread(
     let config_clone = shared_config.clone();
     let sys_path_clone = sys_path_exist.clone();
     
+    // 只关心生效 meta 文件自身的事件（同目录临时文件忽略，避免原子替换完成前
+    // 提前重载读到旧内容）；inotify 实例跨重载复用（详见 utils::DirWatcher）
+    let config_file_name = config_path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "meta.yaml".to_string());
+
     thread::Builder::new()
         .name("config_watcher".to_string())
         .spawn(move || {
+            let mut watcher: Option<utils::DirWatcher> = None;
             loop {
-                if let Err(e) = utils::watch_path(&config_dir) {
+                if watcher.is_none() {
+                    match utils::DirWatcher::new(&config_dir) {
+                        Ok(w) => watcher = Some(w),
+                        Err(e) => {
+                            log::error!("{}", t_with_args("config-watch-error", &fluent_args!("error" => e.to_string())));
+                            // 退避后再重试，避免持续错误时忙循环刷 CPU
+                            thread::sleep(std::time::Duration::from_secs(2));
+                            continue;
+                        }
+                    }
+                }
+                let waited = watcher.as_mut().unwrap().wait_change(&config_file_name);
+                if let Err(e) = waited {
                     log::error!("{}", t_with_args("config-watch-error", &fluent_args!("error" => e.to_string())));
-                    // 退避后再重试，避免持续错误时忙循环刷 CPU
+                    watcher = None;
                     thread::sleep(std::time::Duration::from_secs(2));
                     continue;
                 }

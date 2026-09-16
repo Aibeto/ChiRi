@@ -100,7 +100,7 @@ fn main() -> Result<()> {
     // 启动归档：把上一轮整个 logs/ 与 devimp/ 分别重命名为临时目录并交单个
     // 子线程异步打包为 logd/ziped_<ts>.zip 与 logd/devimp_<ts>.zip（watchdog.pid
     // 复制回新建的 logs/ 供 stopScheduler 定位看门狗）；打包完成后执行
-    // logd+devimp 预算清理（总大小 >128MB 时从最旧文件删到 <96MB）。
+    // logd/ 与 devimp/ 各自独立的预算清理（各自 >128MB 时删本目录最旧文件到 <96MB）。
     // 本进程日志全部写入新建的 logs/、devimp/，互不干扰。
     // 必须在 create_dir_all(log_dir)/logger::init 之前执行，保证新旧文件分离。
     let (archived_zip, archived_devimp) = logger::archive_on_startup(&root);
