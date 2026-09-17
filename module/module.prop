@@ -1,7 +1,7 @@
 id=chiri
-name=ChiRi Canary
-version=Alpha03-Canary68
-versionCode=2
+name=ChiRi (Canary)
+version=Alpha03-Canary72
+versionCode=3
 author=Aibeto
 description=喜欢的话就坚持吧
 updateJson=https://raw.githubusercontent.com/Aibeto/ChiRi/main/updateInformation/update.json

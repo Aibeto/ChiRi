@@ -316,7 +316,7 @@ fn main() -> Result<()> {
     //    足够承载 160ms（特调 40ms）负载事件与低频状态事件）
     let (tx, rx) = mpsc::sync_channel::<common::DaemonEvent>(64);
 
-    // 特调（akmode）激活共享标志：AkmodeGovernor 接管/释放时置位，
+    // 特调激活共享标志：TunedGovernor 接管/释放时置位，
     // cpu_monitor 据此在 120ms 与 40ms 采样间隔间切换
     let ak_active = Arc::new(AtomicBool::new(false));
 

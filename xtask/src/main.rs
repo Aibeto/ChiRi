@@ -124,7 +124,7 @@ fn build(sh: &Shell, no_pack: bool) -> Result<()> {
     //     meta.yaml / rules.yaml / 特调与 FAS 导出文件有 WebUI 读取方，保留。
     const BIN_ONLY: [&str; 5] = [
         "config/feature.yaml",
-        "config/normal/akmode.yaml",
+        "config/normal/tuned_profiles.yaml",
         "config/normal/scenemode.yaml",
         "config/normal/fas.yaml",
         // 实验室模式定义：只给守护进程读，WebUI 不读（模式 key 与文案在 WebUI 侧硬编码）

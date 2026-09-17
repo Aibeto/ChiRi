@@ -159,7 +159,7 @@ pub mod config;
 pub mod scheduler;
 // FAS（帧感知调度）：引擎位于 crate::scheduler::fas（算法层），ChiRi 侧由 fas_manager 提供多实例生命周期管理。
 pub mod affinity;
-pub mod akmode;
+pub mod tuned;
 pub mod core_ctl;
 pub mod cpu_load_governor;
 pub mod fas_manager;
@@ -286,6 +286,17 @@ fn is_boost_mode(mode: &str) -> bool {
     mode == "boost" || mode == "vector" || crate::common::is_special_mode(mode)
 }
 
+/// 特调的 boost 亲和开关（参数组 boost_affinity）：游戏特调 true（保响应），
+/// 视频/轻载省电特调 false（不保大核在线、不收窄 cpuset）。非特调恒 true
+/// （实际只对 is_boost_mode 命中的模式有意义）。
+fn tuned_boost_affinity(config: &crate::chiri::config::Config, mode: &str) -> bool {
+    if crate::common::is_special_mode(mode) {
+        config.get_tuned_profile(mode).boost_affinity
+    } else {
+        true
+    }
+}
+
 /// governor/GPU 与模式的同步（幂等，可在任意入口调用）：
 /// contingency → performance 调速器 + GPU 锁最高频；babel → 仅 performance；
 /// 其他模式 → 两者都按快照恢复。
@@ -335,12 +346,12 @@ fn apply_mode_takeover(
     mode: &str,
     config: &crate::chiri::config::Config,
     cpu_governor: &mut crate::chiri::cpu_load_governor::CpuLoadGovernor,
-    ak_governor: &mut crate::chiri::akmode::AkmodeGovernor,
+    ak_governor: &mut crate::chiri::tuned::TunedGovernor,
     fast_lock: &mut crate::chiri::fast::FastLock,
 ) {
     if crate::common::is_special_mode(mode) {
-        let ak_cfg = config.get_akmode().clone();
-        if !ak_governor.init_policies(&ak_cfg) {
+        let ak_cfg = config.get_tuned_profile(mode);
+        if !ak_governor.init_policies(mode, &ak_cfg) {
             let clg_cfg = clg_cfg_for(config, mode);
             if clg_cfg.enabled {
                 cpu_governor.init_policies(&clg_cfg);
@@ -405,15 +416,19 @@ fn apply_affinity_and_corectl(
     // mode 仍为 fas，boost 布局照常生效（调频为 CLG default）。这是有意的：
     // mode=="fas" 时前台必为白名单游戏，摆放对游戏非负收益，且 gating
     // is_active 会引入激活边界的布局抖动
-    let boost = (is_boost_mode(mode) || mode == "fas") && !scenemode_offline;
+    // 省电型特调（参数组 boost_affinity=false，如 playback/daily）不走 boost：不收窄
+    // cpuset、不保大核常在线——那与「贴负载降频」的省电目标相反（大核空转漏电），
+    // 也会把视频解码线程钉到大核组被低上限压住
+    let boost = ((is_boost_mode(mode) && tuned_boost_affinity(config, mode)) || mode == "fas")
+        && !scenemode_offline;
     // top-app uclamp.max 放开（激活期写 100 让重线程可被 EAS 放到 prime）的管理
     // 归属：特调（akmode）由本函数按当前模式同步 Some(true)；fas 交给
     // fas_affinity_hook（None = 本函数不干预，避免与其时序打架）；其余 boost 模式
-    // Some(false)——保证离开特调后不残留 100
+    // Some(false)——保证离开特调后不残留 100。省电型特调同样不放开（不抬 prime 上限）
     let uclamp_override = if mode == "fas" {
         None
     } else {
-        Some(crate::common::is_special_mode(mode))
+        Some(crate::common::is_special_mode(mode) && tuned_boost_affinity(config, mode))
     };
     affinity.apply(
         screen_on,
@@ -681,7 +696,7 @@ pub fn start_scheduler_thread(
             // 明日方舟特调（akmode）：独立于 CLG 的 4 档齿轮调度器，前台为白名单应用时接管。
             // 传入特调激活共享标志，接管/释放时联动 Monitor 层切换采样间隔
             let ak_governor_flag = ak_active.clone();
-            let mut ak_governor = crate::chiri::akmode::AkmodeGovernor::new(ak_governor_flag);
+            let mut ak_governor = crate::chiri::tuned::TunedGovernor::new(ak_governor_flag);
 
             // 极速模式（fast）专属锁频器：与 CLG 完全独立，不读 yaml 调频参数，
             // 直接锁所有 cluster 的 min=max=硬件最高频，每 5 秒重写防止外部篡改。
@@ -733,8 +748,8 @@ pub fn start_scheduler_thread(
             // 是否已进入 scenemode（一次性切换，亮屏/模式变更时复位）
             let mut scene_mode_active = false;
             // 特调模式冷却：init_policies 因配置缺失/硬件不支持失败后，5 分钟内不再触发
-            const AKMODE_COOLDOWN: Duration = Duration::from_secs(300);
-            let mut akmode_cooldown_until: Option<Instant> = None;
+            const TUNED_COOLDOWN: Duration = Duration::from_secs(300);
+            let mut tuned_cooldown_until: Option<Instant> = None;
 
             // FAS 初始化失败冷却：load_policies 无可用 policy 后 5 分钟内不再触发，CLG default 接管
             const FAS_COOLDOWN: Duration = Duration::from_secs(300);
@@ -950,7 +965,7 @@ pub fn start_scheduler_thread(
                     if crate::common::is_special_mode(&current_mode) {
                         // 特调运行中：按新配置重载 akmode
                         if ak_governor.is_active() {
-                            let ak_cfg = config_lock.get_akmode().clone();
+                            let ak_cfg = config_lock.get_tuned_profile(&current_mode);
                             ak_governor.reload_config(&ak_cfg);
                         }
                     } else if current_mode == "vector" {
@@ -1425,7 +1440,7 @@ pub fn start_scheduler_thread(
                                 log::error!(
                                     "{}",
                                     t_with_args(
-                                        "akmode-watchdog-release",
+                                        "tuned-watchdog-release",
                                         &fluent_args!("secs" => last_load_event.elapsed().as_secs().to_string())
                                     )
                                 );
@@ -1570,17 +1585,17 @@ pub fn start_scheduler_thread(
                                 // 但若息屏时负载事件停止触发看门狗释放过 akmode，这里必须重新接管，
                                 // 否则特调限频失效、采样间隔也不会切回 40ms。
                                 // 冷却期内跳过特调，直接走 CLG。
-                                let in_cooldown = akmode_cooldown_until
+                                let in_cooldown = tuned_cooldown_until
                                     .map_or(false, |until| Instant::now() < until);
                                 if !ak_governor.is_active() && !in_cooldown {
                                     cpu_governor.release();
-                                    let ak_cfg = config_lock.get_akmode().clone();
-                                    if !ak_governor.init_policies(&ak_cfg) {
+                                    let ak_cfg = config_lock.get_tuned_profile(&current_mode);
+                                    if !ak_governor.init_policies(&current_mode, &ak_cfg) {
                                         // init 失败（配置缺失/硬件不支持）：冷却 5 分钟，CLG 接管
-                                        akmode_cooldown_until = Some(Instant::now() + AKMODE_COOLDOWN);
+                                        tuned_cooldown_until = Some(Instant::now() + TUNED_COOLDOWN);
                                         log::warn!("{}", t_with_args(
-                                            "scheduler-akmode-cooldown",
-                                            &fluent_args!("secs" => AKMODE_COOLDOWN.as_secs().to_string())
+                                            "scheduler-tuned-cooldown",
+                                            &fluent_args!("secs" => TUNED_COOLDOWN.as_secs().to_string())
                                         ));
                                         let clg_cfg = get_clg_cfg(&config_lock, &current_mode);
                                         if clg_cfg.enabled { cpu_governor.init_policies(&clg_cfg); }
@@ -1762,17 +1777,17 @@ pub fn start_scheduler_thread(
                                     if crate::common::is_special_mode(&mode) {
                                         // 进入特调模式：停止 CLG，改由 akmode 独立接管。
                                         // 冷却期内跳过特调，直接走 CLG。
-                                        let in_cooldown = akmode_cooldown_until
+                                        let in_cooldown = tuned_cooldown_until
                                             .map_or(false, |until| Instant::now() < until);
                                         if !in_cooldown {
                                             cpu_governor.release();
-                                            let ak_cfg = config_lock.get_akmode().clone();
-                                            if !ak_governor.init_policies(&ak_cfg) {
+                                            let ak_cfg = config_lock.get_tuned_profile(&mode);
+                                            if !ak_governor.init_policies(&mode, &ak_cfg) {
                                                 // init 失败：冷却 5 分钟，CLG 接管
-                                                akmode_cooldown_until = Some(Instant::now() + AKMODE_COOLDOWN);
+                                                tuned_cooldown_until = Some(Instant::now() + TUNED_COOLDOWN);
                                                 log::warn!("{}", t_with_args(
-                                                    "scheduler-akmode-cooldown",
-                                                    &fluent_args!("secs" => AKMODE_COOLDOWN.as_secs().to_string())
+                                                    "scheduler-tuned-cooldown",
+                                                    &fluent_args!("secs" => TUNED_COOLDOWN.as_secs().to_string())
                                                 ));
                                                 let clg_cfg = get_clg_cfg(&config_lock, &mode);
                                                 if clg_cfg.enabled { cpu_governor.init_policies(&clg_cfg); }
@@ -2123,18 +2138,18 @@ pub fn start_scheduler_thread(
                             let config_lock = config_clone.read().unwrap();
                             if crate::common::is_special_mode(&current_mode) {
                                 // 特调模式：重载 akmode 配置
-                                let ak_cfg = config_lock.get_akmode().clone();
+                                let ak_cfg = config_lock.get_tuned_profile(&current_mode);
                                 if ak_governor.is_active() {
                                     ak_governor.reload_config(&ak_cfg);
                                 } else {
-                                    let in_cooldown = akmode_cooldown_until
+                                    let in_cooldown = tuned_cooldown_until
                                         .map_or(false, |until| Instant::now() < until);
                                     if !in_cooldown {
-                                        if !ak_governor.init_policies(&ak_cfg) {
-                                            akmode_cooldown_until = Some(Instant::now() + AKMODE_COOLDOWN);
+                                        if !ak_governor.init_policies(&current_mode, &ak_cfg) {
+                                            tuned_cooldown_until = Some(Instant::now() + TUNED_COOLDOWN);
                                             log::warn!("{}", t_with_args(
-                                                "scheduler-akmode-cooldown",
-                                                &fluent_args!("secs" => AKMODE_COOLDOWN.as_secs().to_string())
+                                                "scheduler-tuned-cooldown",
+                                                &fluent_args!("secs" => TUNED_COOLDOWN.as_secs().to_string())
                                             ));
                                             let clg_cfg = get_clg_cfg(&config_lock, &current_mode);
                                             if clg_cfg.enabled { cpu_governor.init_policies(&clg_cfg); }

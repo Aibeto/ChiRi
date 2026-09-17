@@ -64,9 +64,9 @@ if echo "$CURRENT_LOCALE" | $BUSYBOX grep -qi "zh"; then
   MSG_RESTARTING_SCHEDULER="正在重启调度器..."
   MSG_VERIFY_SERVICE="正在确认守护进程状态..."
   MSG_SERVICE_FAIL="重启进程失败，请重试或使用普通安装"
-  MSG_HOT_UPDATE_HINT="如有报错请忽略。需要手动执行一次Action，否则调度可能会在管理器关闭后退出。"
+  MSG_HOT_UPDATE_HINT="如有报错请忽略。调度未启动，需要手动执行一次Action。"
   MSG_INSTALL_CANCELLED="安装已取消"
-  MSG_HOT_UPDATE_ABORT="热更新已完成，如有报错请忽略。需要手动执行一次Action，否则调度可能会在管理器关闭后退出。"
+  MSG_HOT_UPDATE_ABORT="热更新已完成，如有报错请忽略。调度未启动，需要手动执行一次Action。"
 fi
 
 # [welcome] 

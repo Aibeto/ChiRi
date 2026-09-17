@@ -1,4 +1,6 @@
-//! akmode.rs: [restore] [governor] [init_release] [load_freq]
+//! tuned.rs: [restore] [governor] [init_release] [load_freq]
+//! 特调执行器（TunedGovernor）：akmode / playback / daily 等模式共用同一套连续控制，
+//! 参数组按模式名从 Config.tuned_profiles 分派，差异只在参数。
 
 use crate::chiri::config::SpecialTunedConfig;
 use crate::utils::FastWriter;
@@ -9,7 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use crate::fluent_args;
-use crate::i18n::{t, t_with_args};
+use crate::i18n::t_with_args;
 
 // [restore]
 /// 单个 policy 的 governor/min/max 快照：akmode 接管时保存，release 时恢复。
@@ -34,8 +36,10 @@ struct ClusterState {
     current_max: u32,
     /// 降频保持计时起点（目标首次低于当前上限的时刻）；None = 无待执行降频
     down_since: Option<Instant>,
-    /// 降频保持期记录的目标档位：目标变化时重置计时（防止逼近移动目标）
+    /// 降频保持期记录的目标档位：目标明显回升时重置计时（防止逼近移动目标）
     down_target: u32,
+    /// 用于决策的负载 EMA（util_smoothing < 1 时启用；-1 = 未初始化）
+    ema_util: f32,
 }
 
 /// 按 affected_cpus 的 CPU ID 判定核心组，区间随命中 SoC 变化
@@ -65,8 +69,11 @@ fn core_name_for(affected: &[usize]) -> Option<&'static str> {
 /// 资源校验：一两个线程吃满单核、组内其余核心空闲）下升频条件凑不齐、降频
 /// 条件持续满足，max 单边下探到最低频，校验速度严重劣化。
 // [governor]
-pub struct AkmodeGovernor {
+pub struct TunedGovernor {
     cfg: SpecialTunedConfig,
+    /// 当前接管的特调模式名（akmode / playback / daily …）：日志用，
+    /// release 后保留（deactivated 日志要报是哪个模式退出）
+    mode: String,
     /// 特调激活共享标志：Monitor 层（cpu_monitor）据此切换采样间隔（特调 40ms / 其余 120ms）
     ak_active: Arc<AtomicBool>,
     clusters: Vec<ClusterState>,
@@ -77,10 +84,11 @@ pub struct AkmodeGovernor {
     log_counter: u32,
 }
 
-impl AkmodeGovernor {
+impl TunedGovernor {
     pub fn new(ak_active: Arc<AtomicBool>) -> Self {
         Self {
             cfg: SpecialTunedConfig::default(),
+            mode: String::new(),
             ak_active,
             clusters: Vec::new(),
             restore: Vec::new(),
@@ -101,10 +109,12 @@ impl AkmodeGovernor {
     ///
     /// 返回 true 表示成功接管，false 表示无可用 cluster（配置错误或硬件不支持）。
     // [init_release]
-    pub fn init_policies(&mut self, cfg: &SpecialTunedConfig) -> bool {
+    pub fn init_policies(&mut self, mode: &str, cfg: &SpecialTunedConfig) -> bool {
         self.release();
         self.cfg = cfg.clone();
         self.cfg.normalize();
+        // 模式名只用于日志可读性（同一套机制被多个模式共用，日志必须能区分）
+        self.mode = mode.to_string();
 
         let policies = crate::chiri::get_cpu_policies();
 
@@ -148,8 +158,9 @@ impl AkmodeGovernor {
                     warn!(
                         "{}",
                         t_with_args(
-                            "akmode-cluster-skipped",
+                            "tuned-cluster-skipped",
                             &fluent_args!(
+                                "mode" => self.mode.clone(),
                                 "pid" => pid.to_string(),
                                 "reason" => "unknown-cpu-range".to_string()
                             )
@@ -164,8 +175,9 @@ impl AkmodeGovernor {
                 warn!(
                     "{}",
                     t_with_args(
-                        "akmode-cluster-skipped",
+                        "tuned-cluster-skipped",
                         &fluent_args!(
+                            "mode" => self.mode.clone(),
                             "pid" => pid.to_string(),
                             "reason" => "writer-invalid".to_string()
                         )
@@ -209,17 +221,27 @@ impl AkmodeGovernor {
                 current_max,
                 down_since: None,
                 down_target: 0,
+                ema_util: -1.0,
             });
         }
 
         self.active = !self.clusters.is_empty();
         if self.active {
-            info!("{}", t("akmode-init"));
-            info!("{}", t("akmode-activated"));
+            info!(
+                "{}",
+                t_with_args("tuned-init", &fluent_args!("mode" => self.mode.clone()))
+            );
+            info!(
+                "{}",
+                t_with_args("tuned-activated", &fluent_args!("mode" => self.mode.clone()))
+            );
             // 特调激活通知 Monitor 层切换到 40ms 快速采样
             self.ak_active.store(true, Ordering::Relaxed);
         } else {
-            warn!("{}", t("akmode-no-clusters"));
+            warn!(
+                "{}",
+                t_with_args("tuned-no-clusters", &fluent_args!("mode" => self.mode.clone()))
+            );
         }
         self.active
     }
@@ -227,7 +249,10 @@ impl AkmodeGovernor {
     /// 释放接管：恢复各 policy 的 governor/min/max，清空状态
     pub fn release(&mut self) {
         if self.active {
-            info!("{}", t("akmode-deactivated"));
+            info!(
+                "{}",
+                t_with_args("tuned-deactivated", &fluent_args!("mode" => self.mode.clone()))
+            );
         }
         self.active = false;
         // 恢复原 governor/min/max（快照读取失败的字段跳过）
@@ -273,12 +298,15 @@ impl AkmodeGovernor {
         all_ok
     }
 
-    /// 热重载：akmode.yaml 参数变化后更新控制参数（max 动态状态保持不变）。
+    /// 热重载：tuned_profiles.yaml 参数变化后更新控制参数（max 动态状态保持不变）。
     // [load_freq]
     pub fn reload_config(&mut self, cfg: &SpecialTunedConfig) {
         self.cfg = cfg.clone();
         self.cfg.normalize();
-        debug!("{}", t("akmode-config-reloaded"));
+        debug!(
+            "{}",
+            t_with_args("tuned-config-reloaded", &fluent_args!("mode" => self.mode.clone()))
+        );
     }
 
     /// 频率表中找「不低于 ratio × 硬件最高」的最低档位：
@@ -319,9 +347,23 @@ impl AkmodeGovernor {
                 .clone()
                 .filter_map(|cpu| core_utils.get(cpu).copied())
                 .fold(0.0_f32, f32::max);
+            // 负载平滑（EMA，util_smoothing=1.0 关闭）：抖动的瞬时 util 尖峰会
+            // 把「升频立即执行」的上限反复推高、降频又被 hold 拖住，上限均值
+            // 反而高于带平滑的 CLG（2026-09-17 8550 日志回放证实）。视频/轻载
+            // 这类「噪声型抖动」负载用平滑滤尖峰；游戏（默认 1.0）保持原始值，
+            // 瞬时升频是响应性的一部分。
+            // 时间常数（α=0.35）≈ 采样间隔 × (1-α)/α：实机 40ms tick ≈ 75ms
+            // （跟得上真实负载、滤掉单 tick 尖峰）；日志回放是 160ms 采样
+            // （≈300ms）——回放给出的收紧幅度因此偏乐观，实机效果待日志验证。
+            let util = if cfg.util_smoothing >= 0.999 || c.ema_util < 0.0 {
+                group_util
+            } else {
+                cfg.util_smoothing * group_util + (1.0 - cfg.util_smoothing) * c.ema_util
+            };
+            c.ema_util = util;
 
             let hw_max = *c.available_freqs.last().unwrap_or(&0);
-            let target_ratio = (group_util * cfg.headroom).clamp(cfg.perf_floor, 1.0);
+            let target_ratio = (util * cfg.headroom).clamp(cfg.perf_floor, 1.0);
             let target_max = Self::freq_for_ratio(&c.available_freqs, target_ratio);
             let hyst_freq = (hw_max as f32 * cfg.hysteresis) as u32;
 
@@ -336,19 +378,26 @@ impl AkmodeGovernor {
                 c.down_since = None;
                 decision = "up";
             } else if target_max < c.current_max.saturating_sub(hyst_freq) {
-                // 降频：目标须持续 down_hold_ms 才执行；目标档位变化时重置计时
+                // 降频：目标须持续 down_hold_ms 才执行。
+                // 计时重置只在目标**明显回升**（> down_target + hyst）时发生：抖动负载下
+                // target 在相邻档位小幅跳动不应重置计时——原「档位不等即重置」在
+                // 2026-09-17 的 8550 日志回放中被证实会让上限卡在高位降不下来
+                // （160ms 平滑 util 下都几乎降不动，真实原始 util 更糟），
+                // 连续控制退化成「只升不降」。目标继续下探时只更新 down_target
+                // （等待更深的降频，执行时用最新档），不重置计时。
                 match c.down_since {
                     None => {
                         c.down_since = Some(now);
                         c.down_target = target_max;
                         decision = "down_wait";
                     }
-                    Some(_) if c.down_target != target_max => {
+                    Some(_) if target_max > c.down_target.saturating_add(hyst_freq) => {
                         c.down_since = Some(now);
                         c.down_target = target_max;
                         decision = "down_wait";
                     }
                     Some(since) => {
+                        c.down_target = target_max;
                         if now.duration_since(since).as_millis() as u64 >= cfg.down_hold_ms {
                             // 写成功才前移状态并结束等待：失败保留计时起点，
                             // 下一 tick（elapsed 仍满）立即重试
@@ -370,7 +419,7 @@ impl AkmodeGovernor {
 
             devimp_rows.push((
                 c.core_name,
-                format!("{:.2}", group_util),
+                format!("{:.2}", util),
                 decision,
                 c.current_max,
                 hw_max,
@@ -380,6 +429,9 @@ impl AkmodeGovernor {
         // devimp tick 行（开发记录开启时才有 IO）：
         // cur_freq_khz 列写当前动态 max（kHz），max_freq_khz 列写硬件最高（kHz），
         // 与旧版一致；over/under 列无档位阈值语义，恒 0。
+        // **util 列写决策用的负载**：util_smoothing < 1 时为 EMA 平滑后的值
+        // （见上方 util 计算处的注释）——2026-09-17 起语义变化，离线回放该列时
+        // 不能再当原始 util 二次平滑。
         if crate::logger::devimp_active() {
             for (name, util, decision, cur_max, hw_max) in &devimp_rows {
                 crate::logger::devimp_tick(
@@ -413,7 +465,10 @@ impl AkmodeGovernor {
                 .join(" ");
             debug!(
                 "{}",
-                t_with_args("akmode-tick-log", &fluent_args!("state" => summary))
+                t_with_args(
+                    "tuned-tick-log",
+                    &fluent_args!("mode" => self.mode.clone(), "state" => summary)
+                )
             );
         }
     }

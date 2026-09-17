@@ -199,19 +199,19 @@ pub fn chiri_core_ranges() -> CoreGroupRanges {
     }
 }
 
-/// 特调（akmode）可用性共享标志：chiri Config 合并 akmode.yaml 成功后置 true，
+/// 特调可用性共享标志：chiri Config 合并 tuned_profiles.yaml 成功后置 true，
 /// 文件缺失/损坏时置 false。monitor 层 determine_mode 据此决定白名单应用
-/// 是进入特调还是回退 CLG（缺 akmode.yaml 的机型不做特调，按普通模式调度）。
-static AKMODE_AVAILABLE: AtomicBool = AtomicBool::new(false);
+/// 是进入特调还是回退 CLG（缺 tuned_profiles.yaml 的机型不做特调，按普通模式调度）。
+static SPECIAL_TUNED_AVAILABLE: AtomicBool = AtomicBool::new(false);
 
-/// 特调（akmode）是否可用（akmode.yaml 已成功加载）。
-pub fn is_akmode_available() -> bool {
-    AKMODE_AVAILABLE.load(Ordering::Acquire)
+/// 特调是否可用（tuned_profiles.yaml 已成功加载）。
+pub fn is_special_tuned_available() -> bool {
+    SPECIAL_TUNED_AVAILABLE.load(Ordering::Acquire)
 }
 
-/// 设置特调可用性：chiri Config::load 合并嵌入的 akmode.yaml 时调用。
-pub fn set_akmode_available(available: bool) {
-    AKMODE_AVAILABLE.store(available, Ordering::Release);
+/// 设置特调可用性：chiri Config::load 合并嵌入的 tuned_profiles.yaml 时调用。
+pub fn set_special_tuned_available(available: bool) {
+    SPECIAL_TUNED_AVAILABLE.store(available, Ordering::Release);
 }
 
 // 功能总开关（fas_enabled / scenemode_enabled，meta.yaml 顶层字段，缺省 true）：
@@ -396,6 +396,22 @@ pub fn is_special_mode(mode: &str) -> bool {
     special_tuned_entries()
         .iter()
         .any(|e| e.modes.iter().any(|m| m == mode))
+}
+
+/// 白名单里注册的全部特调模式名（精确 + 正则条目的 modes 并集，去重）。
+/// 用途：Config 合并参数组时校验「注册了模式但没有参数组」的错配——那种情况
+/// 会静默回退 akmode 段（游戏参数：headroom 1.15 + boost 亲和），在省电场景
+/// 是反效果；拼写错/漏配必须在日志里暴露。
+pub fn special_tuned_mode_names() -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for e in special_tuned_entries() {
+        for m in &e.modes {
+            if !out.iter().any(|x| x == m) {
+                out.push(m.clone());
+            }
+        }
+    }
+    out
 }
 
 /// 包名是否被允许使用指定特调模式（包名命中白名单且模式在该条目 modes 列表中）
@@ -618,9 +634,10 @@ pub fn embedded_feature_str() -> &'static str {
     embedded_config_file("feature.yaml").unwrap_or_default()
 }
 
-/// 嵌入的 akmode.yaml（config/normal/，嵌入后特调始终可用）
-pub fn embedded_akmode_str() -> &'static str {
-    embedded_config_file("normal/akmode.yaml").unwrap_or_default()
+/// 嵌入的 tuned_profiles.yaml（config/normal/）：特调参数组——缺省段 `akmode`
+/// （游戏特调兼未注册模式的回退）+ `tuned_profiles` 段按模式名分派
+pub fn embedded_tuned_profiles_str() -> &'static str {
+    embedded_config_file("normal/tuned_profiles.yaml").unwrap_or_default()
 }
 
 /// 嵌入的 rhine-init.yaml（实验室模式定义）：只给守护进程读，不落盘也不对外暴露

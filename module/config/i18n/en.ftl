@@ -1,4 +1,4 @@
-# en.ftl: [main-monitor] [app-detect] [screen-detect] [monitors] [scheduler] [scheduler-config-watcher] [sysfs] [clg] [akmode] [touch] [fas] [fas-whitelist] [scheduler-settings] [fast-lock] [logger] [affinity] [corectl] [telemetry] [config-reload] [governor] [gpu]
+# en.ftl: [main-monitor] [app-detect] [screen-detect] [monitors] [scheduler] [scheduler-config-watcher] [sysfs] [clg] [tuned] [touch] [fas] [fas-whitelist] [scheduler-settings] [fast-lock] [logger] [affinity] [corectl] [telemetry] [config-reload] [governor] [gpu]
 # --- Main & Monitor ---
 yumi-module-starting = yumi-module Unified Starting...
 scheduler-module-started = Scheduler module started.
@@ -46,7 +46,7 @@ app-detect-pkg-change = [AppDetect] Foreground app state: { $pkg } (pid={ $pid }
 app-detect-no-app = [AppDetect] No valid foreground app detected (system process or unknown package)
 app-detect-special-override = [AppDetect] Special profile applied: { $pkg } -> { $mode }
 app-detect-special-rejected = [AppDetect] Non-whitelisted app { $pkg } mapped to special profile { $mode }, rejected, falling back to global mode
-app-detect-special-unavailable = [AppDetect] Special tuning unavailable (akmode.yaml missing/corrupt), { $pkg } mapped { $mode } not applied, falling back to global mode
+app-detect-special-unavailable = [AppDetect] Special tuning unavailable (tuned_profiles.yaml missing/corrupt), { $pkg } mapped { $mode } not applied, falling back to global mode
 app-detect-special-fallback = [AppDetect] Special whitelist hit: { $pkg } uses fallback profile { $mode }
 app-detect-special-global-rejected = [AppDetect] Global mode { $mode } is a special profile and does not apply to non-whitelisted app { $pkg }, falling back to default
 
@@ -115,7 +115,7 @@ scheduler-event-load = [Scheduler] load event: core_utils=[{ $cores }]
 scheduler-event-frame = [Scheduler] frame event: delta={ $delta_ms }ms
 scheduler-event-config-reload = [Scheduler] config reload event: mode={ $mode }, screen_on={ $screen_on }
 scheduler-special-mode-active = [Scheduler] Special profile active: { $pkg } -> { $mode }
-scheduler-akmode-cooldown = [Scheduler] Special tuning takeover failed, entering { $secs }s cooldown; CLG takes over during cooldown
+scheduler-tuned-cooldown = [Scheduler] Special tuning takeover failed, entering { $secs }s cooldown; CLG takes over during cooldown
 scheduler-scene-mode-enter = [Scheduler] Screen off past threshold, switching to scenemode extreme power-saving.
 scheduler-scene-mode-exit-fas = [Scheduler] FAS re-activated, exiting scenemode early (all cores restored)
 scheduler-scene-mode-exit-switch = [Scheduler] scenemode_enabled disabled, exiting scenemode and restoring screen-off power-saving config
@@ -123,7 +123,7 @@ scheduler-fas-switch-off = [Scheduler] fas_enabled disabled, deactivating all FA
 scheduler-scene-mode-saturation = [Scheduler] scenemode perf ceiling saturated (little util { $util }%), falling back to reduce with 300s cooldown
 
 # --- Scheduler: DOWN (halt) ---
-scheduler-down-enter = [Scheduler] DOWN halt enabled: CLG/akmode/FAS/fast_lock/thread placement/core_ctl all released, collection and logs only
+scheduler-down-enter = [Scheduler] DOWN halt enabled: CLG/special-tuned/FAS/fast_lock/thread placement/core_ctl all released, collection and logs only
 scheduler-down-exit = [Scheduler] DOWN halt lifted, scheduling resumes
 down-enabled = [Down] down.chr says down, scheduling halted
 down-disabled = [Down] down.chr cleared, scheduling back to normal
@@ -182,15 +182,16 @@ battery-temp-scale = [Thermal] battery temp scale pre-detected: { $unit } (divis
 battery-temp-scale-unknown = [Thermal] battery temp scale pre-detection inconclusive (node missing or reading not ready); degrading to CPU-only this run
 clg-min-write-failed = [CLG] P{ $pid } failed to write scaling_min_freq={ $khz }MHz, idle floor may stay high
 
-# --- AKMode (Arknights special tuning) ---
-akmode-init = [AKMode] Arknights special tuning take over (tier-less load-following)
-akmode-activated = [AKMode] Arknights special tuning activated (schedutil + dynamic max, instant up / debounced down)
-akmode-no-clusters = [AKMode] Arknights special tuning: no valid clusters found, staying inactive
-akmode-cluster-skipped = [AKMode] P{ $pid } skipped (reason: { $reason })
-akmode-deactivated = [AKMode] Arknights special tuning deactivated
-akmode-config-reloaded = [AKMode] special config hot-reloaded
-akmode-tick-log = [AKMode] { $state }
-akmode-watchdog-release = [AKMode] WATCHDOG: no load events for { $secs }s, eBPF source failed. Releasing Arknights special tuning and restoring original governor/min/max.
+# --- Special tuning (per-mode profiles: akmode / playback / daily ...) ---
+tuned-init = [Tuned] { $mode } special tuning take over (tier-less load-following)
+tuned-activated = [Tuned] { $mode } special tuning activated (schedutil + dynamic max, instant up / debounced down)
+tuned-no-clusters = [Tuned] { $mode } special tuning: no valid clusters found, staying inactive
+tuned-cluster-skipped = [Tuned] { $mode } P{ $pid } skipped (reason: { $reason })
+tuned-deactivated = [Tuned] { $mode } special tuning deactivated
+tuned-config-reloaded = [Tuned] { $mode } profile hot-reloaded
+tuned-tick-log = [Tuned] { $mode } { $state }
+tuned-watchdog-release = [Tuned] WATCHDOG: no load events for { $secs }s, eBPF source failed. Releasing special tuning and restoring original governor/min/max.
+tuned-profile-missing = [Tuned] whitelist mode { $mode } has no profile; takeover falls back to the akmode section (game params) - check tuned_profiles.yaml
 
 # --- Touch (touch boost) ---
 touch-detect-started = [Touch] Touch detection thread started (reading /dev/input devices).

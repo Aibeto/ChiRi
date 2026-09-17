@@ -377,9 +377,21 @@ pub struct SpecialTunedConfig {
     /// 降频保持（ms）：目标持续低于当前上限该时长才真正下调，防负载抖动来回改写
     #[serde(default = "d_ak_down_hold_ms")]
     pub down_hold_ms: u64,
+    /// 是否走 boost 类亲和（cpuset 收窄到 big+prime + core_ctl 保大核常在线）。
+    /// 游戏特调 true（保响应、防热插拔打架）；视频/轻载省电特调 false——
+    /// 保大核常在线与「贴负载降频」的省电目标相反（空转漏电），且会把
+    /// 视频解码线程钉到大核组被低上限压住。
+    #[serde(default = "crate::utils::default_true")]
+    pub boost_affinity: bool,
+    /// 决策负载的 EMA 平滑系数（0.05~1.0）：1.0 = 不平滑（游戏默认，瞬时升频
+    /// 是响应性的一部分）；< 1 时 util = α×瞬时 + (1-α)×上次。抖动负载下
+    /// 瞬时尖峰会经「升频立即执行」把上限反复推高（2026-09-17 日志回放证实
+    /// 其上限均值反而高于带平滑的 CLG），视频/轻载用 0.3~0.5 滤掉尖峰。
+    #[serde(default = "d_ak_util_smoothing")]
+    pub util_smoothing: f32,
 }
 
-// SpecialTunedConfig 缺省值：akmode.yaml 没写的字段回退到这里
+// SpecialTunedConfig 缺省值：tuned_profiles.yaml 没写的字段回退到这里
 fn d_ak_headroom() -> f32 {
     1.15
 }
@@ -392,6 +404,9 @@ fn d_ak_hysteresis() -> f32 {
 fn d_ak_down_hold_ms() -> u64 {
     100
 }
+fn d_ak_util_smoothing() -> f32 {
+    1.0
+}
 
 impl Default for SpecialTunedConfig {
     fn default() -> Self {
@@ -400,6 +415,8 @@ impl Default for SpecialTunedConfig {
             perf_floor: d_ak_perf_floor(),
             hysteresis: d_ak_hysteresis(),
             down_hold_ms: d_ak_down_hold_ms(),
+            boost_affinity: true,
+            util_smoothing: d_ak_util_smoothing(),
         }
     }
 }
@@ -420,6 +437,10 @@ impl SpecialTunedConfig {
         }
         self.hysteresis = self.hysteresis.clamp(0.0, 0.2);
         self.down_hold_ms = self.down_hold_ms.min(5_000);
+        if !self.util_smoothing.is_finite() {
+            self.util_smoothing = d_ak_util_smoothing();
+        }
+        self.util_smoothing = self.util_smoothing.clamp(0.05, 1.0);
     }
 }
 
@@ -693,11 +714,20 @@ pub struct Config {
     #[serde(default, rename = "Thermal")]
     pub thermal: ThermalGuardConfig,
 
-    /// 明日方舟特调（akmode）独立调频配置：来自嵌入的 config/normal/akmode.yaml（编译期
-    /// 打包，非处理器绑定；原 {soc}/akmode.yaml 方案已随 4cb4d97 重构移除），与 CLG 完全解耦。
-    /// 前台为白名单应用时由 AkmodeGovernor 接管，参数不再走 CLG。
+    /// 特调缺省参数段（`akmode`，明日方舟特调）：来自嵌入的
+    /// config/normal/tuned_profiles.yaml（编译期打包，非处理器绑定；
+    /// 原 {soc}/akmode.yaml 方案已随 4cb4d97 重构移除），与 CLG 完全解耦。
+    /// 前台为白名单应用时由 TunedGovernor 接管，参数不再走 CLG；
+    /// 同时充当 tuned_profiles 里未注册模式名的回退参数。
     #[serde(default)]
     pub akmode: SpecialTunedConfig,
+
+    /// 特调参数组：按特调模式名分派（模式名在 special_tuned.yaml 的模式列表中注册）。
+    /// 同一份 tuned_profiles.yaml 的 `tuned_profiles:` 段；未注册的模式回退 `akmode` 段。
+    /// 全部特调共用 TunedGovernor 的连续控制机制，差别只在参数
+    /// （playback 视频稳态 / daily 交互轻载 / …）。
+    #[serde(default)]
+    pub tuned_profiles: std::collections::HashMap<String, SpecialTunedConfig>,
 
     /// CPU 亲和与线程迁移控制（cpuset / cpuctl uclamp / sched_setaffinity）
     #[serde(default, rename = "Affinity")]
@@ -748,21 +778,37 @@ impl Config {
         // 周期块（2s）也会兜一次。
         config.affinity.enabled &= config.meta.thread_bind;
         config.core_ctl.enabled &= config.meta.thread_bind;
-        config.merge_akmode();
+        config.merge_tuned_profiles();
         config.merge_scenemode();
         config.thermal.normalize();
         config.affinity.normalize();
         Ok(config)
     }
 
-    /// 合并嵌入的特调配置（akmode.yaml，编译期打包进二进制）。
+    /// 合并嵌入的特调参数组（tuned_profiles.yaml，编译期打包进二进制）。
     /// 嵌入内容随版本发布、始终存在；仅当嵌入 YAML 意外损坏时置特调不可用。
-    fn merge_akmode(&mut self) {
-        match serde_yaml::from_str::<Config>(crate::common::embedded_akmode_str()) {
+    fn merge_tuned_profiles(&mut self) {
+        match serde_yaml::from_str::<Config>(crate::common::embedded_tuned_profiles_str()) {
             Ok(special) => {
                 self.akmode = special.akmode;
                 self.akmode.normalize();
-                crate::common::set_akmode_available(true);
+                // 特调参数组同样逐组钳制；未列出的模式由 get_tuned_profile 回退 akmode 段
+                self.tuned_profiles = special.tuned_profiles;
+                for cfg in self.tuned_profiles.values_mut() {
+                    cfg.normalize();
+                }
+                crate::common::set_special_tuned_available(true);
+                // 白名单注册了模式、却没有对应参数组时会静默回退 akmode 段
+                // （游戏参数：headroom 1.15 + boost 亲和），在省电场景是反效果——
+                // 拼写错/漏配不能静默生效（akmode 本身用缺省段，跳过）
+                for m in crate::common::special_tuned_mode_names() {
+                    if m != "akmode" && !self.tuned_profiles.contains_key(&m) {
+                        log::warn!(
+                            "{}",
+                            t_with_args("tuned-profile-missing", &fluent_args!("mode" => m.clone()))
+                        );
+                    }
+                }
                 log::debug!(
                     "{}",
                     t_with_args(
@@ -779,7 +825,7 @@ impl Config {
                         &fluent_args!("path" => "<embedded>".to_string(), "error" => e.to_string())
                     )
                 );
-                crate::common::set_akmode_available(false);
+                crate::common::set_special_tuned_available(false);
             }
         }
     }
@@ -828,13 +874,18 @@ impl Config {
         }
     }
 
-    /// 取明日方舟特调（akmode）配置段（已合并 akmode.yaml）
-    pub fn get_akmode(&self) -> &SpecialTunedConfig {
-        &self.akmode
+    /// 按特调模式名取参数组：`tuned_profiles.<mode>` 优先，缺省回退 `akmode` 段。
+    /// 返回 owned（调用点本就 clone 给 init_policies/reload_config，避免借用纠缠）。
+    /// **全部特调取参的唯一入口**——不要再加第二个取参方法（两个入口必然搞混）。
+    pub fn get_tuned_profile(&self, mode: &str) -> SpecialTunedConfig {
+        self.tuned_profiles
+            .get(mode)
+            .cloned()
+            .unwrap_or_else(|| self.akmode.clone())
     }
 
     /// 按模式名取对应 CLG 配置段；未知模式（含特调模式）返回 None。
-    /// 特调模式（akmode）不走 CLG，由 AkmodeGovernor 独立接管。
+    /// 特调模式（akmode）不走 CLG，由 TunedGovernor 独立接管。
     pub fn get_mode(&self, mode_name: &str) -> Option<&Mode> {
         match mode_name {
             "reduce" => Some(&self.reduce),

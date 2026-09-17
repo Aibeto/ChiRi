@@ -562,19 +562,29 @@ class AppStore {
     const started = await startDevimpExport()
     if (started.kind !== 'ok') {
       this.exportPhase = 'failed'
-      this.exportError = started.kind === 'failed' ? started.error : t('state.unsupportedEnv')
+      this.exportError =
+        started.kind === 'failed'
+          ? `${started.error} · ${t('overview.export.failed.hint')}`
+          : t('state.unsupportedEnv')
       return
     }
     const job = started.value
     // 1.5s 一轮，最多 160 轮（4 分钟）：xz -6 压几百 MB 日志大约几分钟量级
+    let pollFails = 0
     for (let i = 0; i < 160; i++) {
       await new Promise(resolve => setTimeout(resolve, 1500))
       const probed = await pollExport(job)
       if (probed.kind !== 'ok') {
+        // 单次探测失败多半是桥的瞬时错误（授权、回调丢失、WebView 切后台）——
+        // 后台 tar 多半还在跑，连续 3 次才判死，别让一次「命令失败(1)」错杀导出
+        pollFails++
+        if (pollFails < 3) continue
         this.exportPhase = 'failed'
-        this.exportError = probed.kind === 'failed' ? probed.error : t('state.unsupportedEnv')
+        const detail = probed.kind === 'failed' ? probed.error : t('state.unsupportedEnv')
+        this.exportError = `${detail} · ${t('overview.export.failed.hint')}`
         return
       }
+      pollFails = 0
       this.exportDone = probed.value.progress.done
       this.exportTotal = probed.value.progress.total
       this.exportBytes = probed.value.progress.bytes

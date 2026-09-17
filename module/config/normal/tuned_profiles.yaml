@@ -1,0 +1,43 @@
+# tuned_profiles.yaml: [default-profile] [tuned-profiles]
+# 特调参数组：缺省参数段（akmode）+ 按模式名分派的参数组（tuned_profiles）
+# 编译期嵌入二进制（module/config 目录整体 include_dir!），磁盘副本不加载。
+# 字段说明见 tuned_profiles-example.yaml；未写字段取代码默认值。
+#
+# 无档位连续控制：每个负载 tick（40ms）按核心组实时负载直接计算
+# scaling_max_freq 目标上限，升频立即执行、降频 hysteresis + down_hold_ms
+# 防抖。替代原四档方案（少数线程高占用负载下 max 单边下探）。
+# [default-profile]
+# 缺省参数（akmode 游戏特调；未在 tuned_profiles 中注册的模式都回退到这段）
+akmode:
+  headroom: 1.15
+  perf_floor: 0.0
+  hysteresis: 0.03
+  down_hold_ms: 100
+
+# [tuned-profiles]
+# 按特调模式名分派的参数组（模式名在 special_tuned.yaml 的模式列表中注册，
+# 与这里的键同名即自动生效；未注册的模式回退上面的 akmode 段）。
+# 机制与 akmode 完全共用，差异只在参数倾向：
+tuned_profiles:
+  # playback —— 视频播放稳态（2026-09-17 8550 实测新增）：贴负载给频（headroom 1.0，
+  # 日志回放验证：1.05 会多 2-4 个点的上限均值），util_smoothing 0.35 滤掉
+  # 弹幕/进度条的噪声尖峰——「升频立即执行」在抖动负载下会把上限反复推高，
+  # 平均值反而高于带平滑的 CLG，回放里这是唯一能把上限压到 CLG 以下的路径。
+  # boost_affinity=false：不做 boost 亲和收窄、不保大核常在线——保大核与
+  # 「贴负载省电」相反，播放场景让核按 EAS 自然摆放。
+  playback:
+    headroom: 1.0
+    perf_floor: 0.0
+    hysteresis: 0.04
+    down_hold_ms: 100
+    util_smoothing: 0.35
+    boost_affinity: false
+  # daily —— 日常轻载交互（桌面/社交/资讯/工具）：平滑弱一些（0.5）保滑动跟手，
+  # perf_floor 0.10 给交互留保底响应，降频 hold 100ms 快速回落静态功耗。
+  daily:
+    headroom: 1.0
+    perf_floor: 0.10
+    hysteresis: 0.03
+    down_hold_ms: 100
+    util_smoothing: 0.5
+    boost_affinity: false

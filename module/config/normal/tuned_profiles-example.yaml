@@ -1,0 +1,81 @@
+# tuned_profiles-example.yaml: [usage] [default-profile] [tuned-profiles]
+# tuned_profiles-example.yaml —— 特调参数组参考配置（缺省段 akmode + 按模式分派的参数组）
+#
+# 本文件不参与加载，纯粹当字段说明书用。复制成 tuned_profiles.yaml 再改。
+# 注意：tuned_profiles.yaml 随 module/config 目录整体编译期嵌入，磁盘副本不加载，
+# 改参数要改源文件再重新编译。
+#
+# 生效条件：前台包名命中 special_tuned.yaml 且该包被授予某个特调模式。
+# 生效期间 CLG 让位，TunedGovernor 按该模式的参数组接管；退出前台交还 CLG。
+#
+# 调频机制（无档位，FAS 式负载直拉）：
+# 写 schedutil、min 压到硬件最低；每个负载 tick（40ms）按核心组实时
+# 负载直接计算 scaling_max_freq 目标上限：
+#   目标比例 = clamp(组内最大核心占用率 × headroom, perf_floor, 1.0)
+#   目标上限 = 频率表中不低于 目标比例 × 硬件最高 的最低档位
+# 升频立即执行（响应性优先）；降频须目标偏离超过 hysteresis 且持续
+# down_hold_ms 才执行（防负载抖动来回改写）。
+#
+# 为什么没有档位：原四档（reduce/default/boost/vector）按
+# 「组内 N 个核心过阈值」升降，在少数线程高占用的负载（如明日方舟
+# 资源校验：一两个线程吃满单核、组内其余空闲）下升频条件永远凑不齐、
+# 降频条件持续满足，max 单边下探到最低频。连续控制对任意负载形态
+# 都能跟随实际需求，不再依赖负载在组内的分布。
+#
+# 核心组区间由 common::chiri_core_ranges() 按 SoC 区分：
+#   8550: little 0-2 / big 3-6 / prime 7
+#   8475: little 0-3 / big 4-6 / prime 7
+#   8998: little 0-3 / big 4-7 / 无 prime
+akmode:
+  # 负载放大系数（1.0~2.0）：目标比例 = 组内最大核心占用率 × 该值。
+  # 1.0 = 上限贴着当前负载走（最省电，但突发负载要靠 schedutil 自身余量）；
+  # 1.15 = 留 15% 升频余量，突发负载升频更从容。默认 1.15。
+  headroom: 1.15
+
+  # 目标比例下限（0~0.5）：空闲组上限可以收到的最低比例。
+  # 0 = 空闲组上限一路收到硬件最低频（最省电）；
+  # 0.2 = 最低也保 20% 频率上限，减少轻负载反复取档。
+  perf_floor: 0.0
+
+  # 变更死区（0~0.2，比例）：目标与当前上限差值不超过「该比例 × 硬件最高」
+  # 时不写 sysfs，防写抖动。默认 0.03（对 3.2GHz prime 即 ~96MHz 死区）。
+  hysteresis: 0.03
+
+  # 降频保持（ms，0~5000）：目标持续低于当前上限该时长才真正下调。
+  # 0 = 跟随每 tick 目标立即下调（不推荐，负载抖动会频繁改写）。
+  down_hold_ms: 100
+
+  # 是否走 boost 类亲和（cpuset 收窄到 big+prime + core_ctl 保大核常在线）。
+  # 默认 true（游戏特调：保响应、防厂商热插拔打架）。
+  # 省电型特调设 false：不做亲和收窄、不保大核在线（保大核与「贴负载降频」
+  # 的省电目标相反，且会把前台重线程钉到大核组被低上限压住）。
+  boost_affinity: true
+
+  # 决策负载的 EMA 平滑系数（0.05~1.0）。1.0 = 不平滑（默认；游戏瞬时升频
+  # 是响应性的一部分）；< 1 时 util = α×瞬时 + (1-α)×上次。
+  # 抖动负载下瞬时尖峰会把上限反复推高（升频立即执行 + 降频 hold 拖住），
+  # 上限均值反而高于带平滑的 CLG——视频/轻载建议 0.3~0.5。
+  util_smoothing: 1.0
+
+# ── 特调参数组（可选，按模式名分派）────────────────────────────────
+# special_tuned.yaml 的模式列表里注册的模式名，与本节键同名即自动生效；
+# 未注册的模式回退上面的 akmode 段。机制完全共用，差异只在参数倾向。
+# 8550 实测两款（2026-09-17，日志回放验证）：
+#   playback：视频播放稳态——headroom 1.0 贴负载，util_smoothing 0.35 滤噪声尖峰
+#             （平滑是唯一能把上限压到 CLG 以下的路径）；
+#   daily：日常轻载交互——headroom 1.0 + perf_floor 0.10 保底，平滑 0.5 保跟手。
+tuned_profiles:
+  playback:
+    headroom: 1.0
+    perf_floor: 0.0
+    hysteresis: 0.04
+    down_hold_ms: 100
+    util_smoothing: 0.35
+    boost_affinity: false
+  daily:
+    headroom: 1.0
+    perf_floor: 0.10
+    hysteresis: 0.03
+    down_hold_ms: 100
+    util_smoothing: 0.5
+    boost_affinity: false

@@ -92,9 +92,10 @@ export async function startDevimpExport(): Promise<ReadResult<ExportJob>> {
   const cmd = `nohup sh -c ${shQuote(script)} >/dev/null 2>&1 & echo started`
   try {
     const { errno, stderr } = await run(cmd)
-    if (errno !== 0) return failed<ExportJob>(shellError(errno, stderr))
+    // 带操作上下文：裸的「命令失败(1)」无法定位是启动挂了还是桥的瞬时错误
+    if (errno !== 0) return failed<ExportJob>(`启动导出失败：${shellError(errno, stderr)}`)
   } catch (e) {
-    return failed<ExportJob>(e instanceof Error ? e.message : String(e))
+    return failed<ExportJob>(`启动导出失败：${e instanceof Error ? e.message : String(e)}`)
   }
   return ok(job)
 }
@@ -133,7 +134,8 @@ export async function pollExport(job: ExportJob): Promise<ReadResult<ExportProbe
     `exit 0`
   try {
     const { errno, stdout, stderr } = await run(cmd)
-    if (errno !== 0) return failed<ExportProbe>(shellError(errno, stderr))
+    // 带操作上下文：调用方（轮询循环）据此区分「探测挂了」与「打包失败」
+    if (errno !== 0) return failed<ExportProbe>(`查询导出进度失败：${shellError(errno, stderr)}`)
     const out = stdout
     const num = (prefix: string): number => {
       const m = new RegExp(`^${prefix}:(\\d+)`, 'm').exec(out)

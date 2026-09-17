@@ -181,10 +181,10 @@ fn get_focused_app_from_cgroup(ignored_apps: &[String]) -> Result<(String, i32),
 // 模式判定辅助函数
 
 fn determine_mode(config: &RulesConfig, current_package: &str) -> String {
-    // 特调可用性：仅 Chiri SoC 且 akmode.yaml 成功加载时特调才生效。
-    // 缺 akmode.yaml 的机型白名单应用回退 CLG（按 app_modes / global_mode 普通模式调度）。
+    // 特调可用性：仅 Chiri SoC 且 tuned_profiles.yaml 成功加载时特调才生效。
+    // 缺 tuned_profiles.yaml 的机型白名单应用回退 CLG（按 app_modes / global_mode 普通模式调度）。
     let chiri = crate::common::is_chiri_soc();
-    let special_enabled = chiri && crate::common::is_akmode_available();
+    let special_enabled = chiri && crate::common::is_special_tuned_available();
 
     // 全局模式兜底值：实验室（rhine）启用期间用它的模式覆盖，其余时候就是 rules.yaml
     // 里的 global_mode。只换兜底值——FAS 白名单和 app_modes 的优先级都不动，
@@ -254,8 +254,8 @@ fn determine_mode(config: &RulesConfig, current_package: &str) -> String {
                 );
                 return mode.clone();
             }
-            // 特调不可用（Chiri SoC 缺 akmode.yaml）与非白名单非法映射区分告警，均回退全局模式
-            if chiri && !crate::common::is_akmode_available() {
+            // 特调不可用（Chiri SoC 缺 tuned_profiles.yaml）与非白名单非法映射区分告警，均回退全局模式
+            if chiri && !crate::common::is_special_tuned_available() {
                 warn!(
                     "{}",
                     t_with_args(

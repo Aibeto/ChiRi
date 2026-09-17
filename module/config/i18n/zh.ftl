@@ -1,4 +1,4 @@
-# zh.ftl: [main-monitor] [app-detect] [screen-detect] [monitors] [scheduler] [scheduler-config-watcher] [sysfs] [clg] [akmode] [touch] [fas] [fas-whitelist] [scheduler-settings] [fast-lock] [logger] [affinity] [corectl] [telemetry] [config-reload] [governor] [gpu]
+# zh.ftl: [main-monitor] [app-detect] [screen-detect] [monitors] [scheduler] [scheduler-config-watcher] [sysfs] [clg] [tuned] [touch] [fas] [fas-whitelist] [scheduler-settings] [fast-lock] [logger] [affinity] [corectl] [telemetry] [config-reload] [governor] [gpu]
 # --- Main & Monitor ---
 yumi-module-starting = yumi-module 统一启动中...
 scheduler-module-started = 调度器模块已启动
@@ -45,7 +45,7 @@ app-detect-pkg-change = [AppDetect] 前台应用状态变化: { $pkg } (pid={ $p
 app-detect-no-app = [AppDetect] 未检测到有效前台应用 (可能为系统进程或未知包)
 app-detect-special-override = [AppDetect] 特调模式应用: { $pkg } -> { $mode }
 app-detect-special-rejected = [AppDetect] 非白名单应用 { $pkg } 映射到特调模式 { $mode } 已拒绝，回退全局模式
-app-detect-special-unavailable = [AppDetect] 特调配置不可用（akmode.yaml 缺失/损坏），{ $pkg } 映射的 { $mode } 不生效，回退全局模式
+app-detect-special-unavailable = [AppDetect] 特调配置不可用（tuned_profiles.yaml 缺失/损坏），{ $pkg } 映射的 { $mode } 不生效，回退全局模式
 app-detect-special-fallback = [AppDetect] 特调白名单命中: { $pkg } 使用优先回退模式 { $mode }
 app-detect-special-global-rejected = [AppDetect] 全局模式 { $mode } 为特调模式，不适用于非白名单应用 { $pkg }，回退 default
 
@@ -114,7 +114,7 @@ scheduler-event-load = [Scheduler] 收到负载事件: 核心利用率=[{ $cores
 scheduler-event-frame = [Scheduler] 收到帧事件: 帧间隔={ $delta_ms }ms
 scheduler-event-config-reload = [Scheduler] 收到配置重载事件: 当前模式={ $mode }, 亮屏={ $screen_on }
 scheduler-special-mode-active = [Scheduler] 特调模式激活: { $pkg } -> { $mode }
-scheduler-akmode-cooldown = [Scheduler] 特调接管失败，进入 { $secs } 秒冷却，期间由 CLG 接管调度
+scheduler-tuned-cooldown = [Scheduler] 特调接管失败，进入 { $secs } 秒冷却，期间由 CLG 接管调度
 scheduler-scene-mode-enter = [Scheduler] 息屏已超过阈值，切换到 scenemode 省电模式
 scheduler-scene-mode-exit-fas = [Scheduler] FAS 重新激活，提前退出 scenemode（恢复全部在线核）
 scheduler-scene-mode-exit-switch = [Scheduler] scenemode_enabled 已关闭，退出 scenemode 并恢复息屏低功耗配置
@@ -122,7 +122,7 @@ scheduler-fas-switch-off = [Scheduler] fas_enabled 已关闭，注销全部 FAS 
 scheduler-scene-mode-saturation = [Scheduler] scenemode 持续顶满性能上限（little util { $util }%），退回 reduce 并进入 300s 冷却
 
 # --- Scheduler: DOWN（停摆） ---
-scheduler-down-enter = [Scheduler] DOWN 停摆已启用：CLG/akmode/FAS/fast_lock/线程摆放/core_ctl 全部释放，只保留采集与日志
+scheduler-down-enter = [Scheduler] DOWN 停摆已启用：CLG/特调/FAS/fast_lock/线程摆放/core_ctl 全部释放，只保留采集与日志
 scheduler-down-exit = [Scheduler] DOWN 停摆已解除，调度恢复接管
 down-enabled = [Down] down.chr 写着 down，调度进入停摆
 down-disabled = [Down] down.chr 已清空，调度恢复正常
@@ -181,15 +181,16 @@ battery-temp-scale = [Thermal] 电池温度刻度预识别: { $unit }（换算�
 battery-temp-scale-unknown = [Thermal] 电池温度刻度预识别未得出结论（节点缺失或读数未就绪），本次退化为仅 CPU 温度
 clg-min-write-failed = [CLG] P{ $pid } 写入 scaling_min_freq={ $khz }MHz 失败，空闲频率地板可能偏高
 
-# --- AKMode（明日方舟特调） ---
-akmode-init = [AKMode] 明日方舟特调接管（无档位负载直拉）
-akmode-activated = [AKMode] 明日方舟特调已激活（schedutil + 动态 max，升频即时/降频防抖）
-akmode-no-clusters = [AKMode] 明日方舟特调: 未找到有效集群，保持未激活状态
-akmode-cluster-skipped = [AKMode] P{ $pid } 跳过接管 (原因: { $reason })
-akmode-deactivated = [AKMode] 明日方舟特调已停用
-akmode-config-reloaded = [AKMode] 特调配置已热重载
-akmode-tick-log = [AKMode] { $state }
-akmode-watchdog-release = [AKMode] 看门狗: 已 { $secs } 秒未收到负载事件，eBPF 负载源疑似失效，已释放明日方舟特调控制权并恢复原 governor/min/max
+# --- 特调（按模式参数组接管：akmode / playback / daily …） ---
+tuned-init = [Tuned] { $mode } 特调接管（无档位负载直拉）
+tuned-activated = [Tuned] { $mode } 特调已激活（schedutil + 动态 max，升频即时/降频防抖）
+tuned-no-clusters = [Tuned] { $mode } 特调: 未找到有效集群，保持未激活状态
+tuned-cluster-skipped = [Tuned] { $mode } P{ $pid } 跳过接管 (原因: { $reason })
+tuned-deactivated = [Tuned] { $mode } 特调已停用
+tuned-config-reloaded = [Tuned] { $mode } 特调参数组已热重载
+tuned-tick-log = [Tuned] { $mode } { $state }
+tuned-watchdog-release = [Tuned] 看门狗: 已 { $secs } 秒未收到负载事件，eBPF 负载源疑似失效，已释放特调控制权并恢复原 governor/min/max
+tuned-profile-missing = [Tuned] 白名单模式 { $mode } 没有对应参数组，接管时会回退 akmode 段（游戏参数），请检查 tuned_profiles.yaml
 
 # --- Touch（触摸升频） ---
 touch-detect-started = [Touch] 触摸检测线程已启动（读取 /dev/input 输入设备）

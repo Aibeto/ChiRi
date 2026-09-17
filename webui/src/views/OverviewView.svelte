@@ -18,7 +18,12 @@
   const modeName = $derived(t(app.modeInfo.labelKey));
   // 无记录与“模式名未知”是两件事，描述文案要分开
   const modeDesc = $derived(
-    app.modeMissing ? t("mode.unknown.missing") : t(app.modeInfo.descKey),
+    // descKey 为空（CLG 档当前不带描述）时跳过描述行，而不是渲染一行空白
+    app.modeMissing
+      ? t("mode.unknown.missing")
+      : app.modeInfo.descKey
+        ? t(app.modeInfo.descKey)
+        : "",
   );
   const deviceLabel = $derived(
     app.deviceKind === "chiri" ? t("overview.device.chiri")
@@ -89,7 +94,9 @@
       <div class="mode__main">
         <p class="mode__name">{modeName}</p>
         <p class="mode__id u-mono">{app.modeInfo.id || "—"}</p>
-        <p class="mode__desc">{modeDesc}</p>
+        {#if modeDesc}
+          <p class="mode__desc">{modeDesc}</p>
+        {/if}
       </div>
       {#if app.currentMode && app.daemonState === "stopped"}
         <p class="mode__stale">{t("overview.mode.stale")}</p>

@@ -3,7 +3,7 @@ import { DOWN_WORD } from '@/data/down'
 // 模式派生。事实来源（src/monitor/app_detect.rs::determine_mode）：
 //   fas（白名单命中且应用配置可解析）→ 特调白名单 fallback → app_modes → global_mode。
 // 只有 reduce/default/boost/vector 在 daemon 里注册为 CLG 档（config.rs::get_mode）；
-// 特调模式名由 special_tuned.yaml 的 modes 定义（当前仅 akmode）；
+// 特调模式名由 special_tuned.yaml 的 modes 定义（akmode / playback / daily …）；
 // determine_mode 不做注册校验，因此 current_mode.chr 可能出现未注册的字面值 → 归为 unknown。
 
 // [catalog]
@@ -29,16 +29,20 @@ export interface ModeInfo {
 }
 
 const CLG_CATALOG: Record<string, {
-  signal: ModeSignal; labelKey: string; descKey: string
+  signal: ModeSignal; labelKey: string;
+  // descKey: string
 }> = {
   reduce: {
-    signal: 'success', labelKey: 'mode.reduce', descKey: 'mode.reduce.desc'
+    signal: 'success', labelKey: 'mode.reduce',
+    // descKey: 'mode.reduce.desc'
   },
   default: {
-    signal: 'info', labelKey: 'mode.default', descKey: 'mode.default.desc'
+    signal: 'info', labelKey: 'mode.default',
+    // descKey: 'mode.default.desc'
   },
   boost: {
-    signal: 'action', labelKey: 'mode.boost', descKey: 'mode.boost.desc'
+    signal: 'action', labelKey: 'mode.boost',
+    // descKey: 'mode.boost.desc'
   }
 }
 
@@ -100,7 +104,8 @@ export function describeMode(id: string, specialModes?: ReadonlySet<string>): Mo
   }
   const clg = CLG_CATALOG[mode]
   if (clg) {
-    return { id: mode, kind: 'clg', signal: clg.signal, labelKey: clg.labelKey, descKey: clg.descKey }
+    // CLG 档当前不带描述（descKey 在 CLG_CATALOG 中刻意注释）：空串让 UI 跳过描述行
+    return { id: mode, kind: 'clg', signal: clg.signal, labelKey: clg.labelKey, descKey: '' }
   }
   const lab = LAB_CATALOG[mode]
   if (lab) {
