@@ -15,15 +15,23 @@
         t("daemon.unknown.detail")
       : t(`daemon.${app.daemonState}.detail`)),
   );
-  // 尚无模式记录（current_mode.chr 缺失）时不显示家族与「未知」模式名——避免出现
-  // 「UNKNOWN / 未知」这种看起来像模式值的占位，与实验室页同口径
+  // 调度未运行（daemonState=stopped）时不把 current_mode.chr 的陈旧值当「当前模式」
+  // 展示：文件里的旧值不代表现在，卡片只陈述「调度未运行」（家族/模式名/id 都不显示）。
+  // 尚无记录（文件缺失）同口径显示「尚未产生模式记录」，与实验室页一致。
+  const modeIdle = $derived(app.daemonState === "stopped");
   const modeName = $derived(
-    app.modeMissing ? t("mode.unknown.missing") : t(app.modeInfo.labelKey),
+    modeIdle ? t("mode.unknown.stopped")
+    : app.modeMissing ? t("mode.unknown.missing")
+    : t(app.modeInfo.labelKey),
   );
-  // 模式家族（CLG/特调/实验室/停摆/FAS），与详细模式分开显示
+  // 模式家族（CLG/特调/实验室/停摆/FAS），与详细模式分开显示；未运行/无记录时不显示
   const familyLabel = $derived(
-    app.modeMissing ? "" : t(`mode.family.${app.modeInfo.kind}`),
+    modeIdle || app.modeMissing ? "" : t(`mode.family.${app.modeInfo.kind}`),
   );
+  const modeId = $derived(
+    modeIdle || app.modeMissing ? "—" : app.modeInfo.id || "—",
+  );
+  const modeSignal = $derived(modeIdle ? "info" : app.modeInfo.signal);
   const deviceLabel = $derived(
     app.deviceKind === "chiri" ? t("overview.device.chiri")
     : app.deviceKind === "yumi" ? t("overview.device.yumi")
@@ -76,17 +84,26 @@
         <p class="u-note">{daemonDetail}</p>
       </div>
       {#if app.isChiri}
-        <!-- 耗电情况：PowerAVG.chr（daemon 每 1s 采样写入），口径随 meta.power_avg。
-             八角读数板直接复用官方 ak-gauge（去进度环的适配见 app.css） -->
-        <div class="ak-gauge" style={`--ak-gauge-value: ${powerPercent.toFixed(1)}%`}>
-          <div class="ak-gauge__content">
-            <span class="ak-gauge__label">
-              {app.powerAvgUsesAverage ? t("overview.power.avg") : t("overview.power.ref")}
-            </span>
-            <span class="ak-gauge__value">
-              {app.powerAvgWatt === null ? "—" : app.powerAvgWatt.toFixed(2)}
-            </span>
-            <span class="ak-gauge__unit">{t("unit.watt")}</span>
+        <!-- 耗电情况：PowerAVG.chr（daemon 每 1s 采样写入），口径随 meta.power_avg；
+             量程 = meta.power_max_w（默认 12W），进度条直接复用官方 ak-progress 原语 -->
+        <div class="power">
+          <p class="u-note">
+            {app.powerAvgUsesAverage ? t("overview.power.avg") : t("overview.power.ref")}
+          </p>
+          <p class="power__value u-mono">
+            {app.powerAvgWatt === null
+              ? "—"
+              : `${app.powerAvgWatt.toFixed(2)} ${t("unit.watt")}`}
+          </p>
+          <div
+            class="ak-progress__track power__bar"
+            role="progressbar"
+            aria-valuemin="0"
+            aria-valuemax="100"
+            aria-valuenow={Math.round(powerPercent)}
+            style={`--ak-progress-value: ${powerPercent.toFixed(1)}%`}
+          >
+            <span class="ak-progress__fill"></span>
           </div>
         </div>
       {/if}
@@ -106,19 +123,16 @@
   <Panel
     title={t("overview.mode")}
     // desc={t("overview.mode.observed")}
-    signal={app.modeInfo.signal}
+    signal={modeSignal}
   >
-    <div class="mode" data-signal={app.modeInfo.signal}>
+    <div class="mode" data-signal={modeSignal}>
       <div class="mode__main">
         {#if familyLabel}
           <p class="mode__family">{familyLabel}</p>
         {/if}
         <p class="mode__name">{modeName}</p>
-        <p class="mode__id u-mono">{app.modeInfo.id || "—"}</p>
+        <p class="mode__id u-mono">{modeId}</p>
       </div>
-      {#if app.currentMode && app.daemonState === "stopped"}
-        <p class="mode__stale u-note">{t("overview.mode.stale")}</p>
-      {/if}
       {#if app.modeError}
         <StateBox
           kind="error"
@@ -283,6 +297,26 @@
     min-width: 0;
   }
 
+  /* 耗电读数：口径标签 + 数值 + 官方量程条，右栏紧凑排列（替代原八角仪表盘） */
+  .power {
+    display: grid;
+    justify-items: end;
+    align-content: center;
+    gap: 0.3rem;
+    min-width: 8.5rem;
+  }
+
+  .power__value {
+    margin: 0;
+    font-size: 1.125rem;
+    font-weight: 700;
+    line-height: 1.1;
+  }
+
+  .power__bar {
+    width: 100%;
+  }
+
   .daemon__name {
     margin: 0;
     font-size: 1.125rem;
@@ -315,12 +349,6 @@
     color: var(--ak-text-secondary);
     font-size: 0.6875rem;
     letter-spacing: 0.08em;
-  }
-
-  /* 文字样式来自 .u-note，这里只补暖色竖条与内边距 */
-  .mode__stale {
-    padding: var(--ak-space-2) var(--ak-space-3);
-    border-left: 2px solid var(--ak-signal-action);
   }
 
   .mode__problems {

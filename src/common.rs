@@ -683,7 +683,9 @@ pub fn embedded_ftl_str(lang: &str) -> &'static str {
     embedded_config_file(rel).unwrap_or_default()
 }
 
-/// 磁盘 meta.yaml 的严格结构：九个字段必填 + 两个可选字段（nofix / power_max_w）、拒绝未知字段。
+/// 磁盘 meta.yaml 的严格结构：八个字段必填 + 三个可选字段（power_avg / nofix / power_max_w）、
+/// 拒绝未知字段。**后加字段一律设计成可选**（serde default）：老文件缺行仍然合法，
+/// 不会因为一次字段扩充就把用户全部设置判非法覆盖掉。
 /// 任一缺失/多余/类型不符，或取值不在白名单内，整文件判非法——
 /// 由 sync_meta_snapshot 用二进制内嵌默认值整体覆盖修正。
 /// **新增字段时四个 meta.yaml 模板（config/meta.yaml 与三个 {soc}/meta.yaml）、WebUI
@@ -702,7 +704,8 @@ struct MetaYamlFile {
     scenemode_enabled: bool,
     /// 线程摆放总开关（affinity + core_ctl），详见 ExternalMetaOverrides
     thread_bind: bool,
-    /// 功耗口径开关（PowerAVG.chr），详见 ExternalMetaOverrides
+    /// 功耗口径开关（PowerAVG.chr），详见 ExternalMetaOverrides（可选，缺省 false）
+    #[serde(default)]
     power_avg: bool,
     /// 「不改」开关（可选字段，模板不写）：详见 ExternalMetaOverrides
     #[serde(default)]

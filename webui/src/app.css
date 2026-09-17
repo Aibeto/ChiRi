@@ -130,9 +130,12 @@ label {
   gap: var(--ak-space-2);
 }
 
-/* 页面/面板内的纵向分组（视图根节点与字段组共用） */
+/* 页面/面板内的纵向分组（视图根节点与字段组共用）。
+ * 列宽必须显式 minmax(0,1fr)：网格项默认 min-width:auto，日志这类 nowrap 宽内容
+ * 会把整列（乃至整页）撑出屏幕——交给子块自己的 overflow 去滚动 */
 .u-stack {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: var(--ak-space-4);
 }
 
@@ -168,6 +171,24 @@ label {
 .u-scroll {
   overflow: auto;
   overscroll-behavior: contain;
+  /* WebView 默认的 overlay 滚动条一滑即隐，「还有没有内容」完全看不出来——
+   * 显式绘制细滚动条（Chrome 121+ 走标准属性，旧内核走 webkit 伪元素） */
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--ak-text-secondary) 60%, transparent) transparent;
+}
+
+.u-scroll::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+.u-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.u-scroll::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--ak-text-secondary) 60%, transparent);
+  border-radius: 3px;
 }
 
 .u-list-reset {
@@ -368,12 +389,6 @@ label {
 [data-ak-ui] .ak-choice--switch .ak-choice__input:checked {
   border-color: var(--ak-signal-info);
   background: color-mix(in srgb, var(--ak-signal-info) 82%, var(--ak-color-black));
-}
-
-/* ak-gauge（耗电读数）：进度环 = 功耗 / meta.power_max_w（默认 12W），由内联
- * --ak-gauge-value 驱动；只把内层板色换成语义 token（官方 #171a1d 与面板不同源） */
-[data-ak-ui] .ak-gauge::before {
-  background: var(--ak-surface-panel);
 }
 
 /* ak-progress：标题行承载中文元信息，等宽小字上调一档保证可读 */

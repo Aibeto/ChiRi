@@ -190,7 +190,9 @@ function seed(): void {
   if (empty) return
 
   put('current_mode.chr', 'default')
-  put('logs/watchdog.pid', '12345\n')
+  // 看门狗 pid 只在 daemon 运行时存在：?daemon=stopped 模拟「已停止」，
+  // stopScheduler 会删掉它，这里不播种（否则存活态与 pid 文件互相矛盾）
+  if (daemonRunning) put('logs/watchdog.pid', '12345\n')
   put('logs/daemon.log', fakeDaemonLog())
   if (isChiri) put('logs/status.csv', fakeStatusCsv())
   put('devimp/devimp_com.tencent.tmgp.sgame_0913-120000.log', '# ts-column=local format_now\n')

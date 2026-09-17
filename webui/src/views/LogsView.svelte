@@ -107,6 +107,14 @@
   })
 </script>
 
+{#snippet backToBottomButton()}
+  <!-- 回到底部：仅「滑动离开底部」时出现（点击回底即恢复跟随并消失），
+       绝对定位在所属滚动子块内部，不悬浮到页面其它区域 -->
+  <button type="button" class="to-bottom" aria-label={t('action.toBottom')} onclick={backToBottom}>
+    ↓
+  </button>
+{/snippet}
+
 <div class="u-stack">
   <!-- 副标题已按需求注释（2026-09-17）：desc={t('logs.window')} -->
   <Panel title={t('logs.title')}>
@@ -127,26 +135,31 @@
     {:else if app.logState === 'missing'}
       <StateBox kind="missing" message={t('logs.missing')} detail={t('logs.archive')} />
     {:else}
-      <section class="terminal" data-ak-ui="terminal" aria-label={t('logs.source.daemon')}>
-        <header class="terminal__bar u-between">
-          <span class="terminal__path u-mono">logs/daemon.log</span>
-          <span class="terminal__count u-mono">{t('logs.lines', { n: visible.length })}</span>
-        </header>
-        <div
-          class="terminal__body u-scroll"
-          bind:this={daemonBody}
-          onscroll={onDaemonScroll}
-        >
-          {#each visible as line, index (index)}
-            <p class="log" data-level={line.level}>
-              <span class="log__time u-mono">{line.time}</span>
-              <span class="log__level u-mono">{line.level}</span>
-              <span class="log__module u-mono">{line.module}</span>
-              <span class="log__message">{line.message}</span>
-            </p>
-          {/each}
-        </div>
-      </section>
+      <div class="pane">
+        <section class="terminal" data-ak-ui="terminal" aria-label={t('logs.source.daemon')}>
+          <header class="terminal__bar u-between">
+            <span class="terminal__path u-mono">logs/daemon.log</span>
+            <span class="terminal__count u-mono">{t('logs.lines', { n: visible.length })}</span>
+          </header>
+          <div
+            class="terminal__body u-scroll"
+            bind:this={daemonBody}
+            onscroll={onDaemonScroll}
+          >
+            {#each visible as line, index (index)}
+              <p class="log" data-level={line.level}>
+                <span class="log__time u-mono">{line.time}</span>
+                <span class="log__level u-mono">{line.level}</span>
+                <span class="log__module u-mono">{line.module}</span>
+                <span class="log__message">{line.message}</span>
+              </p>
+            {/each}
+          </div>
+        </section>
+        {#if !followDaemon}
+          {@render backToBottomButton()}
+        {/if}
+      </div>
     {/if}
 
     {#if app.dirError}
@@ -184,52 +197,45 @@
         detail={app.isChiri ? t('state.daemonStopped') : t('state.chiriOnly')}
       />
     {:else}
-      <div
-        class="snapshot-wrap u-scroll"
-        bind:this={snapshotBody}
-        onscroll={onStatusScroll}
-      >
-        <table class="snapshot" aria-label={t('logs.source.status')}>
-          <thead>
-            <tr class="snapshot__row snapshot__row--head u-mono">
-              <th scope="col">{t('logs.status.times')}</th>
-              <th scope="col">{t('logs.status.mode')}</th>
-              <th scope="col">{t('logs.status.pkg')}</th>
-              <th scope="col">{t('logs.status.batt')}</th>
-              <th scope="col">{t('logs.status.load')}</th>
-              <th scope="col">{t('logs.status.power')}</th>
-              <th scope="col">{t('logs.status.charge')}</th>
-            </tr>
-          </thead>
-          <tbody>
-            <!-- 时间升序（旧上新下），与 daemon 终端一致：新行从底部进入并跟随 -->
-            {#each app.statusRows as row, index (index)}
-              <tr class="snapshot__row u-mono">
-                <td>{row.timestamp}</td>
-                <td>{row.mode || '—'}</td>
-                <td>{row.pkg || '—'}</td>
-                <td>{fmt(row.battTemp, 1, t('unit.celsius'))}</td>
-                <td>{fmt(row.gpuBusy, 0, t('unit.percent'))}</td>
-                <td>{fmt(row.battPower, 2, t('unit.watt'))}</td>
-                <td>{chargeLabel(row.charge)}</td>
+      <div class="pane">
+        <div
+          class="snapshot-wrap u-scroll"
+          bind:this={snapshotBody}
+          onscroll={onStatusScroll}
+        >
+          <table class="snapshot" aria-label={t('logs.source.status')}>
+            <thead>
+              <tr class="snapshot__row snapshot__row--head u-mono">
+                <th scope="col">{t('logs.status.times')}</th>
+                <th scope="col">{t('logs.status.mode')}</th>
+                <th scope="col">{t('logs.status.pkg')}</th>
+                <th scope="col">{t('logs.status.batt')}</th>
+                <th scope="col">{t('logs.status.load')}</th>
+                <th scope="col">{t('logs.status.power')}</th>
+                <th scope="col">{t('logs.status.charge')}</th>
               </tr>
-            {/each}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              <!-- 时间升序（旧上新下），与 daemon 终端一致：新行从底部进入并跟随 -->
+              {#each app.statusRows as row, index (index)}
+                <tr class="snapshot__row u-mono">
+                  <td>{row.timestamp}</td>
+                  <td>{row.mode || '—'}</td>
+                  <td>{row.pkg || '—'}</td>
+                  <td>{fmt(row.battTemp, 1, t('unit.celsius'))}</td>
+                  <td>{fmt(row.gpuBusy, 0, t('unit.percent'))}</td>
+                  <td>{fmt(row.battPower, 2, t('unit.watt'))}</td>
+                  <td>{chargeLabel(row.charge)}</td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        </div>
+        {#if !followStatus}
+          {@render backToBottomButton()}
+        {/if}
       </div>
     {/if}
-  {/if}
-
-  <!-- 子滚动窗口右下角回到底部（daemon 终端与状态快照共用；滑动后唯一恢复途径） -->
-  {#if source === 'daemon' ? app.logState === 'ok' : app.statusState === 'ok'}
-    <button
-      type="button"
-      class="to-bottom"
-      aria-label={t('action.toBottom')}
-      onclick={backToBottom}
-    >
-      ↓
-    </button>
   {/if}
 </div>
 
@@ -371,11 +377,16 @@
     overflow-wrap: anywhere;
   }
 
-  /* 右下角回到底部（避开底部导航） */
+  /* 滚动子块容器：回到底部按钮锚在本块内（而不是悬浮在页面其它位置） */
+  .pane {
+    position: relative;
+  }
+
+  /* 右下角回到底部：绝对定位在所属滚动子块右下角，滑离底部时出现、回底即消失 */
   .to-bottom {
-    position: fixed;
-    right: var(--ak-space-4);
-    bottom: calc(var(--ak-space-6) + 4rem);
+    position: absolute;
+    right: var(--ak-space-3);
+    bottom: var(--ak-space-3);
     z-index: 20;
     width: 2.75rem;
     height: 2.75rem;

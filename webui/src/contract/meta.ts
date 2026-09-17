@@ -1,6 +1,7 @@
 // meta.ts: [fields] [active] [read] [validate] [write]
 // meta.yaml 是唯一可写配置。守护进程侧规则（src/common.rs::parse_disk_meta +
-// sync_meta_snapshot）：9 字段必填 + 2 可选字段（nofix / power_max_w，见 OPTIONAL_FIELDS）、
+// sync_meta_snapshot）：8 字段必填 + 3 可选字段（power_avg / nofix / power_max_w，见
+// OPTIONAL_FIELDS——后加字段一律可选，老文件缺行依然合法）、
 // 拒绝未知键、类型必须严格（布尔只能是
 // YAML 字面量 true/false），任一异常 → 整个文件被内嵌默认覆盖（用户其他键一起丢）。
 // 因此写入策略是「单次读-改-写 + 顶层行替换」，只动目标字段、保留注释与其他键。
@@ -19,8 +20,7 @@ export const META_FIELDS = [
   'dev_record',
   'fas_enabled',
   'scenemode_enabled',
-  'thread_bind',
-  'power_avg'
+  'thread_bind'
 ] as const
 export type MetaField = (typeof META_FIELDS)[number]
 
@@ -30,7 +30,7 @@ export type MetaField = (typeof META_FIELDS)[number]
  * - power_max_w：耗电仪表盘满量程（W，默认 12）
  * 缺失合法、出现时校验类型（范围由 daemon 兜底回退默认）；nofix 不提供 UI 写入口。
  */
-export const OPTIONAL_FIELDS = ['nofix', 'power_max_w'] as const
+export const OPTIONAL_FIELDS = ['power_avg', 'nofix', 'power_max_w'] as const
 export type OptionalField = (typeof OPTIONAL_FIELDS)[number]
 
 /** 允许 WebUI 修改的字段（name/author 仅展示：daemon 不消费，改了也不影响行为） */

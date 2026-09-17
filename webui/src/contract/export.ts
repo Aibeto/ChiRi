@@ -103,21 +103,30 @@ export async function pollExport(job: ExportJob): Promise<ReadResult<ExportProbe
   const mode = `${job.failFlag}.mode`
   // 字节进度 = .part（打包中）+ .tar（打包完成/无 gzip）+ .tar.gz（压缩完成）之和，
   // 同一时刻至多一个存在（脚本 mv 与 gzip 就地删除保证）
+  // 三个字节来源文件在打包过程中先后出现/消失：**必须先 [ -f ] 守卫再读**——
+  // `wc -c < 缺失文件` 是输入重定向错误，由 shell 直接打到 stderr（命令上的
+  // `2>/dev/null` 覆盖不到，真机 mksh 会把它当整条命令失败），轮询被误判成
+  // 「查询导出进度失败」；`b/d/t` 初值 0 保证任一文件缺失也有完整输出
   const cmd =
     `[ -f ${shQuote(job.target)} ] && echo s:gz; ` +
     `[ -f ${shQuote(job.failFlag)} ] && echo "s:fail:$(cat ${shQuote(job.failFlag)} 2>/dev/null)"; ` +
     `[ -f ${shQuote(tarPath)} ] && [ ! -f ${shQuote(mode)} ] && echo s:tar; ` +
-    `b=$(wc -c < ${shQuote(part)} 2>/dev/null || echo 0); ` +
-    `b=$((b + $(wc -c < ${shQuote(tarPath)} 2>/dev/null || echo 0))); ` +
-    `b=$((b + $(wc -c < ${shQuote(job.target)} 2>/dev/null || echo 0))); ` +
+    `b=0; ` +
+    `[ -f ${shQuote(part)} ] && b=$((b + $(wc -c < ${shQuote(part)}))); ` +
+    `[ -f ${shQuote(tarPath)} ] && b=$((b + $(wc -c < ${shQuote(tarPath)}))); ` +
+    `[ -f ${shQuote(job.target)} ] && b=$((b + $(wc -c < ${shQuote(job.target)}))); ` +
     `echo "b:$b"; ` +
-    `echo "d:$(wc -l < ${shQuote(PROGRESS_FILE)} 2>/dev/null)"; ` +
-    `echo "t:$(cat ${shQuote(TOTAL_FILE)} 2>/dev/null)"; ` +
+    `d=0; [ -f ${shQuote(PROGRESS_FILE)} ] && d=$(wc -l < ${shQuote(PROGRESS_FILE)}); echo "d:$d"; ` +
+    `t=0; [ -f ${shQuote(TOTAL_FILE)} ] && t=$(cat ${shQuote(TOTAL_FILE)} 2>/dev/null); echo "t:$t"; ` +
     `exit 0`
   try {
     const { errno, stdout, stderr } = await run(cmd)
-    // 带操作上下文：调用方（轮询循环）据此区分「探测挂了」与「打包失败」
-    if (errno !== 0) return failed<ExportProbe>(`查询导出进度失败：${shellError(errno, stderr)}`)
+    // 带操作上下文：调用方（轮询循环）据此区分「探测挂了」与「打包失败」。
+    // 只有「非零且没拿到任何可用输出」才算探测失败——个别 shell 会在中途
+    // 返回非零但输出齐全，误判会让导出显示假失败
+    if (errno !== 0 && !/^b:/m.test(stdout)) {
+      return failed<ExportProbe>(`查询导出进度失败：${shellError(errno, stderr)}`)
+    }
     const out = stdout
     const num = (prefix: string): number => {
       // \s* 容忍 wc 系工具在 stdin 计数上的前导空格（GNU 多输入时会有 padding）

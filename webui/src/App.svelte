@@ -9,6 +9,7 @@
   import LabView from '@/views/LabView.svelte'
   import LogsView from '@/views/LogsView.svelte'
   import OverviewView from '@/views/OverviewView.svelte'
+  import { exitApp } from '@/kernel/ksu'
   import { i18n, t, toggleLocale } from '@/i18n/index.svelte'
   import { go, initRouter, navOwner, router, VIEW_IDS } from '@/router.svelte'
   import { app } from '@/state.svelte'
@@ -23,8 +24,13 @@
     if (!app.ready) void app.loadOverview()
   })
 
-  /** 退出 WebUI：WebView 里 window.close() 通常无效，返回历史作为兜底 */
+  /**
+   * 关闭 WebUI：优先走管理器注入的 ksu.exit（真正的原生关闭）。
+   * 只有拿不到该 API（旧版管理器 / 外部浏览器）时才退回 window.close() + 历史后退——
+   * 只做后退会变成「返回上一页」，不是关闭。
+   */
   function exitWebui(): void {
+    if (exitApp()) return
     window.close()
     setTimeout(() => window.history.back(), 120)
   }

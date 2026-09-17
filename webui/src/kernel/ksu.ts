@@ -10,6 +10,8 @@ interface KsuGlobal {
   moduleInfo?: () => string
   fullScreen?: (on: boolean) => void
   enableEdgeToEdge?: (on: boolean) => void
+  /** 关闭 WebUI 宿主（管理器注入；旧版本可能没有） */
+  exit?: () => void
 }
 
 export interface ExecResult {
@@ -123,6 +125,22 @@ export function fullScreen(on: boolean): void {
     api?.fullScreen?.(on)
   } catch {
     /* 老版本无此 API：忽略 */
+  }
+}
+
+/**
+ * 关闭 WebUI：管理器注入了 exit 时走原生关闭并返回 true；
+ * 未注入（旧版管理器 / 外部浏览器）返回 false，由调用方兜底
+ * （WebView 里 window.close() 通常无效，只做历史后退会变成「返回上一页」）。
+ */
+export function exitApp(): boolean {
+  const api = ksu()
+  if (!api?.exit) return false
+  try {
+    api.exit()
+    return true
+  } catch {
+    return false
   }
 }
 
