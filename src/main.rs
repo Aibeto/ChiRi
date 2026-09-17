@@ -239,6 +239,12 @@ fn main() -> Result<()> {
         }
     }
 
+    // [power_avg]
+    // 启动清空 PowerAVG.chr：它是「本次运行」的输出记录（不读回），上次运行的值在
+    // 本次取样前是过期数据，WebUI 会当有效读数展示（旧值配上新会话的仪表盘）。
+    // 置空后界面回到 — +「该文件由调度运行期写入」的说明，直到首个放电采样写回。
+    logger::power_avg_reset();
+
     // 全局 panic 钩子：任何线程的 panic 都落盘到 daemon.log。
     // 此前 panic 消息只写 stderr（守护进程的 stderr 无人接收），调度线程
     // 崩溃后日志里零痕迹——status.csv 只能反推死亡时间线，无法定位原因。

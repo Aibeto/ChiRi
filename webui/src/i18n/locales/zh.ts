@@ -34,9 +34,9 @@ export default {
 
   'daemon.label': '守护进程',
   'daemon.running': '运行中',
-  'daemon.running.detail': '心跳新鲜：LiveTime.chr 在 20 秒内',
+  'daemon.running.detail': '调度主服务正常',
   'daemon.stopped': '已停止',
-  'daemon.stopped.detail': '心跳过期：LiveTime.chr 超过 20 秒未更新',
+  'daemon.stopped.detail': '调度被关闭或时间异常',
   'daemon.unknown': '无法判定',
   'daemon.unknown.detail': 'LiveTime.chr 读取失败或内容非法',
 
@@ -48,9 +48,9 @@ export default {
   'overview.device.chiri': 'ChiRi',
   'overview.device.yumi': '通用机型',
   'overview.device.unknown': '无法判定',
-  'overview.power.ref': '参考放电功耗',
+  'overview.power.ref': '实时放电参考',
   'overview.power.avg': '平均放电功耗',
-  'overview.power.missing': 'PowerAVG.chr 缺失或为空：该文件由调度运行期写入，未运行过时不会产生',
+  'overview.power.missing': '放电功耗计算数据缺失或为空',
   'overview.module': '模块信息',
   'overview.module.version': '版本',
   'overview.module.author': '维护',

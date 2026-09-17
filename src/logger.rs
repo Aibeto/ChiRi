@@ -414,18 +414,34 @@ pub const POWER_AVG_CHR: &str = "PowerAVG.chr";
 /// 不丢；daemon 进程重启从零开始（按契约设计：文件只是输出记录，不读回）。
 static POWER_AVG: Mutex<(f32, u64)> = Mutex::new((0.0, 0));
 
+/// 参考模式的权重：**上次留存值 : 新采样 = 10 : 1**（用户口径 2026-09-18）。
+/// 比原先的 1:1 取半更钝——单次异常读数只把结果拉动 1/11，避免读数跟着尖峰跳。
+const REFERENCE_WEIGHT: f32 = 10.0;
+
+/// 启动清空 `PowerAVG.chr`（保留文件、内容置空）：文件是**本次运行**的输出记录、
+/// 不读回，上次运行留下的值在本次取样前是过期数据，WebUI 会把它当有效读数展示
+/// （数值 + 仪表盘）。置空后界面显示 — 并给出「该文件由调度运行期写入」的说明，
+/// 直到本次第一个放电采样写回。属运行时输出，不受 `nofix` 约束（那管的是二进制
+/// 内容对外部文件的覆盖：meta 自愈与 webui 资产还原）。
+pub fn power_avg_reset() {
+    let path = common::get_module_root().join(POWER_AVG_CHR);
+    let _ = common::write_file_no_panic(&path, b"");
+}
+
 /// 更新 PowerAVG 并写模块根 `PowerAVG.chr`。**在 status.csv 写入流程里顺序调用**
 /// （每个 1s 采样一次），不另起并行处理。
 ///
-/// - 参考模式（`use_average=false`，默认）：value = (旧值 + 新值) / 2——与上次
-///   留存值取半递推，偏近期，仅作参考；
+/// - 参考模式（`use_average=false`，默认）：value = (旧值 × 10 + 新值) / 11——上次
+///   留存值**先乘 10** 再参与（用户口径 2026-09-18，原为 1:1 取半），偏历史、读数稳：
+///   单次异常采样只占 1/11，仅作参考；
 /// - 平均模式（true）：value = (旧值 × 次数 + 新值) / (次数 + 1)——累计平均、
 ///   等权全史（用户口径：「上次留存平均值 × 留存次数 + 当前值，除以（留存次数 + 1）」）。
 ///
 /// `留存次数` 两种模式都累计：切到平均模式时即有历史次数可用。
 /// 功耗缺测（None/非法）时跳过本次（没读到就不算），不写文件。
-/// **取样口径由调用方保证＝仅电池放电**（插电/充满/未充电传 None）：非放电态的跳过
-/// 不推进递推、不改动文件，即文件里始终是「放电」口径的值，充电期间保留上次结果。
+/// **取样口径由调用方保证**（`chiri/mod.rs`）：仅电池放电；且**平均模式排除息屏样本**
+/// （息屏功耗低但占时长大，等权全史会把亮屏读数整体拉低），**参考值保留息屏**。
+/// 被跳过的样本不推进留存次数、不改动文件——文件里始终是本次运行的有效样本结果。
 pub fn power_avg_update(power_w: Option<f32>, use_average: bool) {
     let Some(p) = power_w.filter(|v| v.is_finite() && *v >= 0.0) else {
         return;
@@ -437,7 +453,7 @@ pub fn power_avg_update(power_w: Option<f32>, use_average: bool) {
     } else if use_average {
         (value * count as f32 + p) / (count as f32 + 1.0)
     } else {
-        (value + p) / 2.0
+        (value * REFERENCE_WEIGHT + p) / (REFERENCE_WEIGHT + 1.0)
     };
     *state = (next, count + 1);
     drop(state);

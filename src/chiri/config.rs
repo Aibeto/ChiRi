@@ -76,9 +76,10 @@ pub struct Meta {
     pub thread_bind: bool,
 
     /// 功耗口径开关（meta.yaml `power_avg`，默认 false = 参考值）：控制 1s 状态
-    /// 采样写模块根 `PowerAVG.chr` 的口径——false 写参考值（(旧值 + 新值) / 2
-    /// 递推，偏近期）；true 写累计平均值（(旧值 × 次数 + 新值) / (次数 + 1)，
-    /// 等权全史）。热重载即时生效；仅 ChiRi 有 1s 状态采样，Yumi 无效。
+    /// 采样写模块根 `PowerAVG.chr` 的口径——false 写参考值（(旧值 × 10 + 新值) / 11
+    /// 递推，偏历史，含息屏样本）；true 写累计平均值（(旧值 × 次数 + 新值) / (次数 + 1)，
+    /// 等权全史，**仅亮屏**放电样本）。两者都只在电池放电时取样。
+    /// 热重载即时生效；仅 ChiRi 有 1s 状态采样，Yumi 无效。
     #[serde(default, alias = "PowerAvg")]
     pub power_avg: bool,
 

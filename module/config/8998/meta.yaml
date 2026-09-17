@@ -7,8 +7,8 @@ dev_record: true
 fas_enabled: true
 scenemode_enabled: true
 thread_bind: true
-# 功耗口径（PowerAVG.chr，仅 ChiRi）：false = 参考值（相邻两值取半递推，偏近期）；
-#                                   true  = 累计平均值（等权全史）。热重载即时生效。
+# 功耗口径（PowerAVG.chr，仅 ChiRi）：false = 参考值（旧值先乘 10，与新值 10:1 加权递推，偏历史，含息屏样本）；
+#                                   true  = 累计平均值（等权全史，仅亮屏放电样本）。两者都只在放电时取样，热重载即时生效。
 power_avg: false
 # 耗电读数满量程（W，WebUI 状态页仪表盘用；可选，默认 12）：只影响显示，不参与调度。
 power_max_w: 12

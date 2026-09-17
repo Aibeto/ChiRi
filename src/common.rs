@@ -727,8 +727,9 @@ pub struct ExternalMetaOverrides {
     /// `Affinity.enabled` / `CoreCtl.enabled` 取「与」——任一为假即视为关闭线程功能，
     /// 见 chiri/config.rs::Config::load。
     pub thread_bind: Option<bool>,
-    /// 功耗口径开关（PowerAVG.chr）：false（默认）= 参考值（每次与上次取半递推，
-    /// 偏近期）；true = 累计平均值（等权全史）。daemon 只在 ChiRi 的 1s 状态采样里
+    /// 功耗口径开关（PowerAVG.chr）：false（默认）= 参考值（旧值先乘 10 再与新值
+    /// 按 10:1 加权递推，偏历史，含息屏样本）；true = 累计平均值（等权全史，
+    /// **仅亮屏**放电样本）。两者都只在电池放电时取样。daemon 只在 ChiRi 的 1s 状态采样里
     /// 消费（Yumi 无效）；写侧走「单次读-改-写」顶层行替换，见 WebUI contract/meta.ts。
     pub power_avg: Option<bool>,
     /// 「不改」开关（meta.yaml 字段 `nofix`，默认 false，且默认不写进配置）：

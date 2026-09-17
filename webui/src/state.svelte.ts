@@ -561,7 +561,8 @@ class AppStore {
 
   /**
    * 高级设置：功耗口径开关——直写 meta.yaml 的 `power_avg`（不走草稿，立即热重载）。
-   * 关闭（false，默认）= 参考值（与上次取半递推）；开启 = 累计平均值（等权全史）。
+   * 关闭（false，默认）= 参考值（旧值×10 与新值按 10:1 加权递推，偏历史，含息屏）；
+   * 开启 = 累计平均值（等权全史，仅亮屏放电样本）。
    * 写后回读，界面以实际落盘内容为准。
    */
   async setPowerAvg(useAverage: boolean): Promise<void> {
