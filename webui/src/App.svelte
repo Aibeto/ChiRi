@@ -22,17 +22,33 @@
     initRouter()
     if (!app.ready) void app.loadOverview()
   })
+
+  /** 退出 WebUI：WebView 里 window.close() 通常无效，返回历史作为兜底 */
+  function exitWebui(): void {
+    window.close()
+    setTimeout(() => window.history.back(), 120)
+  }
 </script>
 
 <div class="shell" data-ak-ui="system">
-  <header class="shell__bar">
-    <div class="shell__brand">
-      <p class="shell__title">{app.moduleProp.name || t('app.title')}</p>
-      <p class="shell__version u-mono">
-        {app.moduleProp.version || t('app.subtitle')}
-      </p>
+  <header class="shell__bar u-between">
+    <div class="shell__left u-row-tight">
+      <button
+        type="button"
+        class="ak-button btn shell__exit"
+        aria-label={t('app.exit')}
+        onclick={exitWebui}
+      >
+        ✕
+      </button>
+      <div class="shell__brand">
+        <p class="shell__title">{app.moduleProp.name || t('app.title')}</p>
+        <p class="shell__version u-mono">
+          {app.moduleProp.version || t('app.subtitle')}
+        </p>
+      </div>
     </div>
-    <div class="shell__side">
+    <div class="shell__side u-row-tight">
       <LiveStatus state={app.daemonState} label={daemonLabel} />
       <button
         type="button"
@@ -82,18 +98,27 @@
     background: var(--ak-surface-canvas);
   }
 
+  /* 行列布局来自 .u-between，这里只管吸顶与分隔线 */
   .shell__bar {
     position: sticky;
     top: 0;
     z-index: 10;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: var(--ak-space-3);
     padding: calc(var(--ak-space-3) + env(safe-area-inset-top)) var(--ak-space-4)
       var(--ak-space-3);
     border-bottom: var(--ak-line-hairline) solid var(--ak-surface-raised);
     background: var(--ak-surface-panel);
+  }
+
+  .shell__left {
+    min-width: 0;
+  }
+
+  /* 命中区高度即 .btn 的 --ak-density-control-height（2.75rem），无需重复声明 */
+  .shell__exit {
+    flex: 0 0 auto;
+    padding: 0 var(--ak-space-3);
+    font-size: 0.875rem;
+    font-weight: 700;
   }
 
   .shell__brand {
@@ -117,14 +142,10 @@
   }
 
   .shell__side {
-    display: flex;
     flex: 0 0 auto;
-    align-items: center;
-    gap: var(--ak-space-2);
   }
 
   .lang {
-    min-height: 2.75rem;
     padding: 0 var(--ak-space-3);
     font-size: 0.75rem;
   }

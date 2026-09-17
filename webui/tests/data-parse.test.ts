@@ -131,7 +131,7 @@ describe('daemon.log 解析', () => {
   it('解析时间/级别/模块/消息，并丢弃窗口开头的残行', () => {
     const lines = parseDaemonLog(text)
     expect(lines).toHaveLength(4)
-    expect(lines[0].time).toBe('2026-09-13 12:00:00')
+    expect(lines[0].time).toBe('09-13 12:00:00')
     expect(lines[0].level).toBe('INFO')
     expect(lines[0].module).toBe('yumi::main')
   })

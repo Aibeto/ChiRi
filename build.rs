@@ -1,6 +1,7 @@
-//! build.rs: [bpf-linker-install] [ebpf-build]
+//! build.rs: [bpf-linker-install] [ebpf-build] [webui-embed]
 
 use std::env;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -194,6 +195,57 @@ fn main() {
         }
         Err(e) => {
             panic!("yumi-ebpf 编译失败: {e}");
+        }
+    }
+
+    write_webui_assets();
+}
+
+// [webui-embed]
+
+/// 生成 OUT_DIR/webui_assets.rs：webui/dist 全量资产清单（include_bytes!），
+/// 供 daemon 启动时把内嵌副本还原到模块 webroot/（防篡改，见 src/webui_asset.rs）。
+/// dist 缺失（纯 cargo check / 未跑 WebUI 构建）时生成空清单（EMBEDDED=false），
+/// 还原功能自动降级、编译照常通过；xtask 的构建顺序是「先 webui 后 core」，
+/// 打包产物始终带完整资产。
+fn write_webui_assets() {
+    let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
+    let dist = manifest.join("webui").join("dist");
+    // 目录本身（新增/删除文件会改目录 mtime）+ 每个文件的 mtime 都登记，避免漏重编
+    println!("cargo:rerun-if-changed={}", dist.display());
+
+    let mut files: Vec<(String, PathBuf)> = Vec::new();
+    collect_webui_dist(&dist, &dist, &mut files);
+    files.sort();
+    for (_, abs) in &files {
+        println!("cargo:rerun-if-changed={}", abs.display());
+    }
+
+    let mut code = String::from("// 由 build.rs 生成：webui/dist 资产清单（相对路径 -> 内容）\n");
+    code.push_str(&format!("pub const EMBEDDED: bool = {};\n", !files.is_empty()));
+    code.push_str("pub const FILES: &[(&str, &[u8])] = &[\n");
+    for (rel, abs) in &files {
+        code.push_str(&format!(
+            "    ({:?}, include_bytes!({:?})),\n",
+            rel,
+            abs.to_string_lossy()
+        ));
+    }
+    code.push_str("];\n");
+
+    let out = PathBuf::from(env::var("OUT_DIR").unwrap()).join("webui_assets.rs");
+    fs::write(&out, code).expect("写入 webui_assets.rs 失败");
+}
+
+/// 递归收集目录下全部文件（rel 用 `/` 分隔，与 webroot 下的相对路径一致）
+fn collect_webui_dist(root: &Path, dir: &Path, out: &mut Vec<(String, PathBuf)>) {
+    let Ok(rd) = fs::read_dir(dir) else { return };
+    for entry in rd.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_webui_dist(root, &path, out);
+        } else if let Ok(rel) = path.strip_prefix(root) {
+            out.push((rel.to_string_lossy().replace('\\', "/"), path));
         }
     }
 }

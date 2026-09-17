@@ -13,7 +13,7 @@ use log4rs::encode::pattern::PatternEncoder;
 use once_cell::sync::OnceCell;
 use std::collections::HashMap;
 use std::fs;
-use std::io::{Read as _, Seek as _, Write as _};
+use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
@@ -404,6 +404,44 @@ fn status_write_line(fields: &[&str]) {
     drop(w);
     // 记账（含换行）：写入即事件触发，logs/ 累计增长达 16MB 触发重启打包
     note_write(&LOGS_BYTES_WRITTEN, "logs/", line.len() as u64 + 1);
+}
+
+// [power_avg]
+/// PowerAVG 输出文件（模块根，对外暴露、供 WebUI 只读展示）
+pub const POWER_AVG_CHR: &str = "PowerAVG.chr";
+
+/// PowerAVG 递推状态：（当前留存值, 留存次数）。进程级静态——调度线程 panic 重启
+/// 不丢；daemon 进程重启从零开始（按契约设计：文件只是输出记录，不读回）。
+static POWER_AVG: Mutex<(f32, u64)> = Mutex::new((0.0, 0));
+
+/// 更新 PowerAVG 并写模块根 `PowerAVG.chr`。**在 status.csv 写入流程里顺序调用**
+/// （每个 1s 采样一次），不另起并行处理。
+///
+/// - 参考模式（`use_average=false`，默认）：value = (旧值 + 新值) / 2——与上次
+///   留存值取半递推，偏近期，仅作参考；
+/// - 平均模式（true）：value = (旧值 × 次数 + 新值) / (次数 + 1)——累计平均、
+///   等权全史（用户口径：「上次留存平均值 × 留存次数 + 当前值，除以（留存次数 + 1）」）。
+///
+/// `留存次数` 两种模式都累计：切到平均模式时即有历史次数可用。
+/// 功耗缺测（None/非法）时跳过本次（没读到就不算），不写文件。
+pub fn power_avg_update(power_w: Option<f32>, use_average: bool) {
+    let Some(p) = power_w.filter(|v| v.is_finite() && *v >= 0.0) else {
+        return;
+    };
+    let mut state = POWER_AVG.lock().unwrap_or_else(|e| e.into_inner());
+    let (value, count) = *state;
+    let next = if count == 0 {
+        p
+    } else if use_average {
+        (value * count as f32 + p) / (count as f32 + 1.0)
+    } else {
+        (value + p) / 2.0
+    };
+    *state = (next, count + 1);
+    drop(state);
+    // 原子写（tmp+rename）：WebUI 每秒读它展示，绝不能读到半截内容
+    let path = common::get_module_root().join(POWER_AVG_CHR);
+    let _ = common::write_file_no_panic(&path, format!("{:.2}\n", next).as_bytes());
 }
 
 /// 缺失数值的占位
@@ -853,6 +891,27 @@ fn devimp_meta() -> &'static String {
                 }
             }
         }
+        // getprop 拿跨分区属性的合并视图：ro.product.model 等常不在
+        // /system/build.prop（Android 10+ 属 /product、/vendor 分区），直接读文件
+        // 会显示 "-"（devimp 头 model 曾因此读空）。getprop 为空时保留上面的
+        // build.prop 解析值兜底。
+        let gp = |k: &str| crate::common::getprop(k);
+        let m = gp("ro.product.model");
+        if !m.is_empty() {
+            model = m;
+        }
+        let b = gp("ro.board.platform");
+        if !b.is_empty() {
+            board = b;
+        }
+        let r = gp("ro.build.version.release");
+        if !r.is_empty() {
+            release = r;
+        }
+        let s = gp("ro.build.version.sdk");
+        if !s.is_empty() {
+            sdk = s;
+        }
         let soc = common::matched_soc_hint().unwrap_or("-");
         let kernel = fs::read_to_string("/proc/sys/kernel/osrelease")
             .map(|s| s.trim().to_string())
@@ -1060,7 +1119,7 @@ fn watchdog_pid() -> Option<i32> {
 
 /// logs/watchdog.pid 运行时自愈：logs/ 目录被外部删除时该文件随目录一起
 /// 消失，WebUI「关闭调度」靠它定位并终止看门狗——缺失时 stopScheduler 只能
-/// killall yumi 杀不死看门狗，看门狗 3s 后把 daemon 再拉起；用户此时手动
+/// killall chiri 杀不死看门狗，看门狗 3s 后把 daemon 再拉起；用户此时手动
 /// 重启（action.sh）又清不掉无 pid 可寻的旧看门狗，最终新旧两个 daemon
 /// 实例并行，devimp/status/daemon 日志各写两份。
 /// 看门狗 sh 以 `echo $$ > pidfile` 记录自身 PID，而 daemon 正是该 sh 的
@@ -1268,17 +1327,19 @@ pub fn devimp_event(kind: &str, pkg: &str, reason: &str) {
     devimp_write_line(r);
 }
 
-// 启动归档：logs/ → logd/ziped_<毫秒时间戳>.zip、devimp/ → logd/devimp_<ts>.zip
-// （一次性子线程串行打包），打包完成后执行 logd/ 与 devimp/ 的**各自独立**预算清理
+// 启动归档：logs/ → logd/<ts>.tar、devimp/ → logd/devimp_<ts>.tar（一次性子线程
+// 串行打包），打包完成后执行 logd/ 与 devimp/ 的**各自独立**预算清理
 //
 // 流程（由 main.rs 在 logger::init 之前调用，保证新旧日志文件分离）：
 // 1. 把整个 logs/ 与 devimp/ 分别原子重命名为同级 `ziped_<ts>` / `ziped_devimp_<ts>`
-//    临时目录（同分区 rename），并新建空目录接住本进程的新写入；
+//    临时目录（同分区 rename；`ziped_` 是历史命名、遗留扫描按它认目录，保留不动），
+//    并新建空目录接住本进程的新写入；
 // 2. **复制回 watchdog.pid** 到新建的 logs/——看门狗先于本进程启动、WebUI
 //    stopScheduler 靠 logs/watchdog.pid 定位并终止看门狗，归档不能带走它；
-// 3. 单个一次性子线程把两个临时目录串行打包为 logd/ziped_<ts>.zip 与
-//    logd/devimp_<ts>.zip（stored ZIP，无压缩、零新依赖），成功后删除临时
-//    目录并自然退出（无常驻线程）；失败保留对应临时目录并写入
+// 3. 单个一次性子线程把两个临时目录串行打包为**无压缩 tar**，打包本身由外部
+//    脚本 scripts/pack.sh 完成（对外暴露的稳定接口、构建流程不得修改；优先
+//    模块自带 core/bin/tar，回退系统 tar。2026-09-17 起不再由 Rust 手写 ZIP），
+//    成功后删除临时目录并自然退出（无常驻线程）；失败保留对应临时目录并写入
 //    ARCHIVE_FAILED.txt 供事后排查（此时 logger 尚未 init，无法打点）；
 // 4. 打包完成后执行目录预算清理：logd/ 与 devimp/ 各自超过
 //    LOGD_MAX_BYTES / DEVIMP_DIR_MAX_BYTES 时，只删本目录内最旧文件到低于对应 target；
@@ -1463,10 +1524,9 @@ fn clear_dir_keep(dir: &Path, keep: &[&str]) {
     }
 }
 
-/// 串行打包一批 staging 目录：每个目录打成 `logd/<目录名>.zip`（沿用目录名即
-/// 保留其原始时间戳），成功则删除目录，失败保留并写 ARCHIVE_FAILED.txt；
-/// 空目录直接丢弃，不留空 zip。
-fn pack_staging_dirs(logd: &Path, dirs: Vec<PathBuf>) {
+/// 串行打包一批 staging 目录：每个目录打成 `logd/<去 ziped_ 前缀名>.tar`
+/// （沿用其原始时间戳），成功删目录、失败留痕（pack_or_keep）；空目录直接丢弃。
+fn pack_staging_dirs(root: &Path, logd: &Path, dirs: Vec<PathBuf>) {
     for dir in dirs {
         let mut files = Vec::new();
         if collect_files(&dir, &mut files).is_ok() && files.is_empty() {
@@ -1477,22 +1537,13 @@ fn pack_staging_dirs(logd: &Path, dirs: Vec<PathBuf>) {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| STAGING_PREFIX.to_string());
-        let zip_path = unique_path(logd, &stem, "zip");
-        match pack_dir_stored_zip(&dir, &zip_path) {
-            Ok(()) => {
-                let _ = fs::remove_dir_all(&dir);
-            }
-            Err(_) => {
-                let _ = fs::write(
-                    dir.join("ARCHIVE_FAILED.txt"),
-                    "zip packing failed; this directory was kept for inspection\n",
-                );
-            }
-        }
+        let stem = stem.strip_prefix(STAGING_PREFIX).unwrap_or(&stem).to_string();
+        let tar_path = unique_path(logd, &stem, "tar");
+        pack_or_keep(root, &dir, &tar_path);
     }
 }
 
-/// 启动归档入口。返回 (logs 归档 zip 名, devimp 归档 zip 名)（logger::init 后供
+/// 启动归档入口。返回 (logs 归档 tar 名, devimp 归档 tar 名)（logger::init 后供
 /// main info 打点）；未归档（首次安装 / 空目录 / rename 失败 / 短会话丢弃）
 /// 对应项为 None。
 pub fn archive_on_startup(root: &Path) -> (Option<String>, Option<String>) {
@@ -1524,7 +1575,7 @@ pub fn archive_on_startup(root: &Path) -> (Option<String>, Option<String>) {
             let _ = std::thread::Builder::new()
                 .name("log_archiver".to_string())
                 .spawn(move || {
-                    pack_staging_dirs(&logd, orphans);
+                    pack_staging_dirs(&root, &logd, orphans);
                     enforce_dir_limits(&root);
                 });
         }
@@ -1563,61 +1614,41 @@ pub fn archive_on_startup(root: &Path) -> (Option<String>, Option<String>) {
     }
 
     // ── 单个一次性子线程：串行打包（遗留优先）+ 预算清理 ──
-    // zip 名沿用各自 staging 目录名（保留其原始时间戳），不再统一用本次 ts
-    fn zip_name_of(dir: &Path) -> String {
+    // tar 名沿用各自 staging 目录名的时间戳段（保留原始时间戳），不再统一用本次 ts；
+    // `ziped_` 前缀是历史命名（遗留扫描按它认目录，保留不动），产物名剥掉它
+    fn tar_name_of(dir: &Path) -> String {
         let stem = dir
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| STAGING_PREFIX.to_string());
-        format!("{stem}.zip")
+        let stem = stem.strip_prefix(STAGING_PREFIX).unwrap_or(&stem).to_string();
+        format!("{stem}.tar")
     }
-    let logs_zip = logs_tmp.as_deref().map(zip_name_of);
-    let devimp_zip = devimp_tmp.as_deref().map(zip_name_of);
+    let logs_tar = logs_tmp.as_deref().map(tar_name_of);
+    let devimp_tar = devimp_tmp.as_deref().map(tar_name_of);
     if !orphans.is_empty() || logs_tmp.is_some() || devimp_tmp.is_some() {
         let logd = root.join("logd");
         let _ = fs::create_dir_all(&logd);
         let root = root.to_path_buf();
-        let logs_zip_name = logs_zip.clone().unwrap_or_default();
-        let devimp_zip_name = devimp_zip.clone().unwrap_or_default();
+        let logs_tar_name = logs_tar.clone().unwrap_or_default();
+        let devimp_tar_name = devimp_tar.clone().unwrap_or_default();
         let _ = std::thread::Builder::new()
             .name("log_archiver".to_string())
             .spawn(move || {
                 // 遗留目录先打：本轮数据即便再次被打断，下次启动还能回收
-                pack_staging_dirs(&logd, orphans);
+                pack_staging_dirs(&root, &logd, orphans);
                 if let Some(dir) = logs_tmp {
-                    let zip_path = logd.join(&logs_zip_name);
-                    match pack_dir_stored_zip(&dir, &zip_path) {
-                        Ok(()) => {
-                            let _ = fs::remove_dir_all(&dir);
-                        }
-                        Err(_) => {
-                            let _ = fs::write(
-                                dir.join("ARCHIVE_FAILED.txt"),
-                                "zip packing failed; this directory was kept for inspection\n",
-                            );
-                        }
-                    }
+                    pack_or_keep(&root, &dir, &logd.join(&logs_tar_name));
                 }
                 if let Some(dir) = devimp_tmp {
-                    let zip_path = logd.join(&devimp_zip_name);
-                    match pack_dir_stored_zip(&dir, &zip_path) {
-                        Ok(()) => {
-                            let _ = fs::remove_dir_all(&dir);
-                        }
-                        Err(_) => {
-                            let _ = fs::write(
-                                dir.join("ARCHIVE_FAILED.txt"),
-                                "zip packing failed; this directory was kept for inspection\n",
-                            );
-                        }
-                    }
+                    pack_or_keep(&root, &dir, &logd.join(&devimp_tar_name));
                 }
-                // 两个 zip 均已落盘后才清点预算：此时总大小才包含新归档
+                // 两个归档均已落盘后才清点预算：此时总大小才包含新归档
                 enforce_dir_limits(&root);
             });
     }
 
-    (logs_zip, devimp_zip)
+    (logs_tar, devimp_tar)
 }
 
 /// logd/ 与 devimp/ 目录预算清理（**各自独立**）：任一目录超过自己的 MAX 时，
@@ -1690,129 +1721,32 @@ fn collect_files(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
     Ok(())
 }
 
-/// 把目录打包为 stored（不压缩）ZIP。零依赖手写 ZIP 结构：
-/// 每文件 [local file header + 文件名 + 原始数据] + central directory + EOCD。
-/// 日志文本压缩可省 ~80%，但引入 zip/flate2 依赖违背体积优先约定；stored 任何
-/// 解压器均可打开，体积换零依赖。只读文件、流式写出，失败返回 Err 交调用方处理。
-fn pack_dir_stored_zip(dir: &Path, zip_path: &Path) -> std::io::Result<()> {
-    let mut files: Vec<PathBuf> = Vec::new();
-    collect_files(dir, &mut files)?;
-    files.sort();
-    let mut w = std::io::BufWriter::new(fs::File::create(zip_path)?);
-    let mut central: Vec<u8> = Vec::new();
-    let mut offset: u32 = 0;
-    let mut count: u16 = 0;
-    // 固定时间戳 1980-01-01（DOS 日期最小合法值），归档不依赖原 mtime
-    const DOS_DATE: u16 = 0x21;
-    for f in &files {
-        let name_rel = f
-            .strip_prefix(dir)
-            .unwrap_or(f)
-            .to_string_lossy()
-            .replace('\\', "/");
-        // 流式读：devimp 单文件软上限 128MB，整读入内存会瞬时翻倍内存占用；
-        // 先算 CRC 再写数据，两遍扫描换取常数级内存
-        let sz = f.metadata()?.len();
-        if sz > u32::MAX as u64 {
-            // ZIP32 大小字段上限（4GB）：归档文件集不应触及，跳过防写坏 zip
-            continue;
-        }
-        let mut src = fs::File::open(f)?;
-        let crc = crc32_file(&mut src)?;
-        let n = name_rel.len() as u16;
-        let sz = sz as u32;
-        // local file header
-        w.write_all(&0x04034b50u32.to_le_bytes())?;
-        w.write_all(&20u16.to_le_bytes())?; // version needed: 2.0
-        w.write_all(&0u16.to_le_bytes())?; // flags
-        w.write_all(&0u16.to_le_bytes())?; // method: stored
-        w.write_all(&0u16.to_le_bytes())?; // mod time
-        w.write_all(&DOS_DATE.to_le_bytes())?;
-        w.write_all(&crc.to_le_bytes())?;
-        w.write_all(&sz.to_le_bytes())?; // compressed size
-        w.write_all(&sz.to_le_bytes())?; // uncompressed size
-        w.write_all(&n.to_le_bytes())?;
-        w.write_all(&0u16.to_le_bytes())?; // extra len
-        w.write_all(name_rel.as_bytes())?;
-        // 文件数据流式拷贝（重开 fd 从头读）
-        let _ = src.seek(std::io::SeekFrom::Start(0));
-        std::io::copy(&mut src, &mut w)?;
-        // central directory entry
-        central.extend_from_slice(&0x02014b50u32.to_le_bytes());
-        central.extend_from_slice(&20u16.to_le_bytes()); // version made by
-        central.extend_from_slice(&20u16.to_le_bytes()); // version needed
-        central.extend_from_slice(&0u16.to_le_bytes()); // flags
-        central.extend_from_slice(&0u16.to_le_bytes()); // method
-        central.extend_from_slice(&0u16.to_le_bytes()); // mod time
-        central.extend_from_slice(&DOS_DATE.to_le_bytes());
-        central.extend_from_slice(&crc.to_le_bytes());
-        central.extend_from_slice(&sz.to_le_bytes());
-        central.extend_from_slice(&sz.to_le_bytes());
-        central.extend_from_slice(&n.to_le_bytes());
-        central.extend_from_slice(&0u16.to_le_bytes()); // extra len
-        central.extend_from_slice(&0u16.to_le_bytes()); // comment len
-        central.extend_from_slice(&0u16.to_le_bytes()); // disk number
-        central.extend_from_slice(&0u16.to_le_bytes()); // internal attrs
-        central.extend_from_slice(&0u32.to_le_bytes()); // external attrs
-        central.extend_from_slice(&offset.to_le_bytes());
-        central.extend_from_slice(name_rel.as_bytes());
-        offset = offset.wrapping_add(30 + n as u32 + sz);
-        count = count.wrapping_add(1);
-    }
-    let cd_offset = offset;
-    let cd_size = central.len() as u32;
-    w.write_all(&central)?;
-    // EOCD
-    w.write_all(&0x06054b50u32.to_le_bytes())?;
-    w.write_all(&0u16.to_le_bytes())?; // this disk
-    w.write_all(&0u16.to_le_bytes())?; // cd start disk
-    w.write_all(&count.to_le_bytes())?;
-    w.write_all(&count.to_le_bytes())?;
-    w.write_all(&cd_size.to_le_bytes())?;
-    w.write_all(&cd_offset.to_le_bytes())?;
-    w.write_all(&0u16.to_le_bytes())?; // comment len
-    w.flush()?;
-    Ok(())
+/// 调用外部打包脚本（`module/scripts/pack.sh`，对外暴露的稳定接口，构建流程
+/// 不得修改）把 staging 目录打成无压缩 tar。脚本优先用模块自带 `core/bin/tar`
+/// （外部引入的二进制），回退系统 tar。成功判据：退出码 0 且目标文件存在。
+/// 脚本缺失 / tar 全部不可用 → false，调用方保留 staging 并留痕。
+fn pack_dir_tar(root: &Path, dir: &Path, out_tar: &Path) -> bool {
+    let script = root.join("scripts/pack.sh");
+    let ok = std::process::Command::new("/system/bin/sh")
+        .arg(&script)
+        .arg("archive")
+        .arg(dir)
+        .arg(out_tar)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    ok && out_tar.exists()
 }
 
-/// CRC32（IEEE 反射多项式 0xEDB88320），表驱动、首次调用时构建 256 项表；
-/// `crc32_file` 为流式版本（8KB 分块），避免把 devimp 大文件整读进内存
-fn crc32_table() -> &'static [u32; 256] {
-    static TABLE: std::sync::OnceLock<[u32; 256]> = std::sync::OnceLock::new();
-    TABLE.get_or_init(|| {
-        let mut t = [0u32; 256];
-        let mut i = 0usize;
-        while i < 256 {
-            let mut c = i as u32;
-            let mut k = 0;
-            while k < 8 {
-                c = if c & 1 != 0 {
-                    0xEDB88320 ^ (c >> 1)
-                } else {
-                    c >> 1
-                };
-                k += 1;
-            }
-            t[i] = c;
-            i += 1;
-        }
-        t
-    })
-}
-
-/// 流式计算文件 CRC32（8KB 分块，常数级内存）
-fn crc32_file(f: &mut fs::File) -> std::io::Result<u32> {
-    let table = crc32_table();
-    let mut crc = 0xFFFF_FFFFu32;
-    let mut buf = [0u8; 8192];
-    loop {
-        let n = f.read(&mut buf)?;
-        if n == 0 {
-            break;
-        }
-        for &b in &buf[..n] {
-            crc = table[((crc ^ b as u32) & 0xFF) as usize] ^ (crc >> 8);
-        }
+/// 打包单个 staging 目录：成功删除目录，失败写 ARCHIVE_FAILED.txt 保留待查
+/// （此时 logger 尚未 init，无法打点）。
+fn pack_or_keep(root: &Path, dir: &Path, out_tar: &Path) {
+    if pack_dir_tar(root, dir, out_tar) {
+        let _ = fs::remove_dir_all(dir);
+    } else {
+        let _ = fs::write(
+            dir.join("ARCHIVE_FAILED.txt"),
+            "tar packing failed; this directory was kept for inspection\n",
+        );
     }
-    Ok(!crc)
 }

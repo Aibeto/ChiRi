@@ -4,7 +4,7 @@
     "cargo",
     "check",
     "-p",
-    "yumi",
+    "chiri",
     "--target",
     "aarch64-linux-android"
   ],

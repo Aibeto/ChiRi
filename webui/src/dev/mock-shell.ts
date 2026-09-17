@@ -77,17 +77,17 @@ function clock(offsetMs: number): string {
 
 function fakeDaemonLog(): string {
   const samples: Array<[string, string, string]> = [
-    ['INFO', 'yumi::main', 'yumi-module-starting 调度开始启动'],
-    ['INFO', 'yumi::main', 'main-chiri-scheduler-selected 选择 ChiRi 调度'],
-    ['INFO', 'yumi::monitor::app_detect', 'app-detect-init 前台检测已就绪'],
-    ['DEBUG', 'yumi::chiri', 'scheduler-event-mode-change pkg=com.tencent.tmgp.sgame old=default new=boost'],
-    ['INFO', 'yumi::chiri', 'scheduler-clg-init mode=boost'],
-    ['DEBUG', 'yumi::logger', 'status-log-snapshot 写入成功'],
-    ['WARN', 'yumi::chiri::thermal', 'thermal-cap 温度接近软限，已压制性能上限'],
-    ['INFO', 'yumi::chiri::fas_manager', 'fas instance activated pkg=com.miHoYo.Yuanshen'],
-    ['ERROR', 'yumi::chiri::fas', 'fas policy load failed: missing embedded config'],
-    ['DEBUG', 'yumi::chiri::clg', 'clg-tick mode=boost target=2200000'],
-    ['INFO', 'yumi::logger', 'log-archive-submitted zip=logd/ziped_0913-120000.zip']
+    ['INFO', 'chiri::main', 'chiri-module-starting 调度开始启动'],
+    ['INFO', 'chiri::main', 'main-chiri-scheduler-selected 选择 ChiRi 调度'],
+    ['INFO', 'chiri::monitor::app_detect', 'app-detect-init 前台检测已就绪'],
+    ['DEBUG', 'chiri::chiri', 'scheduler-event-mode-change pkg=com.tencent.tmgp.sgame old=default new=boost'],
+    ['INFO', 'chiri::chiri', 'scheduler-clg-init mode=boost'],
+    ['DEBUG', 'chiri::logger', 'status-log-snapshot 写入成功'],
+    ['WARN', 'chiri::chiri::thermal', 'thermal-cap 温度接近软限，已压制性能上限'],
+    ['INFO', 'chiri::chiri::fas_manager', 'fas instance activated pkg=com.miHoYo.Yuanshen'],
+    ['ERROR', 'chiri::chiri::fas', 'fas policy load failed: missing embedded config'],
+    ['DEBUG', 'chiri::chiri::clg', 'clg-tick mode=boost target=2200000'],
+    ['INFO', 'chiri::logger', 'log-archive-submitted tar=logd/0913-120000.tar']
   ]
   const lines: string[] = []
   for (let i = 0; i < 90; i++) {
@@ -230,11 +230,11 @@ const EXISTS_CMD = /^\[ -e (.+) \] && echo 1 \|\| echo 0$/
 const TAIL_CMD = /^tail -c (\d+) (.+)$/
 const LS_CMD = /^ls -1 (.+)$/
 const WRITE_CMD = /^printf '%s' (\S+) \| base64 -d > (.+) && mv -f (.+) (.+) \|\| \{ rm -f (.+); exit 1; \}$/
-const KILL_CMD = /killall -9 yumi/
+const KILL_CMD = /killall -9 chiri/
 // 导出历史日志：启动命令与轮询探测。mock 直接回「gzip 回退产物已生成」，
 // 免得在无设备预览里要等满轮询超时
 const EXPORT_START_CMD = /^nohup sh -c /
-const EXPORT_POLL_CMD = /\/sdcard\/Download\/devimp_\d{4}-\d{6}\.tar\.xz/
+const EXPORT_POLL_CMD = /\/sdcard\/Download\/logd_\d{4}-\d{6}\.tar\.gz/
 
 function handle(cmd: string): ExecResult | null {
   if (FLOCK_CMD.test(cmd)) return ok('1\n')

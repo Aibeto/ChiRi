@@ -1,4 +1,17 @@
-/* app.css: [brand-map] [base] [utilities] */
+/* app.css: [fonts] [brand-map] [base] [utilities] [signal-map] [ak-adapt] [buttons] [rows] [lists] */
+
+/* [fonts]
+ * 内置衬线（Noto Serif SC Bold 子集，SIL OFL 1.1，许可见同目录 LICENSE-OFL.txt）：
+ * Android 设备普遍没有 Noto Serif SC，不内置时 --ak-font-serif/command 会整体回退
+ * 系统衬线、中文实际落到黑体、标题失去衬线感。子集只含 UI 文案字符（zh locale
+ * + 数字/拉丁/标点，共 487 字），woff2 约 156KB。 */
+@font-face {
+  font-family: 'ChiRi Serif';
+  src: url('./assets/fonts/noto-serif-sc-bold-subset.woff2') format('woff2');
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
 
 /* [brand-map]
  * ak-ui 语义 token 的品牌映射。整站只有一个产品（ChiRi），因此在 :root 覆盖；
@@ -22,10 +35,15 @@
   --ak-signal-danger: #e5484d;
   --ak-signal-disabled: #6b7280;
 
-  /* 设备端字体栈：中文字面由系统提供（Android 为 Noto Sans CJK） */
+  /* 设备端字体栈：中文正文由系统提供（Android 为 Noto Sans CJK）；
+     标题/命令字走内置衬线（见 [fonts]），映射进 ak-ui 语义 token */
   --ak-font-sans: system-ui, -apple-system, 'PingFang SC', 'Noto Sans SC', 'Source Han Sans SC',
     Roboto, 'Helvetica Neue', Arial, sans-serif;
   --ak-font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  --ak-font-serif: 'ChiRi Serif', 'Noto Serif SC', serif;
+  /* 用户要求「尽量使用无衬线」：命令字/标题统一走无衬线栈（系统 Android 自带 Noto
+   * Sans CJK，与 --ak-font-sans 同源）；内置的 ChiRi Serif 仍保留在 --ak-font-serif，
+   * 需要衬线的地方（如未来的题字）可直接引用 */
   --ak-font-command: var(--ak-font-sans);
 }
 
@@ -106,10 +124,86 @@ label {
   text-overflow: ellipsis;
 }
 
+.u-row-tight {
+  display: flex;
+  align-items: center;
+  gap: var(--ak-space-2);
+}
+
+/* 页面/面板内的纵向分组（视图根节点与字段组共用） */
+.u-stack {
+  display: grid;
+  gap: var(--ak-space-4);
+}
+
+/* 右对齐的操作按钮行（提交栏 / 弹层按钮） */
+.u-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--ak-space-3);
+}
+
+/* 说明性小字：面板底注 / 状态附注 / 字段提示。
+ * .u-mt-* 必须定义在其后，组合使用时 margin-top 才不会被 margin:0 吃掉。 */
+.u-note {
+  margin: 0;
+  color: var(--ak-text-secondary);
+  font-size: 0.75rem;
+  line-height: 1.5;
+}
+
+.u-mt-2 {
+  margin-top: var(--ak-space-2);
+}
+
+.u-mt-3 {
+  margin-top: var(--ak-space-3);
+}
+
+.u-danger {
+  color: var(--ak-signal-danger);
+}
+
+/* 子滚动窗口：限高由使用方给，滚动行为统一在这里（终端 / 快照表 / 文件清单） */
+.u-scroll {
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+.u-list-reset {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* [signal-map]
+ * data-signal="info|action|danger|success|accent" → --signal 单点映射：
+ * Panel 的左侧信号条与总览页的模式名称共用一个源，不在组件里各写一份。 */
+[data-signal] {
+  --signal: var(--ak-signal-info);
+}
+
+[data-signal='action'] {
+  --signal: var(--ak-signal-action);
+}
+
+[data-signal='danger'] {
+  --signal: var(--ak-signal-danger);
+}
+
+[data-signal='success'] {
+  --signal: var(--ak-signal-success);
+}
+
+[data-signal='accent'] {
+  --signal: var(--ak-signal-accent);
+}
+
 /* [ak-adapt]
- * ak-ui 的表单类原语使用硬编码浅色（标签深字、输入框浅底），在深色主题下不可读。
- * 这里只在 [data-ak-ui] 作用域内把颜色映射回语义 token，不动 :root，也不影响
- * 其他使用者；几何、间距、交互反馈仍全部来自 ak-ui。 */
+ * ak-ui 原语有两类需要修正：① 表单类硬编码浅色（标签深字、输入框浅底），深色下不可读；
+ * ② 表面类（card/dialog/gauge）自带浅色或近似本主题的底色，层级叠不开。
+ * 这里只在 [data-ak-ui] 作用域内把颜色/表面映射回语义 token，不动 :root，也不影响
+ * 其他使用者；几何、间距、交互反馈、状态一律仍来自 ak-ui。 */
 [data-ak-ui] .ak-field,
 [data-ak-ui] .ak-choice {
   color: var(--ak-text-primary);
@@ -146,6 +240,145 @@ label {
 [data-ak-ui] .ak-tag {
   text-transform: none;
   letter-spacing: 0.04em;
+}
+
+/* ak-notice（StateBox 底座）：官方为浅色纸卡（深字浅底），深色主题下映射回语义 token */
+[data-ak-ui] .ak-notice {
+  color: var(--ak-text-primary);
+  background: var(--ak-surface-muted);
+  border-color: var(--ak-surface-raised);
+  min-height: 0;
+}
+
+[data-ak-ui] .ak-notice__title,
+[data-ak-ui] .ak-notice__message {
+  color: inherit;
+}
+
+[data-ak-ui] .ak-notice__message {
+  color: var(--ak-text-secondary);
+}
+
+/* StateBox 无官方 __code 槽：收成「正文 + 操作」两列 */
+[data-ak-ui] .ak-notice {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--ak-space-3);
+}
+
+/* —— 直接复用官方原语的深色适配（2026-09-18 第三轮）——
+ * 下面这些原语官方已是深色皮肤或只需补齐层级，几何/状态/排版全部用官方。 */
+
+/* ak-card（Panel 外壳）：官方是透明 + 阴影的浅色卡 → 实体面板 + 切角 */
+[data-ak-ui] .ak-card {
+  display: block;
+  padding: var(--ak-space-4);
+  border: var(--ak-line-hairline) solid var(--ak-surface-raised);
+  background: var(--ak-surface-panel);
+  box-shadow: none;
+  clip-path: polygon(
+    0 0,
+    calc(100% - var(--ak-cut-md)) 0,
+    100% var(--ak-cut-md),
+    100% 100%,
+    0 100%
+  );
+}
+
+/* 卡片标题走品牌命令字体（官方硬编码 Noto Serif SC，会绕开内置 ChiRi Serif）；
+ * 字重对齐内置字体的 700，避免合成粗体 */
+[data-ak-ui] .ak-card__title {
+  font-family: var(--ak-font-command);
+  font-weight: 700;
+}
+
+/* ak-dialog（ConfirmSheet）：官方自带深色弹层，只把硬编码色值换成语义 token */
+[data-ak-ui] .ak-dialog {
+  border-color: color-mix(in srgb, var(--ak-text-secondary) 45%, transparent);
+  background: var(--ak-surface-panel);
+  color: var(--ak-text-primary);
+}
+
+[data-ak-ui] .ak-dialog__header {
+  border-bottom-color: var(--ak-surface-raised);
+}
+
+[data-ak-ui] .ak-dialog__title {
+  color: var(--ak-text-primary);
+}
+
+[data-ak-ui] .ak-dialog__body {
+  color: var(--ak-text-secondary);
+}
+
+/* ak-status（LiveStatus 顶栏芯片）：与顶栏按钮同规格——官方 min-height 走 content-box，
+ * 叠上 padding 会撑成 63px（实测），这里改 border-box + 纯水平内距；align-content
+ * 居中是必须的：官方两行网格会把拉伸的多余高度分给信号条所在的空行，文字会上浮 */
+[data-ak-ui] .ak-status {
+  box-sizing: border-box;
+  min-height: var(--ak-density-control-height);
+  padding: 0 var(--ak-space-3);
+  align-content: center;
+  justify-content: center;
+  background: var(--ak-surface-raised);
+}
+
+/* 标签换无衬线常规字号（官方是 0.625rem 等宽小字，中文过小、和按钮的 12px 不一致） */
+[data-ak-ui] .ak-status__label {
+  font-family: var(--ak-font-sans);
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+/* ak-segmented：控制台里作整行切换器（官方仅窄屏铺满）；aria-checked 是我们
+ * radiogroup 的语义，映射官方 aria-pressed 选中态；高度取 44px 命中区并上调字号 */
+[data-ak-ui] .ak-segmented {
+  display: flex;
+  width: 100%;
+}
+
+[data-ak-ui] .ak-segmented__item {
+  flex: 1;
+  min-width: 0;
+  min-height: var(--ak-density-control-height);
+  font-size: 0.75rem;
+}
+
+[data-ak-ui] .ak-segmented__item[aria-checked='true'] {
+  color: var(--ak-text-inverse);
+  background: var(--ak-segmented-signal);
+}
+
+/* ak-choice（ToggleField 开关）：官方是浅色表单 → 轨道/旋钮/选中色换 token */
+[data-ak-ui] .ak-choice {
+  --ak-choice-fill: var(--ak-signal-info);
+  --ak-choice-signal: var(--ak-signal-info);
+}
+
+[data-ak-ui] .ak-choice__input {
+  border-color: color-mix(in srgb, var(--ak-text-secondary) 55%, transparent);
+  background: var(--ak-surface-raised);
+}
+
+[data-ak-ui] .ak-choice--switch .ak-choice__input::after {
+  background: var(--ak-text-secondary);
+}
+
+[data-ak-ui] .ak-choice--switch .ak-choice__input:checked {
+  border-color: var(--ak-signal-info);
+  background: color-mix(in srgb, var(--ak-signal-info) 82%, var(--ak-color-black));
+}
+
+/* ak-gauge（耗电读数）：进度环 = 功耗 / meta.power_max_w（默认 12W），由内联
+ * --ak-gauge-value 驱动；只把内层板色换成语义 token（官方 #171a1d 与面板不同源） */
+[data-ak-ui] .ak-gauge::before {
+  background: var(--ak-surface-panel);
+}
+
+/* ak-progress：标题行承载中文元信息，等宽小字上调一档保证可读 */
+[data-ak-ui] .ak-progress__header {
+  font-size: 0.6875rem;
 }
 
 /* [buttons]
@@ -241,6 +474,34 @@ label {
   font-size: 0.8125rem;
   line-height: 1.6;
   overflow-wrap: anywhere;
+}
+
+/* [lists]
+ * 提示清单：暖色短竖条 + 次要小字（总览页导出须知 / 实验室须知共用）。 */
+.u-notice {
+  display: grid;
+  gap: 0.5rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.u-notice li {
+  position: relative;
+  padding-left: var(--ak-space-3);
+  color: var(--ak-text-secondary);
+  font-size: 0.75rem;
+  line-height: 1.6;
+}
+
+.u-notice li::before {
+  position: absolute;
+  top: 0.4em;
+  left: 0;
+  width: 2px;
+  height: 0.85em;
+  content: '';
+  background: var(--ak-signal-action);
 }
 
 /* 减弱动效：尊重系统设置 */

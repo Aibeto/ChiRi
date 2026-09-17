@@ -9,7 +9,8 @@ import {
   type DaemonState
 } from '@/contract/daemon'
 import { readDown, writeDown } from '@/contract/down'
-import { pollExport, startDevimpExport } from '@/contract/export'
+import { readPowerAvg } from '@/contract/power'
+import { pollExport, startExport } from '@/contract/export'
 import { readLab, writeLabMode } from '@/contract/lab'
 import { readMeta, writeMetaFields, type MetaSnapshot, type WritableField } from '@/contract/meta'
 import {
@@ -126,6 +127,15 @@ class AppStore {
   /** devimp / logd 目录列举的真实失败（目录不存在是正常缺失，不算失败） */
   dirError = $state('')
   logLoading = $state(false)
+  /** 自刷新失败提示的节流标志：失败 toast 一次，成功后复位（每秒轮询不能刷屏） */
+  refreshFailNotified = false
+
+  /** 自刷新失败时的 toast（同一次失败串只提示一次） */
+  notifyRefreshFail(): void {
+    if (this.refreshFailNotified) return
+    this.refreshFailNotified = true
+    toast(t('state.refreshFailed'))
+  }
 
   // [derived]
   /** 只有明确判定为 ChiRi 机型时才为真（无法判定时不为真，界面据此显示“无法判定”） */
@@ -160,6 +170,7 @@ class AppStore {
       this.metaProblems = meta.value.problems
       this.configState = 'ok'
       this.configError = ''
+      this.refreshFailNotified = false
     } else if (meta.kind === 'absent') {
       this.metaSnapshot = null
       this.configState = 'missing'
@@ -169,6 +180,7 @@ class AppStore {
     } else {
       this.configState = 'failed'
       this.configError = meta.error
+      this.notifyRefreshFail()
     }
   }
 
@@ -184,13 +196,14 @@ class AppStore {
     this.loading = true
     this.overviewJob = (async () => {
       try {
-      const [live, flock, modeRaw, tunedRaw, fasRaw, actionOk] = await Promise.all([
+      const [live, flock, modeRaw, tunedRaw, fasRaw, actionOk, powerAvg] = await Promise.all([
         probeLiveness(),
         hasFlock(),
         readCurrentModeRaw(),
         readSpecialTunedRaw(),
         readFasWhitelistRaw(),
-        hasActionScript()
+        hasActionScript(),
+        readPowerAvg()
       ])
 
       this.flockAvailable = flock
@@ -226,6 +239,8 @@ class AppStore {
       this.currentMode = mode
       this.modeInfo = describeMode(mode, modes)
       this.actionAvailable = actionOk
+      // 功耗参考/平均值（W）：缺失/为空/非法统一按「无值」显示 —，不打断其它数据
+      this.powerAvgWatt = powerAvg.kind === 'ok' ? powerAvg.value.watt : null
       await this.loadCommon()
       } finally {
         this.loading = false
@@ -490,6 +505,26 @@ class AppStore {
   /** 正在写入（切换期间禁用开关，避免重复提交） */
   downPending = $state(false)
 
+  // [powerAvg]
+  /** 功耗参考/平均值（W）：null = PowerAVG.chr 缺失/为空/非法（显示 —） */
+  powerAvgWatt = $state<number | null>(null)
+  /** 口径开关写入中（高级设置直写 meta.yaml） */
+  powerAvgPending = $state(false)
+  powerAvgError = $state('')
+
+  /** 功耗口径：是否使用累计平均值（meta.yaml `power_avg`，默认 false = 参考值） */
+  get powerAvgUsesAverage(): boolean {
+    return this.metaSnapshot?.values?.power_avg === true
+  }
+
+  // [powerMax]
+  /** 耗电仪表盘满量程（W）：meta.yaml 可选字段 `power_max_w`，缺省/越界/非法一律按 12。
+   *  只在 meta.yaml 手改（高级设置不提供输入框），此处仅供仪表盘换算读取 */
+  get powerMaxWatt(): number {
+    const v = this.metaSnapshot?.values?.power_max_w
+    return typeof v === 'number' && Number.isFinite(v) && v > 0 && v <= 200 ? v : 12
+  }
+
   async loadDown(): Promise<void> {
     if (this.downPending) return
     const result = await readDown()
@@ -525,10 +560,37 @@ class AppStore {
     }
   }
 
+  /**
+   * 高级设置：功耗口径开关——直写 meta.yaml 的 `power_avg`（不走草稿，立即热重载）。
+   * 关闭（false，默认）= 参考值（与上次取半递推）；开启 = 累计平均值（等权全史）。
+   * 写后回读，界面以实际落盘内容为准。
+   */
+  async setPowerAvg(useAverage: boolean): Promise<void> {
+    if (this.powerAvgPending) return
+    this.powerAvgPending = true
+    this.powerAvgError = ''
+    try {
+      const result = await writeMetaFields({ power_avg: useAverage })
+      if (result.kind !== 'ok') {
+        this.powerAvgError =
+          result.kind === 'failed' ? result.error : t('state.unsupportedEnv')
+        toast(this.powerAvgError)
+        return
+      }
+      this.metaSnapshot = result.value
+      this.metaValid = result.value.valid
+      this.metaProblems = result.value.problems
+      this.metaPath = result.value.path
+      toast(useAverage ? t('overview.power.avg') : t('overview.power.ref'))
+    } finally {
+      this.powerAvgPending = false
+    }
+  }
+
   // [export]
   /** 导出阶段：running 期间禁用按钮，done/failed 显示结果 */
   exportPhase = $state<'idle' | 'running' | 'done' | 'failed'>('idle')
-  /** 成功后的产物绝对路径（设备不支持 xz 时是 .tar.gz） */
+  /** 成功后的产物绝对路径（设备不支持 gzip 时是未压缩 .tar） */
   exportTarget = $state('')
   exportError = $state('')
   /** 进度：已处理文件数 / 总数（来自 tar -v 行数）、已写入归档字节数 */
@@ -548,8 +610,8 @@ class AppStore {
   }
 
   /**
-   * 导出历史 devimp 日志到 /sdcard/Download。
-   * 打包在设备上后台跑（xz 压几百 MB 要几分钟），这里只轮询产物，期间界面照常可用。
+   * 导出历史归档到 /sdcard/Download。
+   * 打包在设备上后台跑（gzip 压几百 MB 也要一会儿），这里只轮询产物，期间界面照常可用。
    */
   async startExport(): Promise<void> {
     if (this.exportPhase === 'running') return
@@ -559,7 +621,7 @@ class AppStore {
     this.exportDone = 0
     this.exportTotal = 0
     this.exportBytes = 0
-    const started = await startDevimpExport()
+    const started = await startExport()
     if (started.kind !== 'ok') {
       this.exportPhase = 'failed'
       this.exportError =
@@ -569,7 +631,7 @@ class AppStore {
       return
     }
     const job = started.value
-    // 1.5s 一轮，最多 160 轮（4 分钟）：xz -6 压几百 MB 日志大约几分钟量级
+    // 1.5s 一轮，最多 160 轮（4 分钟）：gzip -6 压几百 MB 通常几十秒到一两分钟量级
     let pollFails = 0
     for (let i = 0; i < 160; i++) {
       await new Promise(resolve => setTimeout(resolve, 1500))
@@ -590,11 +652,11 @@ class AppStore {
       this.exportBytes = probed.value.progress.bytes
       const phase = probed.value.phase
       if (phase === 'running') continue
-      if (phase === 'done-xz' || phase === 'done-gz') {
+      if (phase === 'done-gz' || phase === 'done-tar') {
         this.exportPhase = 'done'
-        this.exportTarget = phase === 'done-xz' ? job.target : job.fallback
+        this.exportTarget = phase === 'done-gz' ? job.target : job.fallback
         toast(
-          phase === 'done-xz' ? t('overview.export.done') : t('overview.export.doneGz')
+          phase === 'done-gz' ? t('overview.export.done') : t('overview.export.doneTar')
         )
         return
       }
@@ -602,7 +664,7 @@ class AppStore {
       this.exportError =
         phase === 'empty'
           ? t('overview.export.empty')
-          : phase === 'no-devimp'
+          : phase === 'no-logd'
             ? t('overview.export.noDir')
             : t('overview.export.fail')
       return
@@ -613,7 +675,9 @@ class AppStore {
 
   // [logs]
   async loadLogs(source: 'daemon' | 'status' = 'daemon'): Promise<void> {
+    if (this.logLoading) return // 自刷新轮询防堆积
     this.logLoading = true
+    let failed = false
     try {
       if (source === 'daemon') {
         const [log, devimp, logd] = await Promise.all([
@@ -633,6 +697,7 @@ class AppStore {
           this.logLines = []
           this.logState = 'failed'
           this.logError = log.error
+          this.notifyRefreshFail()
         }
         this.dirError =
           devimp.kind === 'failed' ? devimp.error : logd.kind === 'failed' ? logd.error : ''
@@ -652,8 +717,10 @@ class AppStore {
           this.statusRows = []
           this.statusState = 'failed'
           this.statusError = csv.error
+          this.notifyRefreshFail()
         }
       }
+      if (!failed) this.refreshFailNotified = false
     } finally {
       this.logLoading = false
     }

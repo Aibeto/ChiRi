@@ -11,7 +11,7 @@
 # 定义路径与日志函数
 [ -z "$MODDIR" ] && MODDIR=${0%/*}
 
-DAEMON_PATH="$MODDIR/core/bin/yumi"
+DAEMON_PATH="$MODDIR/core/bin/chiri"
 LOG_DIR="$MODDIR/logs"
 LOG_FILE="$LOG_DIR/service.log"
 PID_FILE="$LOG_DIR/watchdog.pid"
@@ -32,7 +32,7 @@ case "$pid" in
   ''|0|*[!0-9]*) ;;
   *) kill "$pid" 2>/dev/null ;;
 esac
-killall -9 yumi > /dev/null 2>&1
+killall -9 chiri > /dev/null 2>&1
 rm -f "$PID_FILE"
 sleep 1
 log "stopped."
@@ -42,7 +42,7 @@ log "stopped."
 chmod 755 "$DAEMON_PATH"
 
 # [watchdog-start] 
-# 启动 yumi 看门狗（崩溃自动重启，卸载时退出）
+# 启动 chiri 看门狗（崩溃自动重启，卸载时退出）
 # 看门狗记录自身 PID，供后续 action/WebUI「关闭调度」定位并终止。
 # 使用 setsid 而非 nohup，确保进程完全脱离父进程组，防止关闭界面导致服务终止。
 

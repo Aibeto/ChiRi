@@ -1,7 +1,7 @@
 #!/system/bin/sh
 # service.sh: [boot-wait] [paths] [cleanup] [lab-reset] [permissions] [watchdog-start]
 #
-# yumi 模块启动脚本 (service.sh)
+# chiri 模块启动脚本 (service.sh)
 #
 
 # [boot-wait] 
@@ -14,7 +14,7 @@ done
 # 定义路径
 [ -z "$MODDIR" ] && MODDIR=${0%/*}
 
-DAEMON_PATH="$MODDIR/core/bin/yumi"
+DAEMON_PATH="$MODDIR/core/bin/chiri"
 SCRIPTS_DIR="$MODDIR/scripts"
 LOG_DIR="$MODDIR/logs"
 LOG_FILE="$LOG_DIR/service.log"
@@ -38,7 +38,7 @@ mkdir -p "$LOG_DIR"
 
 # [cleanup] 
 # 清理旧进程（含旧看门狗）：重新执行本脚本（模块热更新/管理器重载）时
-#    若只 killall yumi，旧看门狗仍存活并在 3s 后把 daemon 再拉起——与新看门狗
+#    若只 killall chiri，旧看门狗仍存活并在 3s 后把 daemon 再拉起——与新看门狗
 #    形成双 daemon 实例，devimp/status/daemon 日志各写两份。先按 pid 文件终止
 #    旧看门狗再清 daemon。
 if [ -f "$LOG_DIR/watchdog.pid" ]; then
@@ -51,7 +51,7 @@ if [ -f "$LOG_DIR/watchdog.pid" ]; then
   esac
   rm -f "$LOG_DIR/watchdog.pid"
 fi
-killall -9 yumi > /dev/null 2>&1
+killall -9 chiri > /dev/null 2>&1
 
 # [lab-reset] 
 # 实验室（rhine）状态不跨重启：开机先清掉 rhine.chr，重启后实验室即为关闭。
@@ -76,11 +76,11 @@ fi
 # fi
 
 # [watchdog-start] 
-# 启动 yumi 看门狗（崩溃自动重启，卸载时退出）
+# 启动 chiri 看门狗（崩溃自动重启，卸载时退出）
 # 看门狗记录自身 PID 到 logs/watchdog.pid，供 WebUI「关闭调度」定位并终止。
 # 退出条件：存在卸载标记 .uninstalling（卸载中）或主进程二进制被删除（卸载完成）。
 # 崩溃/异常退出不满足退出条件，3 秒后自动拉起。
-# 注意：旧写法 "$1" || exit 0 在 yumi 崩溃（返回非 0）时会直接让看门狗退出、无法自愈，已修正。
+# 注意：旧写法 "$1" || exit 0 在 chiri 崩溃（返回非 0）时会直接让看门狗退出、无法自愈，已修正。
 # 使用 setsid 而非 nohup，确保进程完全脱离父进程组，防止关闭界面导致服务终止。
 
 # 检测 setsid 可用性，优先使用 BusyBox 的 setsid

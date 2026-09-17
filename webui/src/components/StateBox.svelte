@@ -16,12 +16,19 @@
   }>()
 </script>
 
-<div class="state" data-kind={kind} role={kind === 'error' ? 'alert' : undefined}>
-  <span class="state__bar"></span>
-  <div class="state__text">
-    <p class="state__message">{message}</p>
+<!-- 视觉底座来自 ak-ui 的 ak-notice 原语（信号条 + 切角 + 层级排版）；
+     深色适配在 app.css 的 ak-adapt 段，本组件只管结构 -->
+<div
+  class="state ak-notice"
+  class:ak-notice--danger={kind === 'error'}
+  class:ak-notice--warning={kind === 'missing'}
+  data-kind={kind}
+  role={kind === 'error' ? 'alert' : undefined}
+>
+  <div class="state__text ak-notice__body">
+    <p class="ak-notice__title">{message}</p>
     {#if detail}
-      <p class="state__detail u-mono">{detail}</p>
+      <p class="state__detail ak-notice__message u-mono">{detail}</p>
     {/if}
   </div>
   {#if action}
@@ -30,31 +37,15 @@
 </div>
 
 <style>
-  .state {
-    display: grid;
-    grid-template-columns: 3px minmax(0, 1fr) auto;
-    align-items: center;
-    gap: var(--ak-space-3);
-    padding: var(--ak-space-3) var(--ak-space-3) var(--ak-space-3) 0;
-    border: var(--ak-line-hairline) dashed var(--ak-surface-raised);
-    background: var(--ak-surface-muted);
+  /* 骨架/排版来自官方 .ak-notice（深色适配在 app.css [ak-adapt]）；
+     这里只保留信号色分支、加载脉冲与两点结构修正 */
+  /* 中性状态（empty/loading）信号条用信息色；error/missing 由 ak-notice--danger/--warning 管 */
+  .state[data-kind='empty'],
+  .state[data-kind='loading'] {
+    --ak-notice-signal: var(--ak-signal-info);
   }
 
-  .state__bar {
-    align-self: stretch;
-    background: var(--ak-signal-disabled);
-  }
-
-  .state[data-kind='error'] .state__bar {
-    background: var(--ak-signal-danger);
-  }
-
-  .state[data-kind='missing'] .state__bar {
-    background: var(--ak-signal-action);
-  }
-
-  .state[data-kind='loading'] .state__bar {
-    background: var(--ak-signal-info);
+  .state[data-kind='loading']::before {
     animation: state-pulse 1.4s ease-in-out infinite;
   }
 
@@ -62,17 +53,8 @@
     min-width: 0;
   }
 
-  .state__message {
-    margin: 0;
-    font-size: 0.8125rem;
-    line-height: 1.5;
-  }
-
+  /* 详情是路径/标识符，可能很长：必须允许断行 */
   .state__detail {
-    margin: 0.25rem 0 0;
-    color: var(--ak-text-secondary);
-    font-size: 0.6875rem;
-    line-height: 1.5;
     overflow-wrap: anywhere;
   }
 
@@ -92,7 +74,7 @@
   }
 
   @media (prefers-reduced-motion: reduce) {
-    .state[data-kind='loading'] .state__bar {
+    .state[data-kind='loading']::before {
       animation: none;
     }
   }

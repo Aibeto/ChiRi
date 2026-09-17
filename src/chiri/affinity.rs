@@ -66,6 +66,10 @@ enum GroupBind {
 const GROUP_TOP_APP: &str = "top-app";
 const GROUP_FOREGROUND: &str = "foreground";
 const BACKGROUND_GROUPS: [&str; 3] = ["background", "system-background", "restricted"];
+/// 后台降权组（cpu.uclamp.max 钳制）：**刻意不含 system-background**——它是系统
+/// 后台（媒体/音频等服务，画中画、后台播放等可感知场景），降权可能伤到"看着能
+/// 感知"的体验；只压纯应用后台与受限组
+const BG_DEMOTE_GROUPS: [&str; 2] = ["background", "restricted"];
 
 const REBALANCE_INTERVAL: Duration = Duration::from_secs(2);
 /// 单轮最多深扫的后台候选线程数
@@ -740,6 +744,10 @@ impl AffinityManager {
             }
             self.applied_kind = KIND_NORMAL;
         }
+
+        // 后台降权：boost/normal 两态都持续写（"始终压低后台、给 UI/视频让路"），
+        // 幂等；释放/关闭总闸由 release() 还原为内核默认
+        self.apply_bg_uclamp_max(cfg);
 
         // boost 类模式的 top-app uclamp.max 放开：特调（akmode）传 Some(true)
         // 让重线程可被 EAS 放到 prime；fas 传 None（由 fas_affinity_hook 管理）；
@@ -1832,6 +1840,33 @@ impl AffinityManager {
         }
     }
 
+    /// 后台组 uclamp.max 降权（每次 apply 调用，幂等）：把 background/restricted
+    /// 的 util 需求钳低——EAS 放置与 schedutil 频率随之回落、优先落小核，给 UI/视频
+    /// 让路；**不禁止使用大核**（空闲时仍可被 EAS 调度上去）。节点缺失静默跳过。
+    fn apply_bg_uclamp_max(&self, cfg: &AffinityConfig) {
+        let pct = cfg.background_uclamp_max_pct;
+        if pct == 0 {
+            return;
+        }
+        let val = format!("{pct}.00");
+        for group in BG_DEMOTE_GROUPS {
+            let _ = crate::utils::try_write_file(
+                &format!("/dev/cpuctl/{group}/cpu.uclamp.max"),
+                &val,
+            );
+        }
+    }
+
+    /// 还原后台组 uclamp.max 为内核默认（"max"）：释放与关闭总闸时调用
+    fn restore_bg_uclamp_max(&self) {
+        for group in BG_DEMOTE_GROUPS {
+            let _ = crate::utils::try_write_file(
+                &format!("/dev/cpuctl/{group}/cpu.uclamp.max"),
+                "max",
+            );
+        }
+    }
+
     fn restore_uclamp_max(&self) {
         if let Some(v) = &self.uclamp_max_snapshot {
             if !v.is_empty() {
@@ -1893,6 +1928,7 @@ impl AffinityManager {
         }
         self.restore_uclamp();
         self.restore_uclamp_max();
+        self.restore_bg_uclamp_max();
         self.applied_kind = KIND_NONE;
         self.last_fg_pid = 0;
         self.last_boost = false;

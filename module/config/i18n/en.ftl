@@ -1,11 +1,11 @@
 # en.ftl: [main-monitor] [app-detect] [screen-detect] [monitors] [scheduler] [scheduler-config-watcher] [sysfs] [clg] [tuned] [touch] [fas] [fas-whitelist] [scheduler-settings] [fast-lock] [logger] [affinity] [corectl] [telemetry] [config-reload] [governor] [gpu]
 # --- Main & Monitor ---
-yumi-module-starting = yumi-module Unified Starting...
+chiri-module-starting = chiri-module Unified Starting...
 scheduler-module-started = Scheduler module started.
 scheduler-module-start-failed = Failed to start scheduler module: { $error }
 monitor-module-crashed = Monitor module crashed: { $error }
 monitor-module-started = Monitor module started.
-monitor-starting = Starting yumi-monitor module...
+monitor-starting = Starting chiri-monitor module...
 monitor-initial-config-failed = [Main] Failed to read initial config: { $error }.
     Using default.
 monitor-screen-watcher-failed = [Main] Screen state watcher thread crashed: { $error }
@@ -22,6 +22,9 @@ main-chiri-scheduler-selected = [Main] Specific SoC detected, enabling Chiri sch
 main-special-tuned-exported = [Main] exported { $count } internal special-tuned whitelist entries to special_tuned.yaml
 main-log-archive-submitted = [Main] previous logs archived, packing in background to logd/{ $zip }
 main-devimp-archive-submitted = [Main] previous devimp diagnostics archived, packing in background to logd/{ $zip }
+main-nofix-skip = [Main] meta.yaml has nofix=true: skipping webui asset restore and meta.yaml self-heal
+main-webui-restored = [Main] WebUI assets restored from embedded copy: { $count } file(s)
+main-webui-not-embedded = [Main] binary has no embedded WebUI assets (webui/dist missing at build time), restore skipped
 main-log-short-session-discarded = [Main] previous session lived less than 30s; its logs were discarded without packing
 monitor-thread-start-screen = [Main] Starting screen state watcher thread...
 monitor-thread-start-config-watch = [Main] Starting config watcher thread...

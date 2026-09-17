@@ -16,7 +16,7 @@
   })
 </script>
 
-<div class="stack">
+<div class="u-stack">
   <Panel title={t('apps.title')} desc={t('apps.count', { n: total })}>
     {#snippet actions()}
       <button
@@ -29,7 +29,7 @@
       </button>
     {/snippet}
 
-    <label class="search">
+    <label class="ak-field">
       <span class="ak-label">{t('apps.search')}</span>
       <input
         class="ak-input"
@@ -40,7 +40,7 @@
     </label>
 
     {#if shown !== total}
-      <p class="count u-mono u-muted">{t('apps.filtered', { shown, total })}</p>
+      <p class="u-note u-mt-2 u-mono">{t('apps.filtered', { shown, total })}</p>
     {/if}
   </Panel>
 
@@ -51,7 +51,7 @@
   {:else if shown === 0}
     <StateBox kind="empty" message={t('apps.empty')} />
   {:else}
-    <ul class="apps">
+    <ul class="apps u-list-reset">
       {#each app.filteredApps as entry (entry.pkg)}
         <li class="apps__item">
           <div class="apps__head">
@@ -107,34 +107,17 @@
         </span>
       </div>
       {#if app.deviceKind === 'yumi'}
-        <p class="rules__note">{t('apps.notApplicableTag')}</p>
+        <p class="u-note u-mt-3">{t('apps.notApplicableTag')}</p>
       {/if}
     {/if}
   </Panel>
 </div>
 
 <style>
-  .stack {
-    display: grid;
-    gap: var(--ak-space-4);
-  }
-
-  .search {
-    display: grid;
-    gap: 0.5rem;
-  }
-
-  .count {
-    margin: var(--ak-space-2) 0 0;
-    font-size: 0.6875rem;
-  }
-
+  /* 列表重置来自 .u-list-reset，这里只做 1px 缝隙的分隔线效果 */
   .apps {
     display: grid;
     gap: 1px;
-    margin: 0;
-    padding: 0;
-    list-style: none;
     background: var(--ak-surface-raised);
   }
 
@@ -167,11 +150,5 @@
 
   .apps__tags {
     gap: var(--ak-space-2);
-  }
-
-  .rules__note {
-    margin: var(--ak-space-3) 0 0;
-    color: var(--ak-text-secondary);
-    font-size: 0.75rem;
   }
 </style>

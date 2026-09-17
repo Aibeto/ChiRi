@@ -500,6 +500,12 @@ pub fn default_true() -> bool {
     true
 }
 
+/// Serde 默认值辅助函数：耗电读数满量程（W）。meta.yaml 的 power_max_w 默认 12，
+/// 缺省/非法时也用这个值（WebUI 状态页仪表盘据此换算进度）
+pub fn default_power_max_w() -> f32 {
+    12.0
+}
+
 /// 读取文件内容并解析为 i32
 pub fn read_i32_from_file(path: &str) -> Result<i32> {
     let mut content = String::new();

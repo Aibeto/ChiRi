@@ -18,7 +18,7 @@ use crate::zip_ext::zip_create_from_directory_with_options;
 // [cli-entry] 
 
 #[derive(Parser)]
-#[command(name = "xtask", about = "Yumi Build System")]
+#[command(name = "xtask", about = "ChiRi Build System")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -150,7 +150,7 @@ fn build(sh: &Shell, no_pack: bool) -> Result<()> {
 
     file::copy(
         aarch64_bin_path(),
-        bin_path.join("yumi"),
+        bin_path.join("chiri"),
         &file::CopyOptions::new().overwrite(true),
     )?;
 
@@ -197,7 +197,7 @@ fn aarch64_bin_path() -> PathBuf {
     Path::new("target")
         .join("aarch64-linux-android")
         .join("release")
-        .join("yumi")
+        .join("chiri")
 }
 
 fn build_core(sh: &Shell) -> Result<()> {

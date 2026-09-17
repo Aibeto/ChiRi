@@ -53,6 +53,15 @@ apexd
 bootanim
 hwcomposer
 
+# —— UI 视觉进程（2026-09-18 加：始终占用所有核心，UI 零卡顿保障）——
+# SystemUI 与桌面：全部线程保持全核、不做任何迁移/钉核（用户要求；桌面墙纸/
+# 系统下拉/最近任务等动画线程不受任何收窄影响）。
+# 桌面包名按默认（AOSP launcher/launcher3）+ 小米（miui.home，包名特殊不按机型判断直接加）
+com.android.systemui
+com.android.launcher
+com.android.launcher3
+com.miui.home
+
 # —— 应用黑名单（示例，默认注释；取消注释或按同格式追加）——
 # com.example.game
 # com.example.heavyapp:push

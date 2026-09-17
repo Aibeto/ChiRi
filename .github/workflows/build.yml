@@ -80,11 +80,14 @@ jobs:
       #    仅处理会打进模块包的文本文件（sh/yaml/ftl）中的整行 # 注释；
       #    保留 shebang（#!），并排除 META-INF（updater-script 的 #MAGISK 为必需
       #    标记）与无扩展名的标记文件。
+      #    **module/scripts/ 整体排除**：其中的打包脚本是对外暴露的稳定接口
+      #    （守护进程与 WebUI 共用），不得被任何构建流程修改。
       - name: Strip comments in module files
         run: |
           find module -type f \
             \( -name '*.sh' -o -name '*.block' -o -name '*.yaml' -o -name '*.yml' -o -name '*.ftl' \) \
-            -not -path 'module/META-INF/*' -print0 | while IFS= read -r -d '' f; do
+            -not -path 'module/META-INF/*' \
+            -not -path 'module/scripts/*' -print0 | while IFS= read -r -d '' f; do
             perl -i -ne 'print if /^\s*#!/ || !/^\s*#/' "$f"
           done
 

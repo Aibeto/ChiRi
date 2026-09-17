@@ -10,6 +10,7 @@ mod monitor;
 mod rhine;
 mod scheduler;
 pub mod utils;
+mod webui_asset;
 use crate::i18n::{load_language, t, t_with_args};
 use anyhow::Result;
 use log::{debug, error, info};
@@ -90,7 +91,7 @@ fn main() -> Result<()> {
             .open(root.join("daemon.lock"))
         {
             if unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-                eprintln!("yumi: another daemon instance holds daemon.lock, exiting");
+                eprintln!("chiri: another daemon instance holds daemon.lock, exiting");
                 std::process::exit(0);
             }
             // 故意泄漏 fd 持锁至进程退出；fd 关闭即释放锁
@@ -131,7 +132,16 @@ fn main() -> Result<()> {
 
     // meta.yaml 快照自愈：可修改字段的基准是编译期嵌入的 meta.yaml。启动时校验磁盘副本：
     // 字段非法 → 用嵌入默认整体覆盖并在文件尾追加警告注释；文件缺失 → 原子重建（不加注释）。
-    common::sync_meta_snapshot(&config_path);
+    // 「不改」开关（meta.yaml 可选字段 nofix）：true = 跳过所有「二进制内容对外部
+    // 文件的覆盖类操作」（meta 快照自愈 + 下面的 webui 资产还原）。必须在自愈之前读，
+    // 晚了文件可能已被内嵌默认覆盖、开关本身先丢了。日志等 logger 初始化后再打。
+    let nofix = common::read_nofix_flag(&config_path);
+    // 置进程级标志：热重载路径的 meta/rules 自愈与 webui 资产还原都读它，
+    // 避免各入口重复读磁盘（高频路径只读原子量，与 FAS_ENABLED 同范式）
+    common::set_nofix(nofix);
+    if !nofix {
+        common::sync_meta_snapshot(&config_path);
+    }
 
     // 清理拆分前的遗留 config.yaml（内容已并入二进制 feature 段与 meta.yaml，磁盘无读取方）
     let _ = std::fs::remove_file(root.join("config").join("config.yaml"));
@@ -146,7 +156,10 @@ fn main() -> Result<()> {
     // rules.yaml 快照复制：rules.yaml 同样编译期嵌入二进制（只读，运行时一律读嵌入值），
     // 启动时把嵌入内容复制到模块根作对外展示副本（被篡改不影响调度行为，下次启动还原）。
     // 写失败经重写兜底后直接跳过，绝不 panic（见 common::sync_rules_snapshot）。
-    common::sync_rules_snapshot(&root.join("rules.yaml"));
+    // 这同样属于「二进制内容对外部文件的覆盖类操作」，nofix 开启时交还用户。
+    if !nofix {
+        common::sync_rules_snapshot(&root.join("rules.yaml"));
+    }
 
     // 导出内部特调白名单（编译期嵌入 src/chiri/special_tuned.yaml）供 WebUI 展示
     // “特调”标签与专属选项：每行一条 `包名:特调模式列表(逗号分隔):优先回退模式`。
@@ -204,6 +217,27 @@ fn main() -> Result<()> {
     };
     load_language(&language);
     logger::init(&loglevel)?;
+
+    // [webui_restore]
+    // 内嵌 WebUI 资产还原：把编译期嵌入的 webui/dist 覆盖回模块 webroot/，界面文件被
+    // 改动/删除的部分每次开机回到出厂内容（与 meta 自愈同属「二进制对外部文件的覆盖
+    // 类操作」，nofix: true 时一并跳过，用户自担风险）。
+    if nofix {
+        log::info!("{}", t("main-nofix-skip"));
+    } else if !webui_asset::EMBEDDED {
+        log::warn!("{}", t("main-webui-not-embedded"));
+    } else {
+        let restored = webui_asset::restore_webroot(&root);
+        if restored > 0 {
+            log::info!(
+                "{}",
+                t_with_args(
+                    "main-webui-restored",
+                    &fluent_args!("count" => restored.to_string())
+                )
+            );
+        }
+    }
 
     // 全局 panic 钩子：任何线程的 panic 都落盘到 daemon.log。
     // 此前 panic 消息只写 stderr（守护进程的 stderr 无人接收），调度线程
@@ -309,7 +343,7 @@ fn main() -> Result<()> {
             )
         )
     );
-    info!("{}", t("yumi-module-starting"));
+    info!("{}", t("chiri-module-starting"));
 
     // [channels]
     // 5. 创建通信通道（有界：容量 64，满时 send 阻塞形成背压，防止事件无限积压；

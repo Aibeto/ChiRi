@@ -72,7 +72,7 @@ export async function readWatchdogPid(): Promise<ReadResult<number>> {
 
 // [stop]
 /**
- * 关闭调度：先按 pidfile 杀看门狗 → 再杀 yumi → 删 pidfile。
+ * 关闭调度：先按 pidfile 杀看门狗 → 再杀 chiri → 删 pidfile。
  * 注意副作用（由界面负责提示）：daemon 是被信号杀死、没有还原逻辑，
  * fast 模式的锁频会残留到卸载脚本执行；恢复只能点模块 Action 或重启设备。
  */
@@ -82,7 +82,7 @@ export async function stopScheduler(): Promise<ReadResult<true>> {
   const cmd =
     `p=$(cat ${pidFile} 2>/dev/null); ` +
     `case "$p" in ''|0|*[!0-9]*) ;; *) kill "$p" 2>/dev/null ;; esac; ` +
-    `killall -9 yumi 2>/dev/null || pkill -9 yumi 2>/dev/null; ` +
+    `killall -9 chiri 2>/dev/null || pkill -9 chiri 2>/dev/null; ` +
     `rm -f ${pidFile}; sleep 1; echo done`
   try {
     const { errno, stderr } = await run(cmd)

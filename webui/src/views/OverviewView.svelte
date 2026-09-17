@@ -15,21 +15,27 @@
         t("daemon.unknown.detail")
       : t(`daemon.${app.daemonState}.detail`)),
   );
-  const modeName = $derived(t(app.modeInfo.labelKey));
-  // 无记录与“模式名未知”是两件事，描述文案要分开
-  const modeDesc = $derived(
-    // descKey 为空（CLG 档当前不带描述）时跳过描述行，而不是渲染一行空白
-    app.modeMissing
-      ? t("mode.unknown.missing")
-      : app.modeInfo.descKey
-        ? t(app.modeInfo.descKey)
-        : "",
+  // 尚无模式记录（current_mode.chr 缺失）时不显示家族与「未知」模式名——避免出现
+  // 「UNKNOWN / 未知」这种看起来像模式值的占位，与实验室页同口径
+  const modeName = $derived(
+    app.modeMissing ? t("mode.unknown.missing") : t(app.modeInfo.labelKey),
+  );
+  // 模式家族（CLG/特调/实验室/停摆/FAS），与详细模式分开显示
+  const familyLabel = $derived(
+    app.modeMissing ? "" : t(`mode.family.${app.modeInfo.kind}`),
   );
   const deviceLabel = $derived(
     app.deviceKind === "chiri" ? t("overview.device.chiri")
     : app.deviceKind === "yumi" ? t("overview.device.yumi")
     : t("overview.device.unknown"),
   );
+
+  // 仪表盘进度：功耗 / 满量程（meta.power_max_w，默认 12W），夹在 0~100%
+  const powerPercent = $derived.by(() => {
+    const w = app.powerAvgWatt;
+    if (w === null) return 0;
+    return Math.min(100, Math.max(0, (w / app.powerMaxWatt) * 100));
+  });
 
   const configValue = $derived.by(() => {
     if (app.configState === "ok") return app.configRel;
@@ -39,6 +45,11 @@
 
   onMount(() => {
     void app.loadOverview();
+    // 每秒自刷新数据（不重载页面）；loadOverview 有在飞共享，轮询不会堆积
+    const timer = setInterval(() => {
+      void app.loadOverview();
+    }, 1000);
+    return () => clearInterval(timer);
   });
 
   async function confirmStop() {
@@ -47,31 +58,38 @@
   }
 </script>
 
-<div class="stack">
+<div class="u-stack">
   <Panel signal={app.daemonState === "running" ? "success" : "action"}>
-    {#snippet actions()}
-      <button
-        type="button"
-        class="ak-button btn"
-        disabled={app.loading}
-        onclick={() => app.loadOverview()}
-      >
-        {app.loading ? t("state.loading") : t("action.refresh")}
-      </button>
-    {/snippet}
-    <div class="daemon">
-      <p class="daemon__name u-mono">{app.moduleProp.name || t("app.title")}</p>
-      <p class="daemon__meta u-mono">
-        {app.moduleProp.version || "—"}{app.moduleProp.versionCode ?
-          ` (${app.moduleProp.versionCode})`
-        : ""}
-      </p>
-      {#if app.moduleProp.author}
-        <p class="daemon__meta">
-          {t("overview.module.author")}：{app.moduleProp.author}
+    <div class="daemon-card">
+      <div class="daemon">
+        <p class="daemon__name u-mono">{app.moduleProp.name || t("app.title")}</p>
+        <p class="u-note u-mono">
+          {app.moduleProp.version || "—"}{app.moduleProp.versionCode ?
+            ` (${app.moduleProp.versionCode})`
+          : ""}
         </p>
+        {#if app.moduleProp.author}
+          <p class="u-note">
+            {t("overview.module.author")}：{app.moduleProp.author}
+          </p>
+        {/if}
+        <p class="u-note">{daemonDetail}</p>
+      </div>
+      {#if app.isChiri}
+        <!-- 耗电情况：PowerAVG.chr（daemon 每 1s 采样写入），口径随 meta.power_avg。
+             八角读数板直接复用官方 ak-gauge（去进度环的适配见 app.css） -->
+        <div class="ak-gauge" style={`--ak-gauge-value: ${powerPercent.toFixed(1)}%`}>
+          <div class="ak-gauge__content">
+            <span class="ak-gauge__label">
+              {app.powerAvgUsesAverage ? t("overview.power.avg") : t("overview.power.ref")}
+            </span>
+            <span class="ak-gauge__value">
+              {app.powerAvgWatt === null ? "—" : app.powerAvgWatt.toFixed(2)}
+            </span>
+            <span class="ak-gauge__unit">{t("unit.watt")}</span>
+          </div>
+        </div>
       {/if}
-      <p class="daemon__meta">{daemonDetail}</p>
     </div>
   </Panel>
 
@@ -92,14 +110,14 @@
   >
     <div class="mode" data-signal={app.modeInfo.signal}>
       <div class="mode__main">
+        {#if familyLabel}
+          <p class="mode__family">{familyLabel}</p>
+        {/if}
         <p class="mode__name">{modeName}</p>
         <p class="mode__id u-mono">{app.modeInfo.id || "—"}</p>
-        {#if modeDesc}
-          <p class="mode__desc">{modeDesc}</p>
-        {/if}
       </div>
       {#if app.currentMode && app.daemonState === "stopped"}
-        <p class="mode__stale">{t("overview.mode.stale")}</p>
+        <p class="mode__stale u-note">{t("overview.mode.stale")}</p>
       {/if}
       {#if app.modeError}
         <StateBox
@@ -164,15 +182,17 @@
   </Panel>
 
   <Panel title={t("overview.export.title")} desc={t("overview.export.desc")}>
-    <ul class="export__notice">
+    <ul class="export__notice u-notice">
       <li>{t("overview.export.notice.session")}</li>
       <li>{t("overview.export.notice.busy")}</li>
     </ul>
     {#if app.exportPhase === "done"}
-      <p class="export__done">{t("overview.export.saved", { path: app.exportTarget })}</p>
+      <p class="export__msg export__done u-note u-mt-3">
+        {t("overview.export.saved", { path: app.exportTarget })}
+      </p>
     {/if}
     {#if app.exportError}
-      <p class="export__error">{app.exportError}</p>
+      <p class="export__msg u-note u-mt-3 u-danger">{app.exportError}</p>
     {/if}
     <button
       type="button"
@@ -183,24 +203,31 @@
       {app.exportPhase === "running" ? t("overview.export.running") : t("overview.export.action")}
     </button>
     {#if app.exportPhase === "running"}
-      <div
-        class="export__bar"
-        role="progressbar"
-        aria-valuemin="0"
-        aria-valuemax="100"
-        aria-valuenow={app.exportPercent}
-      >
-        <span class="export__fill" style={`width: ${app.exportPercent}%`}></span>
+      <!-- 进度区整块用官方 ak-progress（标题行 + 斜纹刻度轨道），进度值走官方
+           --ak-progress-value 变量驱动填充 -->
+      <div class="ak-progress u-mt-3" style={`--ak-progress-value: ${app.exportPercent}%`}>
+        <div class="ak-progress__header">
+          <span>
+            {app.exportTotal > 0
+              ? t("overview.export.progress", {
+                  mb: app.exportMb,
+                  done: app.exportDone,
+                  total: app.exportTotal
+                })
+              : t("overview.export.preparing")}
+          </span>
+          <span class="ak-progress__value">{app.exportPercent}%</span>
+        </div>
+        <div
+          class="ak-progress__track"
+          role="progressbar"
+          aria-valuemin="0"
+          aria-valuemax="100"
+          aria-valuenow={app.exportPercent}
+        >
+          <span class="ak-progress__fill"></span>
+        </div>
       </div>
-      <p class="export__meta">
-        {app.exportTotal > 0
-          ? t("overview.export.progress", {
-              mb: app.exportMb,
-              done: app.exportDone,
-              total: app.exportTotal
-            })
-          : t("overview.export.preparing")}
-      </p>
     {/if}
   </Panel>
 
@@ -217,7 +244,7 @@
     >
       {app.stopping ? t("state.loading") : t("overview.stop")}
     </button>
-    <p class="stop__hint">
+    <p class="u-note u-mt-3">
       {app.actionAvailable ?
         t("overview.stop.confirm.recover")
       : t("overview.stop.recover.reboot")}
@@ -242,14 +269,18 @@
 />
 
 <style>
-  .stack {
+  /* 第一张卡片：左侧设备/守护进程信息，右侧耗电读数板（平行两栏） */
+  .daemon-card {
     display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
     gap: var(--ak-space-4);
+    align-items: center;
   }
 
   .daemon {
     display: grid;
     gap: 0.15rem;
+    min-width: 0;
   }
 
   .daemon__name {
@@ -257,13 +288,6 @@
     font-size: 1.125rem;
     font-weight: 700;
     letter-spacing: 0.02em;
-  }
-
-  .daemon__meta {
-    margin: 0;
-    color: var(--ak-text-secondary);
-    font-size: 0.75rem;
-    line-height: 1.5;
   }
 
   .mode {
@@ -276,29 +300,10 @@
     gap: 0.2rem;
   }
 
-  .mode[data-signal="success"] {
-    --mode-signal: var(--ak-signal-success);
-  }
-
-  .mode[data-signal="action"] {
-    --mode-signal: var(--ak-signal-action);
-  }
-
-  .mode[data-signal="danger"] {
-    --mode-signal: var(--ak-signal-danger);
-  }
-
-  .mode[data-signal="accent"] {
-    --mode-signal: var(--ak-signal-accent);
-  }
-
-  .mode[data-signal="info"] {
-    --mode-signal: var(--ak-signal-info);
-  }
-
+  /* 信号色由全局 [data-signal] 映射提供（与 Panel 同一份） */
   .mode__name {
     margin: 0;
-    color: var(--mode-signal, var(--ak-text-primary));
+    color: var(--signal, var(--ak-text-primary));
     font-size: 1.5rem;
     font-weight: 700;
     letter-spacing: 0.01em;
@@ -312,18 +317,10 @@
     letter-spacing: 0.08em;
   }
 
-  .mode__desc {
-    margin: 0;
-    color: var(--ak-text-secondary);
-    font-size: 0.8125rem;
-  }
-
+  /* 文字样式来自 .u-note，这里只补暖色竖条与内边距 */
   .mode__stale {
-    margin: 0;
     padding: var(--ak-space-2) var(--ak-space-3);
     border-left: 2px solid var(--ak-signal-action);
-    color: var(--ak-text-secondary);
-    font-size: 0.75rem;
   }
 
   .mode__problems {
@@ -334,76 +331,17 @@
     line-height: 1.6;
   }
 
-  /* 导出卡片的两条提示：暖色竖条 + 次要文字，与实验室页的提示块同风格 */
+  /* 提示清单主体来自全局 .u-notice，这里只补与下方按钮的间距 */
   .export__notice {
-    display: grid;
-    gap: 0.4rem;
-    margin: 0 0 var(--ak-space-3);
-    padding: 0;
-    list-style: none;
+    margin-bottom: var(--ak-space-3);
   }
 
-  .export__notice li {
-    position: relative;
-    padding-left: var(--ak-space-3);
-    color: var(--ak-text-secondary);
-    font-size: 0.75rem;
-    line-height: 1.6;
-  }
-
-  .export__notice li::before {
-    position: absolute;
-    top: 0.45em;
-    left: 0;
-    width: 2px;
-    height: 0.8em;
-    content: "";
-    background: var(--ak-signal-action);
-  }
-
-  /* 产物路径可能很长，必须允许断行，否则会把卡片撑宽 */
-  .export__done,
-  .export__error {
-    margin: var(--ak-space-3) 0 0;
-    font-size: 0.72rem;
-    line-height: 1.5;
+  /* 产物路径可能很长：允许断行，避免把卡片撑宽（文字样式来自 .u-note） */
+  .export__msg {
     word-break: break-all;
   }
 
   .export__done {
     color: var(--ak-signal-success);
-  }
-
-  /* 进度条：细条 + 信号色，不做圆角（与 ak-ui 的直角语言一致） */
-  .export__bar {
-    height: 4px;
-    margin-top: var(--ak-space-3);
-    overflow: hidden;
-    background: var(--ak-surface-raised);
-  }
-
-  .export__fill {
-    display: block;
-    height: 100%;
-    background: var(--ak-signal-action);
-    transition: width 0.4s ease;
-  }
-
-  .export__meta {
-    margin: 0.4rem 0 0;
-    color: var(--ak-text-secondary);
-    font-size: 0.72rem;
-    line-height: 1.5;
-  }
-
-  .export__error {
-    color: var(--ak-signal-danger);
-  }
-
-  .stop__hint {
-    margin: var(--ak-space-3) 0 0;
-    color: var(--ak-text-secondary);
-    font-size: 0.75rem;
-    line-height: 1.5;
   }
 </style>

@@ -19,25 +19,17 @@ akmode:
 # 与这里的键同名即自动生效；未注册的模式回退上面的 akmode 段）。
 # 机制与 akmode 完全共用，差异只在参数倾向：
 tuned_profiles:
-  # playback —— 视频播放稳态（2026-09-17 8550 实测新增）：贴负载给频（headroom 1.0，
-  # 日志回放验证：1.05 会多 2-4 个点的上限均值），util_smoothing 0.35 滤掉
-  # 弹幕/进度条的噪声尖峰——「升频立即执行」在抖动负载下会把上限反复推高，
-  # 平均值反而高于带平滑的 CLG，回放里这是唯一能把上限压到 CLG 以下的路径。
+  # playback —— 视频播放稳态（2026-09-17 8550 实测新增）：只有长稳态场景
+  # 值得特调（上机反馈：高频短交互不该被接管，daily 组已于当晚移除）。
+  # headroom 1.05 贴负载但留 5% 余量——回放扫参里 1.0 最省，但上机后
+  # 按「别压太紧」的反馈回退一档；util_smoothing 0.35 滤掉弹幕/进度条的
+  # 噪声尖峰（无平滑时上限会被瞬时尖峰反复推高、均值反高于 CLG）。
   # boost_affinity=false：不做 boost 亲和收窄、不保大核常在线——保大核与
   # 「贴负载省电」相反，播放场景让核按 EAS 自然摆放。
   playback:
-    headroom: 1.0
+    headroom: 1.05
     perf_floor: 0.0
     hysteresis: 0.04
     down_hold_ms: 100
     util_smoothing: 0.35
-    boost_affinity: false
-  # daily —— 日常轻载交互（桌面/社交/资讯/工具）：平滑弱一些（0.5）保滑动跟手，
-  # perf_floor 0.10 给交互留保底响应，降频 hold 100ms 快速回落静态功耗。
-  daily:
-    headroom: 1.0
-    perf_floor: 0.10
-    hysteresis: 0.03
-    down_hold_ms: 100
-    util_smoothing: 0.5
     boost_affinity: false

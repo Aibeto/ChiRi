@@ -8,13 +8,14 @@ import { DOWN_WORD } from '@/data/down'
 
 // [catalog]
 /**
- * 模式家族（2026-09-17 重构，仅概念分组，不产生新的模式值）：
+ * 模式家族（2026-09-17 重构；2026-09-18 家族位定稿）：
  * - CLG：reduce/default/boost（兜底档，current_mode 直接是档名）
- * - stardust：scenemode/down（保守性使用或手动开启；scenemode 是独立息屏轴，
- *   down 是停摆布尔，都不作为 current_mode 档位出现——down 除外，见 describeMode）
+ * - stardust：scenemode（独立息屏轴，不作为 current_mode 档位出现；家族位照常
+ *   注册——不管实际运行中看不看得到，展示体系里都占位）
+ * - down：DOWN 停摆（独立家族，不是 stardust）
  * - rhine：vector/contingency/babel（仅实验室，rhine.chr 驱动 global_mode 覆盖）
  */
-export type ModeKind = 'clg' | 'fas' | 'special' | 'lab' | 'down' | 'unknown'
+export type ModeKind = 'clg' | 'fas' | 'special' | 'lab' | 'down' | 'stardust' | 'unknown'
 /** 语义信号（UI 映射到 --ak-signal-*，不用裸色值） */
 export type ModeSignal = 'info' | 'success' | 'action' | 'danger' | 'accent'
 
@@ -52,16 +53,20 @@ const CLG_CATALOG: Record<string, {
  * 语义归 rhine 家族，故从 CLG_CATALOG 移到这里。
  */
 const LAB_CATALOG: Record<string, {
-  signal: ModeSignal; labelKey: string; descKey: string
+  signal: ModeSignal; labelKey: string
+  // descKey 停用（2026-09-18：mode.*.desc 已全部注释，UI 对空描述跳过渲染）
 }> = {
   vector: {
-    signal: 'danger', labelKey: 'mode.vector', descKey: 'mode.vector.desc'
+    signal: 'danger', labelKey: 'mode.vector',
+    // descKey: 'mode.vector.desc'
   },
   contingency: {
-    signal: 'danger', labelKey: 'mode.contingency', descKey: 'mode.contingency.desc'
+    signal: 'danger', labelKey: 'mode.contingency',
+    // descKey: 'mode.contingency.desc'
   },
   babel: {
-    signal: 'accent', labelKey: 'mode.babel', descKey: 'mode.babel.desc'
+    signal: 'accent', labelKey: 'mode.babel',
+    // descKey: 'mode.babel.desc'
   }
 }
 
@@ -70,6 +75,7 @@ const LAB_CATALOG: Record<string, {
  * 由 current_mode 值与特调模式集合派生展示信息。
  * `specialModes` 来自 special_tuned.yaml 的 modes 并集——注意该文件只导出精确条目，
  * 正则条目对应的特调模式在 UI 侧不可知，因此这里只能覆盖「已配置」的部分。
+ * descKey 一律返回空串：mode.*.desc 已全部注释（2026-09-18），UI 对空描述跳过渲染。
  */
 export function describeMode(id: string, specialModes?: ReadonlySet<string>): ModeInfo {
   const mode = id.trim()
@@ -79,7 +85,7 @@ export function describeMode(id: string, specialModes?: ReadonlySet<string>): Mo
       kind: 'unknown',
       signal: 'info',
       labelKey: 'mode.unknown',
-      descKey: 'mode.unknown.desc'
+      descKey: ''
     }
   }
   // DOWN 停摆（2026-09-16）：不是调度档位，是「调度不工作」本身——判据在 down.chr
@@ -90,7 +96,18 @@ export function describeMode(id: string, specialModes?: ReadonlySet<string>): Mo
       kind: 'down',
       signal: 'danger',
       labelKey: 'mode.down',
-      descKey: 'mode.down.desc'
+      descKey: ''
+    }
+  }
+  // scenemode（独立息屏轴）：daemon 不写这个值，但家族位照常注册——
+  // 不管实际运行中看不看得到，展示体系里都占位（kind stardust）
+  if (mode === 'scenemode') {
+    return {
+      id: mode,
+      kind: 'stardust',
+      signal: 'info',
+      labelKey: 'mode.scenemode',
+      descKey: ''
     }
   }
   if (mode === 'fas') {
@@ -99,7 +116,7 @@ export function describeMode(id: string, specialModes?: ReadonlySet<string>): Mo
       kind: 'fas',
       signal: 'accent',
       labelKey: 'mode.fas',
-      descKey: 'mode.fas.desc'
+      descKey: ''
     }
   }
   const clg = CLG_CATALOG[mode]
@@ -109,7 +126,7 @@ export function describeMode(id: string, specialModes?: ReadonlySet<string>): Mo
   }
   const lab = LAB_CATALOG[mode]
   if (lab) {
-    return { id: mode, kind: 'lab', signal: lab.signal, labelKey: lab.labelKey, descKey: lab.descKey }
+    return { id: mode, kind: 'lab', signal: lab.signal, labelKey: lab.labelKey, descKey: '' }
   }
   if (specialModes?.has(mode)) {
     return {
@@ -117,7 +134,7 @@ export function describeMode(id: string, specialModes?: ReadonlySet<string>): Mo
       kind: 'special',
       signal: 'accent',
       labelKey: 'mode.special',
-      descKey: 'mode.special.desc'
+      descKey: ''
     }
   }
   return {
@@ -125,7 +142,7 @@ export function describeMode(id: string, specialModes?: ReadonlySet<string>): Mo
     kind: 'unknown',
     signal: 'info',
     labelKey: 'mode.unknown',
-    descKey: 'mode.unknown.desc'
+    descKey: ''
   }
 }
 

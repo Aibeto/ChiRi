@@ -297,10 +297,17 @@ fn tuned_boost_affinity(config: &crate::chiri::config::Config, mode: &str) -> bo
     }
 }
 
-/// governor/GPU 与模式的同步（幂等，可在任意入口调用）：
-/// contingency → performance 调速器 + GPU 锁最高频；babel → 仅 performance；
-/// 其他模式 → 两者都按快照恢复。
-fn sync_lab_governor_gpu(mode: &str, governor: &mut governor::GovernorGuard, gpu: &mut gpu::GpuGuard) {
+/// governor/GPU/极速锁频与模式的同步（幂等，可在任意入口调用）：
+/// contingency → performance 调速器 + GPU 锁最高频 + 极速锁频（min=max=硬件最高，
+/// 与 vector 同口径；governor 节点只读的机型写不进 performance，靠锁频窗口等效）；
+/// babel → 仅 performance；其他模式 → governor/GPU 按快照恢复
+/// （fast_lock 不在这里释放：vector 也走 `_` 分支，误释放会锁不住）。
+fn sync_lab_governor_gpu(
+    mode: &str,
+    governor: &mut governor::GovernorGuard,
+    gpu: &mut gpu::GpuGuard,
+    fast_lock: &mut crate::chiri::fast::FastLock,
+) {
     match mode {
         "contingency" => {
             if !governor.is_active() {
@@ -308,6 +315,11 @@ fn sync_lab_governor_gpu(mode: &str, governor: &mut governor::GovernorGuard, gpu
             }
             if !gpu.is_active() {
                 gpu.lock();
+            }
+            // 全核最高频硬锁：不能只靠 performance——部分机型 scaling_governor
+            // 节点只读（写不进），min=max=硬件最高在任意 governor 下都等效锁频
+            if !fast_lock.is_active() {
+                fast_lock.init();
             }
         }
         "babel" => {
@@ -395,7 +407,14 @@ fn apply_affinity_and_corectl(
     // governor/GPU 由调用方 sync（sync_lab_governor_gpu）。周期重入即纠偏
     // （框架写回的 top-app/foreground 会被重写）。core_ctl 交回系统（NONE）。
     if mode == "contingency" || mode == "babel" {
-        affinity.lab_static_apply(mode);
+        // thread_bind=false（线程调整关闭）时不接管摆放：lab 静态分组本质是
+        // 线程/核心摆放，与普通亲和一样受总闸约束（config.affinity.enabled 已在
+        // Config::load 与 meta.thread_bind 取与），否则 lab 模式下总闸关不掉
+        if config.affinity.enabled {
+            affinity.lab_static_apply(mode);
+        } else {
+            affinity.lab_static_deactivate();
+        }
         corectl.set_power_state(false, false);
         return;
     }
@@ -592,8 +611,12 @@ pub fn start_scheduler_thread(
                 log::info!("{}", t("config-reloading"));
 
                 // meta.yaml 自愈先于重载：字段非法时用嵌入默认整体覆盖并追加警告注释，
-                // 文件缺失则重建，然后再加载（Config::load 读到的一定是合法 meta）
-                common::sync_meta_snapshot(&config_path);
+                // 文件缺失则重建，然后再加载（Config::load 读到的一定是合法 meta）。
+                // nofix 防篡改开关开启时跳过：文件保持用户原样，字段非法由
+                // Config::load/read_external_meta 自行回退内嵌默认（不落盘）
+                if !common::nofix_active() {
+                    common::sync_meta_snapshot(&config_path);
+                }
 
                 let old_lang = config_clone.read().unwrap().meta.language.clone();
 
@@ -811,16 +834,21 @@ pub fn start_scheduler_thread(
                         log::info!("{}", t_with_args("scheduler-clg-init", &fluent_args!("mode" => current_mode.clone())));
                     }
                 }
+                // 开发记录开关初始同步：**与停摆无关**（停摆只停调度，采集照常），
+                // 必须先于下面的 halted 门控——停摆启动时若跳过，devimp 会用 logger
+                // 的默认值，与 meta.dev_record 配置不一致
+                {
+                    let cfg = config_clone.read().unwrap();
+                    crate::logger::set_devimp_active(cfg.meta.dev_record);
+                }
+                crate::logger::set_devimp_mode(&current_mode);
                 // 启动即按初始模式应用亲和布局与 core_ctl 在线策略。
                 // **停摆启动时跳过**：DOWN 的语义是「调度不工作、一切交回系统」，此时
                 // 接管亲和布局等于停摆期还在写 cpuset；而 `halted` 初值就是 is_down()，
                 // 循环里那次「进入停摆」分支永远不会执行，没有任何地方会把它收回去。
                 if !halted {
                     let cfg = config_clone.read().unwrap();
-                    // 开发记录开关初始同步（此后每 2s 周期块随配置刷新）
-                    crate::logger::set_devimp_active(cfg.meta.dev_record);
-                    crate::logger::set_devimp_mode(&current_mode);
-                    sync_lab_governor_gpu(&current_mode, &mut governor_guard, &mut gpu_guard);
+                    sync_lab_governor_gpu(&current_mode, &mut governor_guard, &mut gpu_guard, &mut fast_lock);
                     apply_affinity_and_corectl(
                         &mut affinity_mgr,
                         &mut corectl_mgr,
@@ -891,35 +919,80 @@ pub fn start_scheduler_thread(
                         );
                         log::warn!("{}", t("scheduler-down-enter"));
                     } else {
-                        // 删掉 down；内存模式先回到 rules 的缺省值，避免自愈又把 down 写一遍
-                        *mode_clone.lock().unwrap() = down_resume_mode.clone();
-                        crate::logger::set_devimp_mode(&down_resume_mode);
+                        // 恢复目标模式：优先用 monitor 的**实时判定**而不是停摆前的快照——
+                        // 停摆期间前台变化的事件被本线程丢弃且不补发（monitor 照常判定），
+                        // 停摆前是 fas/特调时若沿用旧快照，退出后会因「模式没变 → 不发
+                        // ModeChange」而一直空窗；实时值把「前台已变/未变」两种情况一起解决
+                        // （快照仅在 monitor 尚未判定/刚亮屏清空时兜底）。
+                        let live_mode = crate::monitor::app_detect::last_determined_mode();
+                        let resume_mode = if live_mode.is_empty() {
+                            down_resume_mode.clone()
+                        } else {
+                            live_mode
+                        };
+                        *mode_clone.lock().unwrap() = resume_mode.clone();
+                        crate::logger::set_devimp_mode(&resume_mode);
                         let _ = std::fs::remove_file(&mode_file_path);
                         // 停摆期 governors 全被 release 过，退出时**必须按恢复出来的模式重新
                         // 接管**：只复位内存模式不够——ModeChange 只在「模式真的变了」时才重
-                        // 接管，前台应用没换就会一直空着（CLG / vector 锁频 / 亲和 / core_ctl
-                        // 全是释放态，却不会有任何异常提示）。口径与 panic 自愈后的重建一致：
-                        // CLG 与 vector 锁频在这里起，特调与 FAS 交给后续事件重建。
+                        // 接管，前台应用没换就会一直空着（全是释放态，却不会有任何异常提示）。
+                        // 口径与 panic 自愈后的重建一致；fas/特调不再「交给后续事件」而在这里
+                        // 直接重建——事件不会再来（见上），它们恰恰是最需要重建的两个。
                         {
-                            let mode = down_resume_mode.clone();
+                            let mode = resume_mode.clone();
                             let cfg = config_clone.read().unwrap();
+                            let pkg = crate::monitor::app_detect::get_current_package();
+                            let pid = crate::monitor::app_detect::get_current_pid();
                             if mode == "vector" {
                                 fast_lock.init();
-                            } else if mode != "fas" && !crate::common::is_special_mode(&mode) {
+                            } else if mode == "fas" {
+                                // 与 ModeChange 的 fas 分支同款重建：三 governor 互斥释放
+                                // → activate（内部复查白名单，竞态下前台刚变即拒绝）→
+                                // 亲和 hook；失败回退 CLG default 并进入冷却
+                                ak_governor.release();
+                                fast_lock.release();
+                                cpu_governor.release();
+                                if !pkg.is_empty() && fas_mgr.activate(&pkg, pid) {
+                                    fas_affinity_hook(&mut affinity_mgr, &mut corectl_mgr, true, pid);
+                                } else {
+                                    fas_mgr.deactivate_all();
+                                    fas_cooldown_until = Some(Instant::now() + FAS_COOLDOWN);
+                                    log::warn!(
+                                        "{}",
+                                        t_with_args("scheduler-fas-init-failed", &fluent_args!("pkg" => pkg.clone()))
+                                    );
+                                    let clg_cfg = get_clg_cfg(&cfg, "default");
+                                    if clg_cfg.enabled {
+                                        cpu_governor.init_policies(&clg_cfg);
+                                    }
+                                }
+                            } else if crate::common::is_special_mode(&mode) {
+                                // 特调：按实时包名复查白名单（竞态下前台刚变则拒绝接管，
+                                // 与事件路径同语义），接管失败进冷却
+                                if crate::common::is_special_mode_allowed(&pkg, &mode)
+                                    && !ak_governor.init_policies(&mode, &cfg.get_tuned_profile(&mode))
+                                {
+                                    tuned_cooldown_until = Some(Instant::now() + TUNED_COOLDOWN);
+                                    log::warn!(
+                                        "{}",
+                                        t_with_args("scheduler-tuned-cooldown", &fluent_args!("secs" => TUNED_COOLDOWN.as_secs().to_string()))
+                                    );
+                                }
+                            } else {
                                 let clg_cfg = get_clg_cfg(&cfg, &mode);
                                 if clg_cfg.enabled {
                                     cpu_governor.init_policies(&clg_cfg);
                                 }
                             }
                             // lab 模式的 governor/GPU 同步（退出停摆若回到 contingency/babel）
-                            sync_lab_governor_gpu(&mode, &mut governor_guard, &mut gpu_guard);
+                            sync_lab_governor_gpu(&mode, &mut governor_guard, &mut gpu_guard, &mut fast_lock);
                             apply_affinity_and_corectl(
                                 &mut affinity_mgr,
                                 &mut corectl_mgr,
                                 &cfg,
                                 &mode,
                                 is_screen_on,
-                                crate::monitor::app_detect::get_current_pid(),
+                                pid,
                                 &last_core_utils,
                                 scene_mode_active,
                             );
@@ -952,6 +1025,13 @@ pub fn start_scheduler_thread(
                 // 运行中的 CLG/akmode，并刷新亲和/core_ctl（息屏不覆盖 Doze，亮屏事件补上）。
                 // 停摆期间配置照重载（meta 的日志开关等仍要生效），只是不下发到调度器
                 let config_dirty = dirty_ipc.swap(false, Ordering::AcqRel);
+                if config_dirty {
+                    // devimp 采集开关与停摆无关（停摆只停调度）：无条件同步，
+                    // 保证停摆期间改 meta.dev_record 也即时生效（与 down.rs
+                    // 「采集照常」的语义一致）
+                    let cfg = config_clone.read().unwrap();
+                    crate::logger::set_devimp_active(cfg.meta.dev_record);
+                }
                 if config_dirty && !halted && is_screen_on {
                     let current_mode = mode_clone.lock().unwrap().clone();
                     let config_lock = config_clone.read().unwrap();
@@ -1074,6 +1154,13 @@ pub fn start_scheduler_thread(
                         last_bpf_stats.2,
                         fas_fps,
                     );
+                    // PowerAVG（耗电参考/平均）：紧跟 status 行写入之后**顺序**计算并
+                    // 写 PowerAVG.chr（用户口径：计算值直接加在 csv 后，不并行处理）。
+                    // 口径由 meta.power_avg 决定（热重载即时生效）
+                    crate::logger::power_avg_update(
+                        tm.batt_power_w(),
+                        config_clone.read().unwrap().meta.power_avg,
+                    );
                     telemetry_log_counter += 1;
                     // 开发记录 snap 行（1s）：环境上下文（开启 dev_record 才有 IO；
                     // 前台包名由 set_devimp_package 已同步，行内自动填充）
@@ -1124,9 +1211,20 @@ pub fn start_scheduler_thread(
                             crate::logger::set_devimp_mode(&mode);
                             let _ = utils::try_write_file(&mode_file_path, mode.as_bytes());
                             // governor/GPU：目标若是 contingency/babel 则接管，否则恢复
-                            sync_lab_governor_gpu(&mode, &mut governor_guard, &mut gpu_guard);
+                            sync_lab_governor_gpu(&mode, &mut governor_guard, &mut gpu_guard, &mut fast_lock);
                             fas_affinity_hook(&mut affinity_mgr, &mut corectl_mgr, false, 0);
                             if mode == "contingency" || mode == "babel" {
+                                // 进入 lab 静态模式：先释放全部其它调频接管。CLG/特调的
+                                // tick 与防篡改会继续压 scaling_max_freq（大核/prime 锁
+                                // 不到最高频），它们的 release 还会把 governor 恢复成
+                                // schedutil 覆盖 performance。全部释放（含 Guard 自身复位）
+                                // 后再 sync，performance/锁频才是终值。
+                                cpu_governor.release();
+                                ak_governor.release();
+                                fast_lock.release();
+                                governor_guard.release();
+                                gpu_guard.release();
+                                sync_lab_governor_gpu(&mode, &mut governor_guard, &mut gpu_guard, &mut fast_lock);
                                 // lab 静态分组与屏幕状态无关：分组重建不门控亮屏
                                 let cfg = config_clone.read().unwrap();
                                 apply_affinity_and_corectl(
@@ -1471,10 +1569,17 @@ pub fn start_scheduler_thread(
                     }
                     Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 };
-                // 停摆期间事件照收但一律不下发：调度类动作全停，采集与遥测由上面的周期块
-                // 负责（status.csv / devimp / 日志照常）。事件在此丢弃、不补处理——退出
-                // 停摆后下一次 ModeChange 或周期块会把状态重新对齐。
+                // 停摆期间事件照收但不下发：调度类动作全停，采集与遥测由上面的周期块
+                // 负责（status.csv / devimp / 日志照常）。**屏幕事件例外**——只更新
+                // is_screen_on 等本地状态（不做任何调度动作）：这些变量在停摆期若不
+                // 吸收变化，退出停摆时 monitor 不会再补发（它自己那份 arc 已是最新），
+                // 亲和/core_ctl 会按过期的屏幕状态应用（息屏却按亮屏口径调度）。
                 if halted {
+                    if let DaemonEvent::ScreenStateChange(on) = &msg {
+                        is_screen_on = *on;
+                        screen_off_at = if *on { None } else { Some(Instant::now()) };
+                        scene_mode_active = false;
+                    }
                     continue;
                 }
                 match msg {
@@ -1605,6 +1710,14 @@ pub fn start_scheduler_thread(
                                     let clg_cfg = get_clg_cfg(&config_lock, &current_mode);
                                     if clg_cfg.enabled { cpu_governor.init_policies(&clg_cfg); }
                                 }
+                            } else if current_mode == "contingency" || current_mode == "babel" {
+                                // 亮屏恢复 lab 静态模式：governor/GPU/极速锁频按模式重建。
+                                // 不能走下面的通用 else——它会释放 fast_lock 且不给
+                                // contingency 任何频率接管（CLG 未注册），锁频就空了
+                                cpu_governor.release();
+                                ak_governor.release();
+                                fast_lock.release();
+                                sync_lab_governor_gpu(&current_mode, &mut governor_guard, &mut gpu_guard, &mut fast_lock);
                             } else if current_mode == "vector" {
                                 // 亮屏恢复极速模式：释放 doze CLG，由 fast_lock 接管
                                 ak_governor.release();
@@ -1769,6 +1882,9 @@ pub fn start_scheduler_thread(
                                     affinity_mgr.lab_static_deactivate();
                                     governor_guard.release();
                                     gpu_guard.release();
+                                    // contingency 的极速锁频也要解除（息屏路径不会走到
+                                    // 下面的亮屏接管块，漏了会把锁频残留到亮屏）
+                                    fast_lock.release();
                                 }
 
                                 // 仅在亮屏时处理调度接管。如果息屏，Doze 配置仍在生效，这里不能覆盖它
@@ -1817,11 +1933,18 @@ pub fn start_scheduler_thread(
                                     }
                                 }
 
-                                // 进入 lab 静态模式：governor 写 performance / GPU 锁最高频。
-                                // 必须在旧 governor 释放之后——CLG release 会恢复它 init 时
-                                // 快照的 schedutil，先写会被覆盖。息屏同样生效（接管逻辑
-                                // 虽跳过，调速器切换不受屏幕状态影响）。
-                                sync_lab_governor_gpu(&mode, &mut governor_guard, &mut gpu_guard);
+                                // 进入 lab 静态模式：governor 写 performance / GPU 锁最高频 /
+                                // contingency 极速锁频（sync 内做）。必须在旧 governor 释放
+                                // 之后——CLG release 会恢复它 init 时快照的 schedutil、先写
+                                // 会被覆盖，且 CLG 的 tick/防篡改会继续压 scaling_max_freq
+                                // 与锁频打架。亮屏时上面的接管块已释放三者；息屏路径不走
+                                // 那里，这里兜底（重复 release 幂等）。
+                                if mode == "contingency" || mode == "babel" {
+                                    cpu_governor.release();
+                                    ak_governor.release();
+                                    fast_lock.release();
+                                }
+                                sync_lab_governor_gpu(&mode, &mut governor_guard, &mut gpu_guard, &mut fast_lock);
                             }
                         }
                     },
@@ -2254,7 +2377,7 @@ pub fn start_scheduler_thread(
                         .clone();
                     if current_mode == "contingency" || current_mode == "babel" {
                         // lab 静态分组：governor/GPU 与分组都重建
-                        sync_lab_governor_gpu(&current_mode, &mut governor_guard, &mut gpu_guard);
+                        sync_lab_governor_gpu(&current_mode, &mut governor_guard, &mut gpu_guard, &mut fast_lock);
                         let cfg = config_clone.read().unwrap();
                         apply_affinity_and_corectl(
                             &mut affinity_mgr,

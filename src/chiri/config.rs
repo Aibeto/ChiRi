@@ -42,6 +42,24 @@ pub struct Meta {
     /// 禁用、用户可按意愿禁用；合并在 Config::load 完成，下游只看那两个子开关。
     #[serde(default = "crate::utils::default_true", alias = "ThreadBind")]
     pub thread_bind: bool,
+
+    /// 功耗口径开关（meta.yaml `power_avg`，默认 false = 参考值）：控制 1s 状态
+    /// 采样写模块根 `PowerAVG.chr` 的口径——false 写参考值（(旧值 + 新值) / 2
+    /// 递推，偏近期）；true 写累计平均值（(旧值 × 次数 + 新值) / (次数 + 1)，
+    /// 等权全史）。热重载即时生效；仅 ChiRi 有 1s 状态采样，Yumi 无效。
+    #[serde(default, alias = "PowerAvg")]
+    pub power_avg: bool,
+
+    /// 耗电读数满量程（W，meta.yaml `power_max_w`，可选，默认 12）：只影响 WebUI
+    /// 状态页仪表盘的进度换算，不参与任何调度决策。
+    #[serde(default = "crate::utils::default_power_max_w", alias = "PowerMaxW")]
+    pub power_max_w: f32,
+
+    /// 「不改」开关（meta.yaml 可选字段 `nofix`，默认 false，默认不写进配置）：
+    /// true = 启动时跳过「二进制内容对外部文件的覆盖类操作」（webui 资产还原与
+    /// meta.yaml 快照自愈），见 src/common.rs::read_nofix_flag 与 src/webui_asset.rs。
+    #[serde(default, alias = "NoFix")]
+    pub nofix: bool,
 }
 
 // Meta 缺省值：config.yaml 省略该字段时回退到此处
@@ -615,6 +633,14 @@ pub struct AffinityConfig {
     /// 退出 boost 恢复全核
     #[serde(default = "crate::utils::default_true")]
     pub pin_foreground_threads: bool,
+    /// 后台分组（background / restricted）的 cpu.uclamp.max 百分比（0 = 不启用）：
+    /// 把后台任务的 util 需求钳低（50 = 512），EAS 放置与 schedutil 频率随之回落——
+    /// 后台**不禁止使用任何核心**（空闲时仍会被调度上去），只是权重压低、优先落
+    /// 小核，给 UI/视频等视觉可感的线程让路。normal/boost 两态都持续生效。
+    /// **不含 system-background**：系统后台含媒体/音频等服务（画中画、后台播放
+    /// 等可感知场景），保守跳过；节点缺失/写入无效时静默跳过。
+    #[serde(default = "d_aff_bg_uclamp_max")]
+    pub background_uclamp_max_pct: u32,
 }
 
 fn d_aff_uclamp_min() -> u32 {
@@ -622,6 +648,9 @@ fn d_aff_uclamp_min() -> u32 {
 }
 fn d_aff_uclamp_max() -> u32 {
     0
+}
+fn d_aff_bg_uclamp_max() -> u32 {
+    50
 }
 
 impl Default for AffinityConfig {
@@ -631,6 +660,7 @@ impl Default for AffinityConfig {
             top_app_uclamp_min_pct: d_aff_uclamp_min(),
             top_app_uclamp_max_pct: d_aff_uclamp_max(),
             pin_foreground_threads: true,
+            background_uclamp_max_pct: d_aff_bg_uclamp_max(),
         }
     }
 }
@@ -640,6 +670,7 @@ impl AffinityConfig {
     pub fn normalize(&mut self) {
         self.top_app_uclamp_min_pct = self.top_app_uclamp_min_pct.clamp(0, 100);
         self.top_app_uclamp_max_pct = self.top_app_uclamp_max_pct.clamp(0, 100);
+        self.background_uclamp_max_pct = self.background_uclamp_max_pct.clamp(0, 100);
     }
 }
 
@@ -657,7 +688,7 @@ pub struct CoreCtlConfig {
     /// 配置压制）；编号最大的小核独占给调度服务（从业务 cpuset 组移除 + 自身
     /// 线程移入根组 + 自钉）。亮屏/退出 scenemode 按快照恢复。逐核回读验证，
     /// 内核拒绝的核自动跳过。
-    /// 【已停用（2026-09-17）】stardust 家族（scenemode/down）语义改为「停线程迁移 +
+    /// 【已停用（2026-09-17）】stardust 家族（scenemode；down 是独立家族）语义改为「停线程迁移 +
     /// 全部 cpuset 恢复全核 + 仅压频」，不再做 prime 整簇下线。字段仅为兼容旧机型
     /// yaml 保留（deny 解析需要），改值无效果。
     #[serde(default = "crate::utils::default_true")]
@@ -760,6 +791,9 @@ impl Config {
         config.meta.fas_enabled = d.fas_enabled;
         config.meta.scenemode_enabled = d.scenemode_enabled;
         config.meta.thread_bind = d.thread_bind;
+        config.meta.power_avg = d.power_avg;
+        config.meta.power_max_w = d.power_max_w;
+        config.meta.nofix = d.nofix;
         if let Some(m) = crate::common::read_external_meta(std::path::Path::new(path)) {
             config.meta.loglevel = m.loglevel;
             config.meta.language = m.language;
@@ -767,6 +801,9 @@ impl Config {
             config.meta.fas_enabled = m.fas_enabled;
             config.meta.scenemode_enabled = m.scenemode_enabled;
             config.meta.thread_bind = m.thread_bind;
+            config.meta.power_avg = m.power_avg;
+            config.meta.power_max_w = m.power_max_w;
+            config.meta.nofix = m.nofix;
         }
         // 功能总开关同步到进程级原子标志（覆盖启动 + config_watcher 热重载两条路径）
         crate::common::set_fas_enabled(config.meta.fas_enabled);

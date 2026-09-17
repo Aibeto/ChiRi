@@ -7,7 +7,7 @@
 [ -z "$MODDIR" ] && MODDIR=${0%/*}
 touch "$MODDIR/.uninstalling"
 [ -f "$MODDIR/logs/watchdog.pid" ] && kill "$(cat "$MODDIR/logs/watchdog.pid" 2>/dev/null)" 2>/dev/null
-killall -9 yumi > /dev/null 2>&1
+killall -9 chiri > /dev/null 2>&1
 rm -f "$MODDIR/logs/watchdog.pid" "$MODDIR/.uninstalling"
 sleep 1
 

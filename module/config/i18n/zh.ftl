@@ -1,11 +1,11 @@
 # zh.ftl: [main-monitor] [app-detect] [screen-detect] [monitors] [scheduler] [scheduler-config-watcher] [sysfs] [clg] [tuned] [touch] [fas] [fas-whitelist] [scheduler-settings] [fast-lock] [logger] [affinity] [corectl] [telemetry] [config-reload] [governor] [gpu]
 # --- Main & Monitor ---
-yumi-module-starting = yumi-module 统一启动中...
+chiri-module-starting = chiri-module 统一启动中...
 scheduler-module-started = 调度器模块已启动
 scheduler-module-start-failed = 启动调度器模块失败: { $error }
 monitor-module-crashed = 监控模块崩溃: { $error }
 monitor-module-started = 监控模块已启动
-monitor-starting = 正在启动 yumi-monitor 模块...
+monitor-starting = 正在启动 chiri-monitor 模块...
 monitor-initial-config-failed = [Main] 读取初始配置失败: { $error }. 正在使用默认值。
 monitor-screen-watcher-failed = [Main] 屏幕状态监控线程崩溃: { $error }
 monitor-config-watcher-failed = [Main] 配置监控线程崩溃: { $error }
@@ -21,6 +21,9 @@ main-chiri-scheduler-selected = [Main] 检测到特定处理器，已启用 Chir
 main-special-tuned-exported = [Main] 已导出 { $count } 个内部特调白名单条目到 special_tuned.yaml
 main-log-archive-submitted = [Main] 上一轮日志已归档，后台打包至 logd/{ $zip }
 main-devimp-archive-submitted = [Main] 上一轮 devimp 诊断日志已归档，后台打包至 logd/{ $zip }
+main-nofix-skip = [Main] meta.yaml 记为 nofix=true：跳过 webui 资产还原与 meta.yaml 快照自愈
+main-webui-restored = [Main] WebUI 资产已按内嵌副本还原 { $count } 个文件
+main-webui-not-embedded = [Main] 二进制未内嵌 WebUI 资产（构建时缺少 webui/dist），跳过还原
 main-log-short-session-discarded = [Main] 上一轮会话存活不足 30 秒，已直接丢弃其日志（未打包）
 monitor-thread-start-screen = [Main] 启动屏幕状态监控线程...
 monitor-thread-start-config-watch = [Main] 启动配置监控线程...

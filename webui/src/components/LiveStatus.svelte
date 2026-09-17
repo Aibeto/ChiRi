@@ -13,8 +13,10 @@
   }>()
 </script>
 
+<!-- 视觉全部来自官方 .ak-status（深色芯片 + 脉冲信号点，层级适配在 app.css [ak-adapt]）；
+     三态用修饰类 + 文字双重表达 -->
 <div
-  class="ak-status status"
+  class="ak-status"
   class:ak-status--offline={state === 'stopped'}
   class:ak-status--warning={state === 'unknown'}
   role="status"
@@ -25,11 +27,3 @@
     <span class="ak-status__detail">{detail}</span>
   {/if}
 </div>
-
-<style>
-  .status {
-    min-height: auto;
-    padding: var(--ak-space-2) var(--ak-space-3);
-    background: var(--ak-surface-raised);
-  }
-</style>

@@ -169,8 +169,11 @@ pub fn start_scheduler_thread(
                 log::info!("{}", t("config-reloading"));
 
                 // meta.yaml 自愈先于重载：字段非法时用嵌入默认整体覆盖并追加警告注释，
-                // 文件缺失则重建，然后再加载（Config::load 读到的一定是合法 meta）
-                crate::common::sync_meta_snapshot(&config_path);
+                // 文件缺失则重建，然后再加载（Config::load 读到的一定是合法 meta）。
+                // nofix 防篡改开关开启时跳过（文件保持用户原样，非法由加载侧回退默认）
+                if !crate::common::nofix_active() {
+                    crate::common::sync_meta_snapshot(&config_path);
+                }
 
                 let old_lang = config_clone.read().unwrap().meta.language.clone();
                 

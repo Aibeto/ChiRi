@@ -25,10 +25,14 @@ describe('文案完整性', () => {
 
   it('源码里静态使用的键都有定义', () => {
     const used = new Set<string>()
-    // 只匹配独立的 t('key')：排除 put( / get( / split( 这类以 t 结尾的函数名
+    // 只匹配独立的 t('key')：排除 put( / get( / split( 这类以 t 结尾的函数名。
+    // 先剔掉 HTML/行注释——被注释掉的调用不是「使用」（2026-09-17 起注释里
+    // 会保留被隐藏键的原文留痕）。
     const pattern = /(?:^|[^\w$])t\(\s*'([^']+)'/g
     for (const file of walk(SRC)) {
       const text = readFileSync(file, 'utf8')
+        .replace(/<!--[\s\S]*?-->/g, '')
+        .replace(/\/\/[^\n]*/g, '')
       for (const match of text.matchAll(pattern)) used.add(match[1])
     }
     const missing = [...used].filter(key => !(key in zh))
@@ -54,8 +58,11 @@ describe('文案完整性', () => {
       'special',
       'unknown'
     ]) {
+      // 模式名全量存在；desc 已全部注释（2026-09-18，卡片只显「家族 + 模式」）
       expect(`mode.${mode}` in zh).toBe(true)
-      expect(`mode.${mode}.desc` in zh).toBe(true)
+    }
+    for (const family of ['clg', 'special', 'lab', 'down', 'stardust', 'fas', 'unknown']) {
+      expect(`mode.family.${family}` in zh).toBe(true)
     }
   })
 

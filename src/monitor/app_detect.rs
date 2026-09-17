@@ -111,7 +111,7 @@ fn is_valid_user_app(pkg: &str, ignored_apps: &[String]) -> bool {
         "android.hardware.graphics.composer" => false,
         "com.android.phone" => false,
         "com.android.permissioncontroller" => false,
-        "yumi" => false,
+        "chiri" => false,
         "com.xiaomi.vtcamera" => false,
         "com.android.providers.media.module" => false,
         "com.google.android.gms.ui" => false,
@@ -329,6 +329,18 @@ pub fn request_mode_refresh() {
     FORCE_MODE_REFRESH.store(true, Ordering::SeqCst);
 }
 
+/// 最近一次判定出的模式（与 app_detection_loop 的 last_mode 逐点同步；空串 =
+/// 尚未判定或亮屏后被清空待重算）。**DOWN 停摆退出专用**：monitor 在停摆期间
+/// 照常判定前台，但 ModeChange 事件被调度线程丢弃且不补发——退出停摆时若沿用
+/// 停摆前的模式快照，前台仍是 fas/特调应用的场景会因「模式没变 → 不发事件」
+/// 而一直空窗（没有任何接管）。调度线程退出停摆时读这里对齐真实模式。
+static LAST_DETERMINED_MODE: Mutex<String> = Mutex::new(String::new());
+
+/// 读最近一次判定出的模式（用途见 `LAST_DETERMINED_MODE` 的说明）
+pub fn last_determined_mode() -> String {
+    LAST_DETERMINED_MODE.lock().unwrap().clone()
+}
+
 // [cfgwatch]
 pub fn watch_config_file(
     config_arc: Arc<Mutex<RulesConfig>>,
@@ -435,6 +447,7 @@ pub fn app_detection_loop(
                 last_package.clear();
                 pending_package.clear();
                 last_mode.clear();
+                *LAST_DETERMINED_MODE.lock().unwrap() = String::new();
                 force_refresh_arc.store(true, Ordering::SeqCst);
             }
         }
@@ -533,6 +546,8 @@ pub fn app_detection_loop(
                         temperature: current_temp,
                     });
                     last_mode = new_mode;
+                    // 同步镜像：DOWN 停摆退出时调度线程按它对齐接管
+                    *LAST_DETERMINED_MODE.lock().unwrap() = last_mode.clone();
                 } else if crate::common::is_chiri_soc()
                     && !last_package.is_empty()
                     && last_package != final_pkg

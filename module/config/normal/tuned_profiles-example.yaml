@@ -60,13 +60,14 @@ akmode:
 # ── 特调参数组（可选，按模式名分派）────────────────────────────────
 # special_tuned.yaml 的模式列表里注册的模式名，与本节键同名即自动生效；
 # 未注册的模式回退上面的 akmode 段。机制完全共用，差异只在参数倾向。
-# 8550 实测两款（2026-09-17，日志回放验证）：
-#   playback：视频播放稳态——headroom 1.0 贴负载，util_smoothing 0.35 滤噪声尖峰
-#             （平滑是唯一能把上限压到 CLG 以下的路径）；
-#   daily：日常轻载交互——headroom 1.0 + perf_floor 0.10 保底，平滑 0.5 保跟手。
+# 示例两款（2026-09-17）：
+#   playback：视频播放稳态（在用）——headroom 1.05 贴负载，util_smoothing 0.35
+#             滤噪声尖峰（平滑是唯一能把上限压到 CLG 以下的路径）；
+#   daily：日常轻载交互（已从白名单移除，保留作参数组示例）——floor 0.10
+#             保底、平滑 0.5 保跟手。
 tuned_profiles:
   playback:
-    headroom: 1.0
+    headroom: 1.05
     perf_floor: 0.0
     hysteresis: 0.04
     down_hold_ms: 100

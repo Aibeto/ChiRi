@@ -12,8 +12,8 @@
 #
 # 特调参数组（normal/tuned_profiles.yaml 的 tuned_profiles 段，键名 = 模式名，同名即自动生效）：
 #   akmode   = 游戏（缺省段，headroom 1.15 保响应，走 boost 亲和）
-#   playback = 视频播放稳态（headroom 1.0 贴负载 + 平滑 0.35，不走 boost 亲和）
-#   daily    = 日常轻载交互（headroom 1.0 + floor 0.10 保底 + 平滑 0.5，不走 boost 亲和）
+#   playback = 视频播放稳态（headroom 1.05 贴负载 + 平滑 0.35，不走 boost 亲和）
+# 只给长稳态场景做特调；高频短交互（桌面/聊天/工具）不做（daily 组已于 2026-09-17 晚移除）
 #
 # 明日方舟国服
 com.hypergryph.arknights:akmode:akmode
@@ -29,26 +29,15 @@ tv.danmaku.bili:playback:playback
 # 兜底：bilibili 家族（HD/国际版/概念版等，忽略大小写）
 re:(?i)(bilibili|danmaku\.bili):playback:playback
 
-# daily 组（日常轻载交互；2026-09-17 8550 日志分析新增：这些场景组占用普遍
-# 偏低而频率偏高，收紧到贴负载 + 快速回落静态功耗）
-# 桌面
-com.android.launcher:daily:daily
-# 社交/资讯/工具（按实测出现频率排序）
-com.tencent.mobileqq:daily:daily
-com.aliyun.tongyi:daily:daily
-com.ss.android.lark:daily:daily
-com.coolapk.market:daily:daily
-com.microsoft.emmx.beta:daily:daily
-bin.mt.plus.canary:daily:daily
-com.trim.app:daily:daily
-com.netease.cloudmusic:daily:daily
-com.deepseek.chat:daily:daily
-com.android.documentsui:daily:daily
-com.littlewhale.combinedstatus:daily:daily
-yangfentuozi.batteryrecorder:daily:daily
-com.moondroplab.moondrop.moondrop_app:daily:daily
-fans.lty.app:daily:daily
-org.lsposed.manager:daily:daily
-me.weishu.kernelsu:daily:daily
-# 兜底：各厂商/第三方 launcher 换皮（忽略大小写）
-re:(?i)launcher:daily:daily
+# daily 组已移除（2026-09-17 晚，按上机实测反馈）：不是所有程序都需要特调——
+# 桌面/聊天/资讯/工具属高频短交互，特调接管收益低、侵入高（实测这批应用在
+# daily 下的功耗与 CLG 基线相当，但它们对跟手性更敏感）。特调只保留长稳态
+# 场景（playback 视频、akmode 游戏）。如需重新启用：加回条目 + 在
+# tuned_profiles.yaml 配同名参数组。
+#
+# 已移除的条目（留档，勿直接复制回）：com.android.launcher / com.tencent.mobileqq /
+# com.aliyun.tongyi / com.ss.android.lark / com.coolapk.market / com.microsoft.emmx.beta /
+# bin.mt.plus.canary / com.trim.app / com.netease.cloudmusic / com.deepseek.chat /
+# com.android.documentsui / com.littlewhale.combinedstatus / yangfentuozi.batteryrecorder /
+# com.moondroplab.moondrop.moondrop_app / fans.lty.app / org.lsposed.manager /
+# me.weishu.kernelsu / re:(?i)launcher

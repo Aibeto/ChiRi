@@ -215,6 +215,36 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
 
 [[package]]
+name = "chiri"
+version = "2.0.2"
+dependencies = [
+ "anyhow",
+ "aya",
+ "bytes",
+ "fluent",
+ "fluent-bundle",
+ "futures",
+ "glob",
+ "include_dir",
+ "inotify",
+ "intl-memoizer",
+ "itoa",
+ "kobject-uevent",
+ "lazy_static",
+ "libc",
+ "log",
+ "log4rs",
+ "mio",
+ "netlink-sys",
+ "nix",
+ "once_cell",
+ "regex",
+ "serde",
+ "serde_yaml",
+ "tokio",
+]
+
+[[package]]
 name = "chrono"
 version = "0.4.45"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1935,36 +1965,6 @@ dependencies = [
  "fs_extra",
  "xshell",
  "zip",
-]
-
-[[package]]
-name = "yumi"
-version = "2.0.2"
-dependencies = [
- "anyhow",
- "aya",
- "bytes",
- "fluent",
- "fluent-bundle",
- "futures",
- "glob",
- "include_dir",
- "inotify",
- "intl-memoizer",
- "itoa",
- "kobject-uevent",
- "lazy_static",
- "libc",
- "log",
- "log4rs",
- "mio",
- "netlink-sys",
- "nix",
- "once_cell",
- "regex",
- "serde",
- "serde_yaml",
- "tokio",
 ]
 
 [[package]]

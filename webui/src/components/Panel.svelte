@@ -22,59 +22,28 @@
 
 <section class="panel ak-card" data-signal={signal || undefined}>
   {#if title || actions}
-    <header class="panel__head ak-card__header">
+    <header class="panel__head ak-card__header u-between">
       <div class="panel__titles">
-        <h2 class="panel__title ak-card__title">{title}</h2>
+        <h2 class="ak-card__title">{title}</h2>
         {#if desc}
-          <p class="panel__desc ak-card__description">{desc}</p>
+          <p class="ak-card__description">{desc}</p>
         {/if}
       </div>
       {#if actions}
-        <div class="panel__actions">{@render actions()}</div>
+        <div class="panel__actions u-row-tight">{@render actions()}</div>
       {/if}
     </header>
   {/if}
-  <div class="panel__body ak-card__content">
+  <div class="ak-card__content">
     {@render children?.()}
   </div>
 </section>
 
 <style>
+  /* 表面（边框/底色/切角）与排版来自官方 .ak-card（深色适配在 app.css [ak-adapt]），
+     这里只保留项目扩展：左侧信号条与头部骨架修正 */
   .panel {
-    display: block;
     position: relative;
-    box-sizing: border-box;
-    padding: var(--ak-space-4);
-    border: var(--ak-line-hairline) solid var(--ak-surface-raised);
-    background: var(--ak-surface-panel);
-    box-shadow: none;
-    clip-path: polygon(
-      0 0,
-      calc(100% - var(--ak-cut-md)) 0,
-      100% var(--ak-cut-md),
-      100% 100%,
-      0 100%
-    );
-  }
-
-  .panel[data-signal] {
-    --panel-signal: var(--ak-signal-info);
-  }
-
-  .panel[data-signal='action'] {
-    --panel-signal: var(--ak-signal-action);
-  }
-
-  .panel[data-signal='danger'] {
-    --panel-signal: var(--ak-signal-danger);
-  }
-
-  .panel[data-signal='success'] {
-    --panel-signal: var(--ak-signal-success);
-  }
-
-  .panel[data-signal='accent'] {
-    --panel-signal: var(--ak-signal-accent);
   }
 
   .panel[data-signal]::before {
@@ -84,48 +53,24 @@
     left: 0;
     width: 3px;
     content: '';
-    background: var(--panel-signal);
+    background: var(--signal);
   }
 
+  /* .u-between 默认居中；标题可能多行，这里保持顶部对齐 */
   .panel__head {
-    display: flex;
     align-items: flex-start;
-    justify-content: space-between;
-    gap: var(--ak-space-3);
   }
 
   .panel__titles {
     min-width: 0;
   }
 
-  .panel__title {
-    margin: 0;
-    font-family: var(--ak-font-sans);
-    font-size: 1rem;
-    font-weight: 600;
-    letter-spacing: 0.02em;
-    line-height: 1.4;
-  }
-
-  .panel__desc {
-    margin: 0.25rem 0 0;
-    color: var(--ak-text-secondary);
-    font-size: 0.75rem;
-    line-height: 1.5;
-    opacity: 1;
-  }
-
   .panel__actions {
-    display: flex;
     flex: 0 0 auto;
-    gap: var(--ak-space-2);
   }
 
-  .panel__body {
-    margin-top: var(--ak-space-4);
-  }
-
-  .panel__body:first-child {
+  /* 无标题/操作的面板：内容区没有官方 .ak-card__header 的间距可借 */
+  .ak-card__content:first-child {
     margin-top: 0;
   }
 </style>

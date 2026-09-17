@@ -24,6 +24,11 @@ Affinity:
   top_app_uclamp_min_pct: 0
   top_app_uclamp_max_pct: 0
   pin_foreground_threads: true
+  # 后台降权（background / restricted 的 cpu.uclamp.max 百分比，0 = 关闭）：
+  # 后台任务的 util 需求被钳低 → EAS 放置与 schedutil 频率回落、优先落小核，
+  # 给 UI/视频等视觉可感的线程让路；不禁止使用大核（空闲时仍会被调度上去）。
+  # 刻意不含 system-background（媒体/音频等可感知的系统后台）。
+  background_uclamp_max_pct: 50
 
 # [corectl]
 CoreCtl:

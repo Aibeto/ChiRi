@@ -61,7 +61,7 @@
   })
 </script>
 
-<div class="stack">
+<div class="u-stack">
   {#if app.configState === 'failed'}
     <StateBox kind="error" message={t('state.failed')} detail={app.configError} />
   {:else if app.configState === 'missing'}
@@ -96,8 +96,8 @@
   </Panel>
 
   <Panel title={t('config.writable')} desc={t('config.readonly.hint')}>
-    <div class="fields">
-      <label class="field">
+    <div class="ak-form-stack">
+      <label class="ak-field">
         <span class="ak-label">{t('config.loglevel')}</span>
         <select
           class="ak-select"
@@ -112,7 +112,7 @@
         </select>
       </label>
 
-      <label class="field">
+      <label class="ak-field">
         <span class="ak-label">{t('config.daemonLanguage')}</span>
         <select
           class="ak-select"
@@ -128,9 +128,9 @@
         <span class="ak-field__hint">{t('config.daemonLanguage.hint')}</span>
       </label>
 
+      <!-- 2026-09-17 副标题按需求注释：hint={t('config.devRecord.hint')} -->
       <ToggleField
         label={t('config.devRecord')}
-        hint={t('config.devRecord.hint')}
         checked={devRecord}
         pending={app.draft.dev_record !== undefined}
         disabled={!app.metaValid}
@@ -172,14 +172,14 @@
     <div class="commit">
       <p class="commit__state" role="status">
         {#if app.writeError}
-          <span class="commit__error">{app.writeError}</span>
+          <span class="u-danger">{app.writeError}</span>
         {:else if app.hasDraft}
           {t('config.dirty')}
         {:else}
           <span class="u-muted">{t('config.noChanges')}</span>
         {/if}
       </p>
-      <div class="commit__actions">
+      <div class="u-actions">
         <button
           type="button"
           class="ak-button btn btn--ghost"
@@ -200,18 +200,32 @@
     </div>
   </Panel>
 
-  <!-- 高级设置：直接写调度进程的状态文件，不经过 meta.yaml 草稿/保存那套 -->
+  <!-- 高级设置：直接写调度进程的状态文件，不经过 meta.yaml 草稿/保存那套。
+       ak-form-stack 强制一行一个控件——ak-choice 是 inline-grid，不套栅格会挤成一行多个 -->
   <Panel signal="action" title={t('config.advanced')} desc={t('config.advanced.hint')}>
-    <ToggleField
-      label={t('config.down')}
-      hint={t('config.down.hint')}
-      checked={app.downActive}
-      disabled={app.downPending}
-      onchange={next => app.setDown(next)}
-    />
-    {#if app.downError}
-      <p class="advanced__error">{app.downError}</p>
-    {/if}
+    <div class="ak-form-stack">
+      <ToggleField
+        label={t('config.down')}
+        hint={t('config.down.hint')}
+        checked={app.downActive}
+        disabled={app.downPending}
+        onchange={next => app.setDown(next)}
+      />
+      {#if app.downError}
+        <p class="u-note u-danger u-mt-2">{app.downError}</p>
+      {/if}
+      <!-- 功耗口径：直写 meta.yaml 的 power_avg（不走草稿，立即热重载） -->
+      <ToggleField
+        label={t('config.powerAvg')}
+        hint={t('config.powerAvg.hint')}
+        checked={app.powerAvgUsesAverage}
+        disabled={app.powerAvgPending || !app.metaValid}
+        onchange={next => app.setPowerAvg(next)}
+      />
+      {#if app.powerAvgError}
+        <p class="u-note u-danger u-mt-2">{app.powerAvgError}</p>
+      {/if}
+    </div>
   </Panel>
 
   {#if app.isChiri}
@@ -221,8 +235,8 @@
       title={t('lab.entry')}
       desc={t('lab.entry.hint')}
     >
-      <div class="entry">
-        <p class="entry__state" data-on={app.labMode ? 'yes' : undefined}>
+      <div class="u-between">
+        <p class="entry__state u-note" data-on={app.labMode ? 'yes' : undefined}>
           {app.labMode
             ? t('lab.entry.on', { mode: t(`lab.mode.${app.labMode}`) })
             : t('lab.entry.off')}
@@ -240,48 +254,13 @@
 </div>
 
 <style>
-  .stack {
-    display: grid;
-    gap: var(--ak-space-4);
-  }
-
-  .advanced__error {
-    margin: var(--ak-space-2) 0 0;
-    color: var(--ak-signal-danger);
-    font-size: 0.72rem;
-    line-height: 1.5;
-  }
-
-  .entry {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: var(--ak-space-3);
-  }
-
-  .entry__state {
-    margin: 0;
-    color: var(--ak-text-secondary);
-    font-size: 0.8125rem;
-    line-height: 1.5;
-  }
-
+  /* 入口状态文字默认走 .u-note 的次要色，启用时换危险色 */
   .entry__state[data-on='yes'] {
     color: var(--ak-signal-danger);
   }
 
   .entry__open {
     flex: 0 0 auto;
-  }
-
-  .fields {
-    display: grid;
-    gap: var(--ak-space-4);
-  }
-
-  .field {
-    display: grid;
-    gap: 0.5rem;
   }
 
   .commit {
@@ -292,19 +271,10 @@
     border-top: var(--ak-line-hairline) solid var(--ak-surface-raised);
   }
 
+  /* 有意保留正文色：与「未改动」态的 .u-muted 拉开对比（不用 .u-note） */
   .commit__state {
     margin: 0;
     font-size: 0.75rem;
     line-height: 1.5;
-  }
-
-  .commit__error {
-    color: var(--ak-signal-danger);
-  }
-
-  .commit__actions {
-    display: flex;
-    justify-content: flex-end;
-    gap: var(--ak-space-3);
   }
 </style>

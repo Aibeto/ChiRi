@@ -61,7 +61,7 @@ pub fn get_module_root() -> PathBuf {
     let exe_path = env::current_exe().unwrap_or_else(|_| PathBuf::from("/"));
 
     // 回溯两级目录:
-    // core/bin/yumi -> core/bin -> core -> yumi
+    // core/bin/chiri -> core/bin -> core -> <模块根>
     exe_path
         .parent()
         .unwrap_or(&exe_path) // .../core/bin
@@ -86,8 +86,11 @@ fn read_first_line(path: &str) -> String {
 // [soc_detect]
 const CHIRI_SOC_HINTS: &[&str] = &["8550", "8475", "8998"];
 
-/// 读取单个 Android 系统属性（getprop key），失败/为空返回空串
-fn getprop(key: &str) -> String {
+/// 读取单个 Android 系统属性（getprop key），失败/为空返回空串。
+/// 跨分区属性（ro.product.model 等在 /product、/vendor 的 build.prop 里）
+/// 只能走 getprop 拿合并视图——直接读 /system/build.prop 会读空（devimp 头
+/// 的 model 曾因此显示 `-`）。
+pub(crate) fn getprop(key: &str) -> String {
     std::process::Command::new("getprop")
         .arg(key)
         .output()
@@ -680,11 +683,12 @@ pub fn embedded_ftl_str(lang: &str) -> &'static str {
     embedded_config_file(rel).unwrap_or_default()
 }
 
-/// 磁盘 meta.yaml 的严格结构：八个字段全部必填、拒绝未知字段。
+/// 磁盘 meta.yaml 的严格结构：九个字段必填 + 两个可选字段（nofix / power_max_w）、拒绝未知字段。
 /// 任一缺失/多余/类型不符，或取值不在白名单内，整文件判非法——
 /// 由 sync_meta_snapshot 用二进制内嵌默认值整体覆盖修正。
-/// **新增字段时四个 meta.yaml 模板（config/meta.yaml 与三个 {soc}/meta.yaml）与 WebUI
-/// 的 META_FIELDS 必须同步**：全必填意味着漏改一处就会让整个文件判非法、用户设置一起丢。
+/// **新增字段时四个 meta.yaml 模板（config/meta.yaml 与三个 {soc}/meta.yaml）、WebUI
+/// 的 META_FIELDS 与 chiri::config::Meta / Config::load 的外部覆盖合并必须同步**：
+/// 全必填意味着漏改一处就会让整个文件判非法、用户设置一起丢。
 // [external_meta]
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -698,6 +702,14 @@ struct MetaYamlFile {
     scenemode_enabled: bool,
     /// 线程摆放总开关（affinity + core_ctl），详见 ExternalMetaOverrides
     thread_bind: bool,
+    /// 功耗口径开关（PowerAVG.chr），详见 ExternalMetaOverrides
+    power_avg: bool,
+    /// 「不改」开关（可选字段，模板不写）：详见 ExternalMetaOverrides
+    #[serde(default)]
+    nofix: bool,
+    /// 耗电读数满量程 W（可选字段，默认 12）：详见 ExternalMetaOverrides
+    #[serde(default = "crate::utils::default_power_max_w")]
+    power_max_w: f32,
 }
 
 /// 磁盘 meta.yaml 校验通过后交给 Config::load 的覆盖值（全字段必有效）。
@@ -714,6 +726,18 @@ pub struct ExternalMetaOverrides {
     /// `Affinity.enabled` / `CoreCtl.enabled` 取「与」——任一为假即视为关闭线程功能，
     /// 见 chiri/config.rs::Config::load。
     pub thread_bind: bool,
+    /// 功耗口径开关（PowerAVG.chr）：false（默认）= 参考值（每次与上次取半递推，
+    /// 偏近期）；true = 累计平均值（等权全史）。daemon 只在 ChiRi 的 1s 状态采样里
+    /// 消费（Yumi 无效）；写侧走「单次读-改-写」顶层行替换，见 WebUI contract/meta.ts。
+    pub power_avg: bool,
+    /// 「不改」开关（meta.yaml 可选字段 `nofix`，默认 false，且默认不写进配置）：
+    /// true = 启动时跳过所有「二进制内容对外部文件的覆盖类操作」——webui 资产还原
+    /// （webui_asset::restore_webroot）与 meta.yaml 快照自愈（sync_meta_snapshot）。
+    /// 用户自担文件被篡改的风险；rhine 实验（用户主动开启）与 WebUI 写入不受影响。
+    pub nofix: bool,
+    /// 耗电读数满量程 W（meta.yaml `power_max_w`，可选字段，默认 12）：只影响 WebUI
+    /// 状态页仪表盘的进度换算，不参与任何调度决策。
+    pub power_max_w: f32,
 }
 
 impl Default for ExternalMetaOverrides {
@@ -725,6 +749,9 @@ impl Default for ExternalMetaOverrides {
             fas_enabled: true,
             scenemode_enabled: true,
             thread_bind: true,
+            power_avg: false,
+            nofix: false,
+            power_max_w: crate::utils::default_power_max_w(),
         }
     }
 }
@@ -734,6 +761,28 @@ impl Default for ExternalMetaOverrides {
 pub fn read_external_meta(path: &Path) -> Option<ExternalMetaOverrides> {
     let text = std::fs::read_to_string(path).ok()?;
     parse_disk_meta(&text)
+}
+
+/// 提前读「不改」开关（meta.yaml 可选字段 `nofix`）：必须在 sync_meta_snapshot 之前
+/// 调用——晚了文件可能已被内嵌默认覆盖（该覆盖本身就是要跳过的操作之一）。
+/// 文件缺失/非法时返回 false（照常自愈）。
+pub fn read_nofix_flag(path: &Path) -> bool {
+    read_external_meta(path).map(|m| m.nofix).unwrap_or(false)
+}
+
+// 「不改」进程级标志：main 启动期判定后置位，此后所有覆盖类操作入口（webui 资产
+// 还原、meta/rules 快照自愈，含热重载路径）只读这个原子量——高频路径不许读磁盘，
+// 与 FAS_ENABLED 同范式。
+static NOFIX: AtomicBool = AtomicBool::new(false);
+
+/// 记录启动期判定的 nofix 状态（在 read_nofix_flag 之后、任何覆盖类操作之前调用）
+pub fn set_nofix(active: bool) {
+    NOFIX.store(active, Ordering::SeqCst);
+}
+
+/// 是否跳过「二进制内容对外部文件的覆盖类操作」（webui 资产还原 / meta、rules 快照自愈）
+pub fn nofix_active() -> bool {
+    NOFIX.load(Ordering::SeqCst)
 }
 
 /// 嵌入 meta.yaml 的默认覆盖值（编译期内容，构建期断言文件存在，正常必合法）
@@ -779,6 +828,13 @@ fn parse_disk_meta(text: &str) -> Option<ExternalMetaOverrides> {
     if f.name.trim().is_empty() || f.author.trim().is_empty() {
         return None;
     }
+    // 满量程：非有限/非正/超 200 视为写错，回退内嵌默认 12 —— 不判整个文件非法：
+    // 单个数笔误不该连带丢掉用户其它设置（WebUI 写入侧另有 1..=200 校验）
+    let power_max_w = if f.power_max_w.is_finite() && f.power_max_w > 0.0 && f.power_max_w <= 200.0 {
+        f.power_max_w
+    } else {
+        crate::utils::default_power_max_w()
+    };
     Some(ExternalMetaOverrides {
         loglevel: sanitize_loglevel(&f.loglevel)?,
         language: sanitize_language(&f.language)?,
@@ -786,6 +842,9 @@ fn parse_disk_meta(text: &str) -> Option<ExternalMetaOverrides> {
         fas_enabled: f.fas_enabled,
         scenemode_enabled: f.scenemode_enabled,
         thread_bind: f.thread_bind,
+        power_avg: f.power_avg,
+        nofix: f.nofix,
+        power_max_w,
     })
 }
 

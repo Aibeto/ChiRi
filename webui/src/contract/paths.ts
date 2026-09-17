@@ -34,6 +34,8 @@ export const REL = {
   rhineBack: 'rhine-back.chr',
   /** DOWN 停摆状态（对外暴露，可手改；写了 down = 调度停摆） */
   down: 'down.chr',
+  /** 功耗参考/平均值（daemon 每次 1s 采样更新，WebUI 只读展示） */
+  powerAvg: 'PowerAVG.chr',
   moduleProp: 'module.prop',
   actionSh: 'action.sh',
   daemonLog: 'logs/daemon.log',
@@ -41,7 +43,9 @@ export const REL = {
   statusCsvBak: 'logs/status.csv.1',
   watchdogPid: 'logs/watchdog.pid',
   devimpDir: 'devimp',
-  logdDir: 'logd'
+  logdDir: 'logd',
+  /** 外部打包脚本（对外暴露的稳定接口，守护进程归档与 WebUI 导出共用、不得修改） */
+  packSh: 'scripts/pack.sh'
 } as const
 
 export type RelKey = keyof typeof REL

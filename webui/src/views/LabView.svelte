@@ -65,8 +65,8 @@
   })
 </script>
 
-<div class="stack">
-  <header class="bar">
+<div class="u-stack">
+  <header class="bar u-row">
     <button type="button" class="ak-button btn btn--ghost bar__back" onclick={() => go('config')}>
       <span class="bar__arrow" aria-hidden="true">←</span>
       {t('lab.action.back')}
@@ -78,7 +78,7 @@
     <StateBox kind="missing" message={t('state.notApplicable')} detail={t('state.chiriOnly')} />
   {:else}
     <Panel signal="action" title={t('lab.subtitle')}>
-      <ul class="notice">
+      <ul class="u-notice">
         <li>{t('lab.notice.stability')}</li>
         <li>{t('lab.notice.reboot')}</li>
         <li>{t('lab.notice.effects')}</li>
@@ -114,7 +114,7 @@
             data-active={current === key ? 'yes' : undefined}
             data-reserved={enableable(key) ? undefined : 'yes'}
           >
-            <div class="mode__head">
+            <div class="u-between">
               <h3 class="mode__name">{t(`lab.mode.${key}`)}</h3>
               {#if current === key}
                 <span class="ak-tag mode__tag" data-state="on">{t('lab.status.on')}</span>
@@ -124,7 +124,7 @@
                 <span class="ak-tag ak-tag--neutral mode__tag">{t('lab.status.off')}</span>
               {/if}
             </div>
-            <p class="mode__detail">{t(`lab.mode.${key}.detail`)}</p>
+            <p class="u-note">{t(`lab.mode.${key}.detail`)}</p>
 
             {#if current === key}
               <button
@@ -136,7 +136,7 @@
                 {busy ? t('lab.status.busy') : t('lab.action.disable')}
               </button>
               {#if locked}
-                <p class="mode__lock">{t('lab.lock.hint')}</p>
+                <p class="mode__lock u-note">{t('lab.lock.hint')}</p>
               {/if}
             {:else}
               <button
@@ -161,7 +161,7 @@
           <span class="u-mono u-muted"> {app.modeInfo.id || '—'}</span>
         </span>
       </div>
-      <p class="hint">{t('lab.current.hint')}</p>
+      <p class="u-note u-mt-3">{t('lab.current.hint')}</p>
     </Panel>
   {/if}
 </div>
@@ -180,17 +180,6 @@
 />
 
 <style>
-  .stack {
-    display: grid;
-    gap: var(--ak-space-4);
-  }
-
-  .bar {
-    display: flex;
-    align-items: center;
-    gap: var(--ak-space-3);
-  }
-
   .bar__back {
     padding: 0 var(--ak-space-3);
   }
@@ -206,33 +195,7 @@
     letter-spacing: 0.04em;
   }
 
-  /* 提示词：暖黄竖条 + 低饱和底，警示但不抢正文。不用 .ak-notice —— 那是浅色底，
-   * 深色主题下要整块重绘，不如直接用 token 拼。 */
-  .notice {
-    margin: 0;
-    padding: 0;
-    list-style: none;
-    display: grid;
-    gap: 0.5rem;
-  }
-
-  .notice li {
-    position: relative;
-    padding-left: var(--ak-space-3);
-    color: var(--ak-text-secondary);
-    font-size: 0.8125rem;
-    line-height: 1.6;
-  }
-
-  .notice li::before {
-    position: absolute;
-    top: 0.4em;
-    left: 0;
-    width: 2px;
-    height: 0.85em;
-    content: '';
-    background: var(--ak-signal-action);
-  }
+  /* 须知清单整体走全局 .u-notice（与总览页导出须知同一份） */
 
   .modes {
     display: grid;
@@ -259,13 +222,6 @@
     background: var(--ak-surface-panel);
   }
 
-  .mode__head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: var(--ak-space-2);
-  }
-
   .mode__name {
     margin: 0;
     font-size: 0.9375rem;
@@ -283,35 +239,20 @@
     border-color: color-mix(in srgb, var(--ak-signal-danger) 55%, transparent);
   }
 
-  .mode__detail {
-    margin: 0;
-    color: var(--ak-text-secondary);
-    font-size: 0.75rem;
-    line-height: 1.5;
-  }
-
   /* 命中区保持 .btn 的 44px（--ak-density-control-height），不要在这里收 */
   .mode__action {
     justify-self: start;
     margin-top: 0.35rem;
   }
 
+  /* 文字样式来自 .u-note，这里只补色调（警示色而非次要色）与上间距 */
   .mode__lock {
     margin: 0.35rem 0 0;
     color: var(--ak-signal-action);
-    font-size: 0.6875rem;
-    line-height: 1.5;
   }
 
   .mode[data-reserved='yes'] .mode__action {
     opacity: 0.55;
-  }
-
-  .hint {
-    margin: var(--ak-space-3) 0 0;
-    color: var(--ak-text-secondary);
-    font-size: 0.6875rem;
-    line-height: 1.6;
   }
 
   @media (min-width: 40rem) {

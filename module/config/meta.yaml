@@ -1,5 +1,5 @@
 # meta.yaml: [meta] 用户可修改的抬头字段（守护进程逐字段严格校验）
-# 八个字段必须齐全；loglevel 限 OFF/ERROR/WARN/INFO/DEBUG/TRACE，language 限 en/zh。
+# 九个字段必须齐全；loglevel 限 OFF/ERROR/WARN/INFO/DEBUG/TRACE，language 限 en/zh。
 # 任一字段非法时，daemon 启动/热重载会用二进制内嵌默认整体覆盖本文件并在末尾追加警告注释。
 # 修改保存后热重载即时生效。
 name: "default_config"
@@ -15,3 +15,8 @@ dev_record: false
 fas_enabled: true
 scenemode_enabled: true
 thread_bind: true
+# 功耗口径（PowerAVG.chr，仅 ChiRi）：false = 参考值（相邻两值取半递推，偏近期）；
+#                                   true  = 累计平均值（等权全史）。热重载即时生效。
+power_avg: false
+# 耗电读数满量程（W，WebUI 状态页仪表盘用；可选，默认 12）：只影响显示，不参与调度。
+power_max_w: 12
