@@ -1,4 +1,4 @@
-//! main.rs: [daemonize] [env_init] [soc_check] [config_path] [lang_logger] [channels] [scheduler_start] [monitor_start] [suspend]
+//! main.rs: [daemonize] [env_init] [soc_check] [config_path] [lang_logger] [channels] [live_time] [scheduler_start] [monitor_start] [suspend]
 
 mod chiri;
 mod common;
@@ -344,6 +344,20 @@ fn main() -> Result<()> {
         )
     );
     info!("{}", t("chiri-module-starting"));
+
+    // [live_time]
+    // 心跳线程：每 15s 把当前本地时间（MM:SS）写模块根 LiveTime.chr，WebUI 刷新时
+    // 比对差值（容差 20s）判定调度是否在跑——取代此前的 flock 探测：不再依赖
+    // toybox 是否带 flock applet，也不会在探测命令不可用时退化成「无法判定」。
+    // 语义仍是**进程级存活**（与 flock 判据一致）：独立线程而非搭调度循环，两套
+    // 调度器（chiri / yumi）共用同一心跳，进程被信号杀死/看门狗没拉起都会停写。
+    // 循环永不 panic、写失败静默（logger::write_live_time 内部吞错）。
+    thread::Builder::new()
+        .name("live_time".to_string())
+        .spawn(|| loop {
+            logger::write_live_time();
+            thread::sleep(std::time::Duration::from_secs(logger::LIVE_TIME_INTERVAL_SECS));
+        })?;
 
     // [channels]
     // 5. 创建通信通道（有界：容量 64，满时 send 阻塞形成背压，防止事件无限积压；

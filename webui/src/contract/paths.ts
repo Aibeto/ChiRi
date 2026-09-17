@@ -20,9 +20,9 @@ export function setModuleRootForTest(root: string | null): void {
 }
 
 // [rel]
-/** 与守护进程约定的相对路径（见计划文档“接触点”表） */
+/** 与守护进程约定的相对路径（见计划文档“接触点”表）。daemon.lock 不在其中：
+ * 它是守护进程自持的单实例锁，WebUI 不读写（存活判据走 LiveTime.chr 心跳）。 */
 export const REL = {
-  daemonLock: 'daemon.lock',
   activeConfig: 'active_config.chr',
   currentMode: 'current_mode.chr',
   rules: 'rules.yaml',
@@ -36,6 +36,8 @@ export const REL = {
   down: 'down.chr',
   /** 功耗参考/平均值（daemon 每次 1s 采样更新，WebUI 只读展示） */
   powerAvg: 'PowerAVG.chr',
+  /** 存活心跳（daemon 每 15s 写一次本地时间 MM:SS，WebUI 只读、用于判定调度是否在跑） */
+  liveTime: 'LiveTime.chr',
   moduleProp: 'module.prop',
   actionSh: 'action.sh',
   daemonLog: 'logs/daemon.log',

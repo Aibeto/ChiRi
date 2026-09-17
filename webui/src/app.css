@@ -332,6 +332,13 @@ label {
   color: var(--ak-text-secondary);
 }
 
+/* 眉头字（CONFIRM / DANGER）：上游固定用 --ak-dialog-info（信息蓝），与弹层自己的
+ * 信号色（左侧竖条 = --ak-dialog-signal，危险弹层由组件内联注入危险色）不一致——
+ * 「红条 + 蓝字」。改为跟随弹层信号：CONFIRM 暖黄、DANGER 危险红。 */
+[data-ak-ui] .ak-dialog__eyebrow {
+  color: var(--ak-dialog-signal);
+}
+
 /* ak-status（LiveStatus 顶栏芯片）：与顶栏按钮同规格——官方 min-height 走 content-box，
  * 叠上 padding 会撑成 63px（实测），这里改 border-box + 纯水平内距；align-content
  * 居中是必须的：官方两行网格会把拉伸的多余高度分给信号条所在的空行，文字会上浮 */
@@ -369,6 +376,19 @@ label {
 [data-ak-ui] .ak-segmented__item[aria-checked='true'] {
   color: var(--ak-text-inverse);
   background: var(--ak-segmented-signal);
+}
+
+/* 横向滑动变体（项目侧钩子 data-ak-scroll，不是上游修饰类）：项多时（如日志级别
+ * TRACE/DEBUG/INFO/WARN/ERROR 五档）窄屏会被压到看不清，改成「项按内容宽度排、
+ * 整条左右滑」——官方只处理了「窄屏铺满」，没有滑动档位。 */
+[data-ak-ui] .ak-segmented[data-ak-scroll] {
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+}
+
+[data-ak-ui] .ak-segmented[data-ak-scroll] .ak-segmented__item {
+  flex: 0 0 auto;
+  min-width: auto;
 }
 
 /* ak-choice（ToggleField 开关）：官方是浅色表单 → 轨道/旋钮/选中色换 token */

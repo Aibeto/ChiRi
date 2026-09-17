@@ -3,7 +3,6 @@
 // 并保证「读失败」与「不适用」在界面上是不同的表达。
 import {
   hasActionScript,
-  hasFlock,
   probeLiveness,
   stopScheduler,
   type DaemonState
@@ -71,7 +70,6 @@ class AppStore {
   // [overview]
   daemonState = $state<DaemonState>('unknown')
   daemonError = $state('')
-  flockAvailable = $state(true)
   currentMode = $state('')
   modeInfo = $state<ModeInfo>(describeMode(''))
   modeMissing = $state(false)
@@ -196,9 +194,8 @@ class AppStore {
     this.loading = true
     this.overviewJob = (async () => {
       try {
-      const [live, flock, modeRaw, tunedRaw, fasRaw, actionOk, powerAvg] = await Promise.all([
+      const [live, modeRaw, tunedRaw, fasRaw, actionOk, powerAvg] = await Promise.all([
         probeLiveness(),
-        hasFlock(),
         readCurrentModeRaw(),
         readSpecialTunedRaw(),
         readFasWhitelistRaw(),
@@ -206,7 +203,6 @@ class AppStore {
         readPowerAvg()
       ])
 
-      this.flockAvailable = flock
       if (live.kind === 'ok') {
         this.daemonState = live.value
         this.daemonError = ''

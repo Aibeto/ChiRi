@@ -9,7 +9,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 
@@ -33,12 +33,90 @@ pub fn write_to_file<P: AsRef<Path>, C: AsRef<[u8]>>(path: P, content: C) -> Res
     Ok(())
 }
 
-// 尝试写入内容 (不抛出错误，只记录警告)
+// 尝试写入内容 (不抛出错误，只记录告警)
 pub fn try_write_file<P: AsRef<Path>, C: AsRef<[u8]>>(path: P, content: C) -> Result<()> {
     if let Err(e) = write_to_file(path.as_ref(), content) {
-        log::warn!("Failed to write to {}: {}.", path.as_ref().display(), e);
+        // ENOENT = 节点/目录不存在（这个内核或机型没有该调优节点），不是写入失败：
+        // 降到 debug，避免周期性 apply 每轮刷一条 warn（实例：
+        // /dev/cpuctl/restricted/cpu.uclamp.max 在部分机型不存在）
+        let not_found = e
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound);
+        if not_found {
+            log::debug!(
+                "write skipped (node missing): {}",
+                path.as_ref().display()
+            );
+        } else {
+            log::warn!("Failed to write to {}: {}.", path.as_ref().display(), e);
+        }
     }
     Ok(())
+}
+
+// [nodes]
+/// 「多节点写入」的失效告警去重表：`what` 进入「全部节点不可用」态时记一条，
+/// 任一节点写成功即移除（重新武装）——1~2s 热路径每轮打 warn 会刷屏。
+static NODE_FAIL_WARNED: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
+
+/// 多节点写入：同一功能写到多个候选/同类节点（不同机型可用节点不同——cgroup 组、
+/// cpufreq policy、`/sys/block` 设备、跨厂商候选节点等）。
+///
+/// 日志口径（用户要求，2026-09-18）：
+/// - 单个节点失败 → `debug`：机型/内核没有该节点是常态，不是故障；
+/// - **全部**节点失败 → `warn`：该功能在这些节点上整体不可用，每个 `what` 只在
+///   进入失效态时打一条（写成功即复位，见 [`NODE_FAIL_WARNED`]）；
+/// - 非「节点缺失」类错误（权限 / IO）就地 `warn` 一条，不等全失败才报。
+///
+/// 返回成功写入的节点路径（空 = 全部失败；调用方需要「用了哪个候选」时可直接用）。
+/// **刻意不做存在性预判**：写入失败本身就是「该节点不可用」的权威证据，预判既会与
+/// 真实情况脱节，也会把本该留痕的失败吞掉。
+pub fn write_nodes(items: &[(String, String)], what: &'static str) -> Vec<String> {
+    let mut written: Vec<String> = Vec::new();
+    let mut last_err: Option<String> = None;
+    for (path, value) in items {
+        match write_to_file(path, value) {
+            Ok(()) => written.push(path.clone()),
+            Err(e) => {
+                if is_node_missing(&e) {
+                    log::debug!("[{what}] node missing, skipped: {path}");
+                } else {
+                    log::warn!("[{what}] write failed: {path} — {e}");
+                }
+                last_err = Some(e.to_string());
+            }
+        }
+    }
+    if !written.is_empty() {
+        clear_node_fail_warned(what);
+    } else if let Some((first, _)) = items.first() {
+        warn_all_nodes_failed(what, items.len(), first, last_err.as_deref());
+    }
+    written
+}
+
+/// 节点/目录不存在（ENOENT / ENOTDIR）：属「这台机型没有该节点」，按 debug 记
+fn is_node_missing(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<std::io::Error>().is_some_and(|io| {
+        io.kind() == std::io::ErrorKind::NotFound || io.raw_os_error() == Some(20)
+    })
+}
+
+fn warn_all_nodes_failed(what: &'static str, count: usize, first: &str, last_err: Option<&str>) {
+    let mut warned = NODE_FAIL_WARNED.lock().unwrap_or_else(|e| e.into_inner());
+    if warned.contains(&what) {
+        return;
+    }
+    warned.push(what);
+    log::warn!(
+        "[{what}] all {count} node(s) unavailable (first: {first}, last error: {})",
+        last_err.unwrap_or("unknown")
+    );
+}
+
+fn clear_node_fail_warned(what: &'static str) {
+    let mut warned = NODE_FAIL_WARNED.lock().unwrap_or_else(|e| e.into_inner());
+    warned.retain(|k| *k != what);
 }
 
 pub fn enable_perm<P: AsRef<Path>>(path: P) -> Result<()> {

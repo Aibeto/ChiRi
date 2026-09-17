@@ -117,7 +117,7 @@
             <div class="u-between">
               <h3 class="mode__name">{t(`lab.mode.${key}`)}</h3>
               {#if current === key}
-                <span class="ak-tag mode__tag" data-state="on">{t('lab.status.on')}</span>
+                <span class="ak-tag ak-tag--danger mode__tag">{t('lab.status.on')}</span>
               {:else if !enableable(key)}
                 <span class="ak-tag ak-tag--neutral mode__tag">{t('lab.status.reserved')}</span>
               {:else}
@@ -229,14 +229,12 @@
     letter-spacing: 0.02em;
   }
 
-  /* 只收字号，保留 .ak-tag 自带的高度——状态标签不参与命中区，但也别缩成看不清 */
+  /* 只收字号，保留 .ak-tag 自带的高度——状态标签不参与命中区，但也别缩成看不清。
+     「启用中」的配色来自官方 .ak-tag--danger（信号条 + 描边 + 文字一起走危险色），
+     此前只改了描边 → 红框配蓝信号条，颜色不成套 */
   .mode__tag {
     flex: 0 0 auto;
     font-size: 0.6875rem;
-  }
-
-  .mode__tag[data-state='on'] {
-    border-color: color-mix(in srgb, var(--ak-signal-danger) 55%, transparent);
   }
 
   /* 命中区保持 .btn 的 44px（--ak-density-control-height），不要在这里收 */

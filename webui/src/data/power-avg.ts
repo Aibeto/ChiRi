@@ -1,6 +1,7 @@
 // power-avg.ts: [parse]
 // PowerAVG.chr 解析（模块根）。守护进程 src/logger.rs::power_avg_update 每 1s 采样
-// 写一行数字（保留两位小数）。口径由 meta.yaml 的 `power_avg` 决定：
+// 写一行数字（保留两位小数），**仅电池放电时计入**（插电/充满/未充电时跳过，文件
+// 保留上次放电得出的值）。口径由 meta.yaml 的 `power_avg` 决定：
 // false = 参考值（与上次取半递推，偏近期）、true = 累计平均值（等权全史）——
 // 文件内容只存值、不存口径，界面按 meta 的开关标注。
 

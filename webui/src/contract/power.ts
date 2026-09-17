@@ -1,5 +1,5 @@
 // power.ts: [read]
-// PowerAVG.chr 只读契约（模块根）。文件由守护进程写（每次 1s 采样）、WebUI 只读
+// PowerAVG.chr 只读契约（模块根）。文件由守护进程写（1s 采样，仅电池放电时计入）、WebUI 只读
 // 展示：不存在（daemon 未跑过 / Yumi 无此功能）与空文件统一归一为「无值」
 // （watt = null），界面显示 ———不是错误；只有环境不可用才报 failed。
 import { absOf } from './paths'

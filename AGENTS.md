@@ -158,7 +158,9 @@ cd webui && npm test
 
 - 功耗口径开关（meta.yaml `power_avg`，默认 false，2026-09-18 加）：控制 ChiRi 1s 状态采样写模块根 `PowerAVG.chr` 的口径——false = 参考值（(旧值+新值)/2 取半递推，偏近期）；true = 累计平均（(旧值×次数+新值)/(次数+1)，等权全史）。计算紧跟在 status.csv 行写入之后**顺序**执行（`logger::power_avg_update`，不另起并行）；留存值/次数是 logger 的进程级静态（调度线程 panic 重启不丢、daemon 重启清零；文件只是输出记录、不读回）。WebUI 高级设置直写该字段（不走草稿，写后立即热重载），状态页第一卡片右侧按当前口径读 PowerAVG.chr 展示（缺失/空显示 —）。配套 `power_max_w`（meta.yaml 可选字段，默认 12，写入侧限 0–200）：状态页耗电仪表盘（官方 ak-gauge，进度环 = 当前值/满量程）的换算基准，**只在 meta.yaml 手改**（高级设置不提供输入框）；daemon 不参与换算、仅透传配置。
 
-- 对外暴露审计（落盘最小化）：磁盘只保留有外部读取方的文件——meta.yaml（WebUI 读写）、rhine.chr（WebUI 读写 + 用户手改）、down.chr（WebUI 读写 + 用户手改，DOWN 停摆状态）、rhine-back.chr（daemon 写、WebUI 只读展示）、PowerAVG.chr（daemon 写、WebUI 只读展示，功耗参考/平均）、rules.yaml / fas_whitelist.yaml / special_tuned.yaml / current_mode.chr / active_config.chr（WebUI 只读）。feature.yaml、normal/tuned_profiles.yaml、normal/scenemode.yaml、normal/fas\*.yaml、**rhine-init.yaml** 无任何读取方：不落盘、不监听，xtask 打包时从模块包移除（仅存于二进制）；customize.sh 热更新备份/恢复只针对 meta.yaml。i18n ftl 仅嵌入消费，暂仍随包（后续可同样移除）。
+- 对外暴露审计（落盘最小化）：磁盘只保留有外部读取方的文件——meta.yaml（WebUI 读写）、rhine.chr（WebUI 读写 + 用户手改）、down.chr（WebUI 读写 + 用户手改，DOWN 停摆状态）、rhine-back.chr（daemon 写、WebUI 只读展示）、PowerAVG.chr（daemon 写、WebUI 只读展示，功耗参考/平均）、LiveTime.chr（daemon 写、WebUI 只读展示，存活心跳）、rules.yaml / fas_whitelist.yaml / special_tuned.yaml / current_mode.chr / active_config.chr（WebUI 只读）。feature.yaml、normal/tuned_profiles.yaml、normal/scenemode.yaml、normal/fas\*.yaml、**rhine-init.yaml** 无任何读取方：不落盘、不监听，xtask 打包时从模块包移除（仅存于二进制）；customize.sh 热更新备份/恢复只针对 meta.yaml。i18n ftl 仅嵌入消费，暂仍随包（后续可同样移除）。
+
+- 存活心跳（LiveTime.chr，2026-09-18 重写判据）：daemon 侧 `logger::write_live_time` 由 main.rs 的独立线程 `live_time` 每 `LIVE_TIME_INTERVAL_SECS`(15s) 写一次当前**本地时间** `MM:SS`（原子写、失败静默）——不搭任一调度循环：两套调度器（chiri / yumi）共用同一心跳，语义是**进程级存活**（与旧 flock 判据一致，调度线程卡死不带停心跳）。WebUI 侧 `contract/daemon.ts::probeLiveness` 读该文件并与本机时间比差（解析与容差在 `data/live-time.ts`）：差值 > `LIVE_TIME_TOLERANCE_SECONDS`(20s) 判「已停止」，**文件缺失同判**，读失败/内容非法才报错显示「无法判定」。差值按 1 小时取模（文件只有分秒、无小时）——超过半小时的旧值会落进 (1800,3600) 区间，不会被误判成新鲜。取代此前 `flock -n daemon.lock` 探测：不再依赖 toybox 是否带 flock applet（旧实现在缺失时只能显示「无法判定」），也不再需要「取锁后立刻释放」的约束；daemon.lock 仍由 daemon 自持（单实例），WebUI 不再读写它。dev mock 在**读取时刻**动态生成心跳内容（`?daemon=stopped` 写 8 分钟前），静态播种会在预览打开 20s 后自然过期。
 
 - 对外写文件防 panic：新增的 `common::write_file_no_panic`（tmp + rename，失败回退 try_write_file）全程无 unwrap/expect；`sync_rules_snapshot` 写失败时补建父目录重写一次，重写仍无效则 warn 并直接跳过——**任何对外文件写入都不允许 panic 击穿启动流程**，`sync_meta_snapshot` 同口径。
 
@@ -210,7 +212,7 @@ cd webui && npm test
 
 ### WebUI
 
-- 分层（上层只依赖下层接口）：`kernel/ksu.ts`（原生注入的 ksu.\* 桥，逐 API 能力探测、缺失时降级）→ `kernel/shell.ts`（可注入 `ShellRunner`，dev 预览与单测注入 `dev/mock-shell.ts`）→ `contract/`（paths 路径安全校验 / read 三分类读取 / meta 读写 / **lab 实验室读写** / daemon flock 存活探测与关闭调度 / sources 设备形态与只读源）→ `data/`（纯解析：status-csv 22 列、daemon-log、mode、whitelists、rules、apps、**lab**）→ `views/` 四屏 + 二级页。不硬编码路径；读配置前先读 `active_config.chr` 确定实际生效文件（`contract/sources.ts`）。
+- 分层（上层只依赖下层接口）：`kernel/ksu.ts`（原生注入的 ksu.\* 桥，逐 API 能力探测、缺失时降级）→ `kernel/shell.ts`（可注入 `ShellRunner`，dev 预览与单测注入 `dev/mock-shell.ts`）→ `contract/`（paths 路径安全校验 / read 三分类读取 / meta 读写 / **lab 实验室读写** / daemon 心跳（LiveTime.chr）存活探测与关闭调度 / sources 设备形态与只读源）→ `data/`（纯解析：status-csv 22 列、daemon-log、mode、whitelists、rules、apps、**lab**）→ `views/` 四屏 + 二级页。不硬编码路径；读配置前先读 `active_config.chr` 确定实际生效文件（`contract/sources.ts`）。
 
 - 路由分两级（`router.svelte.ts`）：`VIEW_IDS` 四项进底部导航，二级视图（当前只有 `lab` 实验室，从配置页底部进入）不占导航位但同样有 hash（`#/lab`），刷新与后退行为一致；导航高亮用 `navOwner()` 回落到父视图（`SUB_OF`）。新增二级页要同时改 `RouteId`、`ROUTE_IDS`、`SUB_OF` 与 `App.svelte` 的视图分支。
 

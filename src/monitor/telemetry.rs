@@ -42,6 +42,13 @@ static TELEMETRY: Telemetry = Telemetry {
 /// BCC 字段不可用告警去重（一次运行一条，避免 1s 轮询刷屏）
 static BCC_UNUSABLE_WARNED: AtomicBool = AtomicBool::new(false);
 
+/// 电池电流/电压候选节点（OPlus BCC + 标准节点）**全部**读不到时的告警去重：
+/// 进入失效态报一条，恢复正常即重新武装（与 `utils::write_nodes` 同口径）
+static BATT_UNAVAIL_WARNED: AtomicBool = AtomicBool::new(false);
+
+/// GPU 利用率候选节点全部不存在时的告警去重（只报一次）
+static GPU_UNAVAIL_WARNED: AtomicBool = AtomicBool::new(false);
+
 /// 取进程级遥测快照
 pub fn telemetry() -> &'static Telemetry {
     &TELEMETRY
@@ -202,11 +209,16 @@ pub fn telemetry_loop() {
         }
 
         // --- GPU busy% ---
+        // 候选节点（Adreno kgsl → MTK GED）全部不存在 = 该机型没有可读节点：
+        // 一条 warn 说明「GPU 列恒为 -」是机型限制而非读取故障（1s 轮询只报一次）
         if gpu_path.is_none() {
             gpu_path = gpu_candidates
                 .iter()
                 .copied()
                 .find(|p| std::path::Path::new(p).exists());
+            if gpu_path.is_none() && !GPU_UNAVAIL_WARNED.swap(true, Ordering::Relaxed) {
+                log::warn!("{}", crate::i18n::t("telemetry-gpu-unavailable"));
+            }
         }
         if let Some(p) = gpu_path {
             let busy = std::fs::read_to_string(p)
@@ -225,6 +237,15 @@ pub fn telemetry_loop() {
                 read_i32("/sys/class/power_supply/battery/voltage_now").unwrap_or(UNAVAIL),
             ),
         };
+        // 候选全失效（BCC 与标准节点都读不到）报一条 warn，恢复后重新武装：
+        // 逐候选失败不单独打点——1s 轮询下那是刷屏，读不到的价值由这条汇总体现
+        if current == UNAVAIL || voltage == UNAVAIL {
+            if !BATT_UNAVAIL_WARNED.swap(true, Ordering::Relaxed) {
+                log::warn!("{}", crate::i18n::t("telemetry-battery-unavailable"));
+            }
+        } else {
+            BATT_UNAVAIL_WARNED.store(false, Ordering::Relaxed);
+        }
         TELEMETRY.batt_current_ua.store(current, Ordering::Relaxed);
         TELEMETRY.batt_voltage_uv.store(voltage, Ordering::Relaxed);
 

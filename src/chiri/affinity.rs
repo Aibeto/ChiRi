@@ -36,7 +36,7 @@
 /// 线程 comm 命中不迁移；后台 promote 前读一次进程 cmdline 校验并缓存。
 use crate::chiri::config::AffinityConfig;
 use crate::utils::SysPathExist;
-use log::{debug, info, warn};
+use log::{debug, info};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -70,6 +70,18 @@ const BACKGROUND_GROUPS: [&str; 3] = ["background", "system-background", "restri
 /// 后台（媒体/音频等服务，画中画、后台播放等可感知场景），降权可能伤到"看着能
 /// 感知"的体验；只压纯应用后台与受限组
 const BG_DEMOTE_GROUPS: [&str; 2] = ["background", "restricted"];
+
+/// 写后台组的 `cpu.uclamp.max`：**候选组逐个写、不去预判存在性**——Android 的
+/// restricted 组由 init 按需创建（部分机型没有，或运行期才出现），写入失败本身
+/// 就是「该组不可用」的权威证据；预判会让日志与真实情况脱节，也把失败吞掉。
+/// 日志口径见 `utils::write_nodes`：单组失败 debug、全组失败 warn（一次）。
+fn write_bg_uclamp_max(val: &str) {
+    let items: Vec<(String, String)> = BG_DEMOTE_GROUPS
+        .iter()
+        .map(|g| (format!("/dev/cpuctl/{g}/cpu.uclamp.max"), val.to_string()))
+        .collect();
+    let _ = crate::utils::write_nodes(&items, "bg-uclamp-max");
+}
 
 const REBALANCE_INTERVAL: Duration = Duration::from_secs(2);
 /// 单轮最多深扫的后台候选线程数
@@ -177,14 +189,22 @@ fn read_cpuset_cpus(group: &str) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-fn write_cpuset_cpus(group: &str, value: &str) {
-    let path = format!("/dev/cpuset/{}/cpus", group);
-    if crate::utils::try_write_file(&path, value).is_err() {
-        warn!(
-            "{}",
-            t_with_args("affinity-write-failed", &fluent_args!("path" => path))
-        );
-    }
+/// 批量写 cpuset 组的 cpus（键 = 组名）：组是「同类多节点」（不同机型/框架暴露
+/// 的组不同）。日志口径见 `utils::write_nodes`——单组失败 debug、**全部**组失败才 warn。
+fn write_cpuset_cpus_items(items: &[(String, String)]) {
+    let nodes: Vec<(String, String)> = items
+        .iter()
+        .map(|(group, value)| (format!("/dev/cpuset/{group}/cpus"), value.clone()))
+        .collect();
+    // 独立的告警键（cpuset-cpus vs cpuset-restore）：两者是不同的操作，共用一键会让
+    // 「一边写成功」清掉「另一边全失败」的记录 → 2s 热路径反复报同一条 warn
+    let _ = crate::utils::write_nodes(&nodes, "cpuset-cpus");
+}
+
+/// 批量写 cpuset（键 = **完整节点路径**）：快照回写用（快照记的就是路径）。
+/// 单点失败 debug、全部失败 warn——恢复期最怕「全都没写回去」还毫无痕迹。
+fn write_cpuset_paths_items(items: &[(String, String)]) {
+    let _ = crate::utils::write_nodes(items, "cpuset-restore");
 }
 
 /// 读 cpuset 组 tasks（返回组内全部 TID），替代 /proc 全量枚举
@@ -241,6 +261,7 @@ fn parse_cpu_list(s: &str) -> Vec<usize> {
 /// 防止框架重写 top-app 后的中间值覆盖真实原始值）；周期重入用于纠偏——
 /// 框架 CpusetManager 可能把保留核加回 top-app，每 2s 重写一次。
 pub(crate) fn exclude_core_from_cpusets(core: usize, snapshot: &mut Vec<(String, String)>) {
+    let mut writes: Vec<(String, String)> = Vec::new();
     for group in RESERVED_EXCLUDE_GROUPS {
         let Some(cur) = read_cpuset_cpus(group) else {
             continue;
@@ -254,24 +275,25 @@ pub(crate) fn exclude_core_from_cpusets(core: usize, snapshot: &mut Vec<(String,
         if new == cur {
             continue;
         }
-        write_cpuset_cpus(group, &new);
+        writes.push((group.to_string(), new));
         if !snapshot.iter().any(|(g, _)| g == group) {
             snapshot.push((group.to_string(), cur));
         }
     }
+    // 组间无先后依赖：一次批量写（单组失败 debug、全组失败 warn）
+    write_cpuset_cpus_items(&writes);
 }
 
 /// 恢复 exclude_core_from_cpusets 快照（退出 scenemode 时把保留核还给业务组）
 pub(crate) fn restore_excluded_cpusets(snapshot: Vec<(String, String)>) {
-    for (group, cpus) in snapshot {
-        write_cpuset_cpus(&group, &cpus);
-    }
+    write_cpuset_cpus_items(&snapshot);
 }
 
 // [lab_groups]
 /// 实验室静态分组（contingency/babel）：组级写 cpus 并把原值记入快照（每组只记
 /// 一次，防止框架重写后的中间值覆盖真实原始值）。组不存在或写失败则跳过。
 fn set_groups_cpus_tracked(groups: &[&str], value: &str, snapshot: &mut Vec<(String, String)>) {
+    let mut writes: Vec<(String, String)> = Vec::new();
     for group in groups {
         let Some(cur) = read_cpuset_cpus(group) else {
             continue;
@@ -279,8 +301,9 @@ fn set_groups_cpus_tracked(groups: &[&str], value: &str, snapshot: &mut Vec<(Str
         if !snapshot.iter().any(|(g, _)| g == group) {
             snapshot.push((group.to_string(), cur));
         }
-        write_cpuset_cpus(group, value);
+        writes.push((group.to_string(), value.to_string()));
     }
+    write_cpuset_cpus_items(&writes);
 }
 
 /// 小核列表（babel 的后台组）
@@ -714,12 +737,14 @@ impl AffinityManager {
         if boost {
             self.ensure_snapshot();
             if old_kind != KIND_BOOST {
+                let mut writes: Vec<(String, String)> = Vec::new();
                 if self.sys.cpuset_top_app_exist {
-                    write_cpuset_cpus(GROUP_TOP_APP, &boost_list);
+                    writes.push((GROUP_TOP_APP.to_string(), boost_list.clone()));
                 }
                 if self.sys.cpuset_foreground_exist {
-                    write_cpuset_cpus(GROUP_FOREGROUND, &boost_list);
+                    writes.push((GROUP_FOREGROUND.to_string(), boost_list.clone()));
                 }
+                write_cpuset_cpus_items(&writes);
                 self.apply_uclamp(cfg);
                 self.apply_uclamp_max(cfg);
                 self.pin_background(&little_list);
@@ -1740,14 +1765,14 @@ impl AffinityManager {
         if self.lab_static_mode.take().is_none() {
             return;
         }
-        for (group, cpus) in self.lab_group_snapshot.drain(..) {
-            write_cpuset_cpus(&group, &cpus);
-        }
+        let items: Vec<(String, String)> = self.lab_group_snapshot.drain(..).collect();
+        write_cpuset_cpus_items(&items);
     }
 
     //  cgroup 布局 / uclamp / 释放
 
     fn pin_background(&self, little_list: &str) {
+        let mut writes: Vec<(String, String)> = Vec::new();
         for group in BACKGROUND_GROUPS {
             let exist = match group {
                 "background" => self.sys.cpuset_background_exist,
@@ -1755,9 +1780,10 @@ impl AffinityManager {
                 _ => self.sys.cpuset_restricted_exist,
             };
             if exist {
-                write_cpuset_cpus(group, little_list);
+                writes.push((group.to_string(), little_list.to_string()));
             }
         }
+        write_cpuset_cpus_items(&writes);
     }
 
     fn apply_uclamp(&self, cfg: &AffinityConfig) {
@@ -1771,11 +1797,14 @@ impl AffinityManager {
 
     fn restore_foreground_groups(&self) {
         if let Some(snap) = &self.snapshot {
-            for (path, val) in snap {
-                if path.contains(GROUP_TOP_APP) || path.contains(GROUP_FOREGROUND) {
-                    let _ = crate::utils::try_write_file(path, val);
-                }
-            }
+            let items: Vec<(String, String)> = snap
+                .iter()
+                .filter(|(path, _)| {
+                    path.contains(GROUP_TOP_APP) || path.contains(GROUP_FOREGROUND)
+                })
+                .cloned()
+                .collect();
+            write_cpuset_paths_items(&items);
         }
     }
 
@@ -1842,29 +1871,19 @@ impl AffinityManager {
 
     /// 后台组 uclamp.max 降权（每次 apply 调用，幂等）：把 background/restricted
     /// 的 util 需求钳低——EAS 放置与 schedutil 频率随之回落、优先落小核，给 UI/视频
-    /// 让路；**不禁止使用大核**（空闲时仍可被 EAS 调度上去）。节点缺失静默跳过。
+    /// 让路；**不禁止使用大核**（空闲时仍可被 EAS 调度上去）。单组缺失记 debug、
+    /// 全组缺失记 warn（见 write_bg_uclamp_max / utils::write_nodes）。
     fn apply_bg_uclamp_max(&self, cfg: &AffinityConfig) {
         let pct = cfg.background_uclamp_max_pct;
         if pct == 0 {
             return;
         }
-        let val = format!("{pct}.00");
-        for group in BG_DEMOTE_GROUPS {
-            let _ = crate::utils::try_write_file(
-                &format!("/dev/cpuctl/{group}/cpu.uclamp.max"),
-                &val,
-            );
-        }
+        write_bg_uclamp_max(&format!("{pct}.00"));
     }
 
     /// 还原后台组 uclamp.max 为内核默认（"max"）：释放与关闭总闸时调用
     fn restore_bg_uclamp_max(&self) {
-        for group in BG_DEMOTE_GROUPS {
-            let _ = crate::utils::try_write_file(
-                &format!("/dev/cpuctl/{group}/cpu.uclamp.max"),
-                "max",
-            );
-        }
+        write_bg_uclamp_max("max");
     }
 
     fn restore_uclamp_max(&self) {
@@ -1922,9 +1941,7 @@ impl AffinityManager {
             self.cleanup_thread(tid);
         }
         if let Some(snap) = self.snapshot.take() {
-            for (path, val) in &snap {
-                let _ = crate::utils::try_write_file(path, val);
-            }
+            write_cpuset_paths_items(&snap);
         }
         self.restore_uclamp();
         self.restore_uclamp_max();

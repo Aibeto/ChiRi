@@ -424,6 +424,8 @@ static POWER_AVG: Mutex<(f32, u64)> = Mutex::new((0.0, 0));
 ///
 /// `留存次数` 两种模式都累计：切到平均模式时即有历史次数可用。
 /// 功耗缺测（None/非法）时跳过本次（没读到就不算），不写文件。
+/// **取样口径由调用方保证＝仅电池放电**（插电/充满/未充电传 None）：非放电态的跳过
+/// 不推进递推、不改动文件，即文件里始终是「放电」口径的值，充电期间保留上次结果。
 pub fn power_avg_update(power_w: Option<f32>, use_average: bool) {
     let Some(p) = power_w.filter(|v| v.is_finite() && *v >= 0.0) else {
         return;
@@ -442,6 +444,38 @@ pub fn power_avg_update(power_w: Option<f32>, use_average: bool) {
     // 原子写（tmp+rename）：WebUI 每秒读它展示，绝不能读到半截内容
     let path = common::get_module_root().join(POWER_AVG_CHR);
     let _ = common::write_file_no_panic(&path, format!("{:.2}\n", next).as_bytes());
+}
+
+// [live_time]
+/// 心跳文件（模块根，对外暴露、供 WebUI 只读）：每 [`LIVE_TIME_INTERVAL_SECS`]
+/// 秒写一次当前**本地时间** `MM:SS`。WebUI 每次刷新读它并与本机时间比对，差值超过
+/// 容差（20s）即判定调度已关闭（文件缺失/内容非法同判）。
+///
+/// 只写分秒（不含小时/日期）是用户口径：差值按 1 小时取模即可判定新鲜度——心跳
+/// 间隔 15s + 容差 20s 远小于半小时，取模不会把「超过半小时前的旧值」误判为新鲜
+/// （见 WebUI `data/live-time.ts`）。写文件走原子替换（tmp+rename），避免 WebUI
+/// 读到半截内容。
+pub const LIVE_TIME_CHR: &str = "LiveTime.chr";
+
+/// 心跳间隔（秒）：与 WebUI 侧容差常量配套（容差必须 > 它，留满一轮余量）
+pub const LIVE_TIME_INTERVAL_SECS: u64 = 15;
+
+/// 写一次心跳（`MM:SS` + 换行，本地时间）。失败静默：模块根不可写时 WebUI
+/// 自然判定为已关闭，不需要额外告警刷日志。
+pub fn write_live_time() {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let (_, m, s) = local_hms(now.as_secs() as i64).unwrap_or_else(|| {
+        let total = now.as_secs() % 86400;
+        (
+            (total / 3600) as u32,
+            ((total % 3600) / 60) as u32,
+            (total % 60) as u32,
+        )
+    });
+    let path = common::get_module_root().join(LIVE_TIME_CHR);
+    let _ = common::write_file_no_panic(&path, format!("{m:02}:{s:02}\n").as_bytes());
 }
 
 /// 缺失数值的占位

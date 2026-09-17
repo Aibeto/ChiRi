@@ -8,11 +8,14 @@
     items,
     value,
     label = '',
+    scroll = false,
     onselect
   } = $props<{
     items: SegmentedItem[]
     value: string
     label?: string
+    /** 项多 / 窄屏时整条左右滑动（项按内容宽度排列，不再压缩）——样式见 app.css [ak-adapt] */
+    scroll?: boolean
     onselect: (id: string) => void
   }>()
 
@@ -32,6 +35,7 @@
      tabindex=-1：roving tabindex 容器（焦点实际在按钮上，方向键事件冒泡至此） -->
 <div
   class="ak-segmented"
+  data-ak-scroll={scroll || undefined}
   role="radiogroup"
   aria-label={label || undefined}
   tabindex={-1}

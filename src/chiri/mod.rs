@@ -1156,9 +1156,17 @@ pub fn start_scheduler_thread(
                     );
                     // PowerAVG（耗电参考/平均）：紧跟 status 行写入之后**顺序**计算并
                     // 写 PowerAVG.chr（用户口径：计算值直接加在 csv 后，不并行处理）。
-                    // 口径由 meta.power_avg 决定（热重载即时生效）
+                    // **取样口径＝仅电池放电**：插电/充满/未充电时功率由充电链路决定，
+                    // 而 batt_power_w 取的是电流绝对值，计入会把充电功率混进耗电均值；
+                    // 非放电态传 None → 递推整体跳过，文件保留上次放电得出的值。
+                    // 口径开关由 meta.power_avg 决定（热重载即时生效）
+                    let discharge_power_w = if charge_state == "discharging" {
+                        tm.batt_power_w()
+                    } else {
+                        None
+                    };
                     crate::logger::power_avg_update(
-                        tm.batt_power_w(),
+                        discharge_power_w,
                         config_clone.read().unwrap().meta.power_avg,
                     );
                     telemetry_log_counter += 1;

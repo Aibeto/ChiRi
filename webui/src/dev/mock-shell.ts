@@ -165,6 +165,14 @@ function fasWhitelistExport(): string {
   }
 }
 
+/** 心跳内容：daemonRunning 取当前 MM:SS，?daemon=stopped 取 8 分钟前（远超 20s 容差）。
+ *  按**读取时刻**生成（见 handle 的 TAIL 分支）——静态播种会在预览打开 20s 后自然过期。 */
+function liveTimeText(): string {
+  const beat = new Date(Date.now() - (daemonRunning ? 0 : 8 * 60_000))
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${pad(beat.getMinutes())}:${pad(beat.getSeconds())}\n`
+}
+
 function seed(): void {
   mkdir('logs')
   mkdir('devimp')
@@ -190,6 +198,8 @@ function seed(): void {
   if (empty) return
 
   put('current_mode.chr', 'default')
+  // 心跳只为「文件存在」播种，内容在读取时动态生成（见 liveTimeText）
+  put('LiveTime.chr', '')
   // 看门狗 pid 只在 daemon 运行时存在：?daemon=stopped 模拟「已停止」，
   // stopScheduler 会删掉它，这里不播种（否则存活态与 pid 文件互相矛盾）
   if (daemonRunning) put('logs/watchdog.pid', '12345\n')
@@ -226,8 +236,6 @@ function b64decode(input: string): string {
   return new TextDecoder().decode(bytes)
 }
 
-const FLOCK_CMD = /^command -v flock/
-const FLOCK_PROBE = /^flock -n (\S+) true/
 const EXISTS_CMD = /^\[ -e (.+) \] && echo 1 \|\| echo 0$/
 const TAIL_CMD = /^tail -c (\d+) (.+)$/
 const LS_CMD = /^ls -1 (.+)$/
@@ -239,15 +247,9 @@ const EXPORT_START_CMD = /^nohup sh -c /
 const EXPORT_POLL_CMD = /\/sdcard\/Download\/logd_\d{4}-\d{6}\.tar\.gz/
 
 function handle(cmd: string): ExecResult | null {
-  if (FLOCK_CMD.test(cmd)) return ok('1\n')
-
   if (EXPORT_START_CMD.test(cmd)) return ok('started\n')
   // 回放探测命令：直接给「gzip 回退产物已生成」+ 一份进度行，预览里不必等超时
   if (EXPORT_POLL_CMD.test(cmd)) return ok('s:gz\nb:2097152\nd:1\nt:1\n')
-
-  if (FLOCK_PROBE.test(cmd)) {
-    return ok(daemonRunning ? 'HELD\n' : 'FREE\n')
-  }
 
   const exists = EXISTS_CMD.exec(cmd)
   if (exists) {
@@ -263,6 +265,8 @@ function handle(cmd: string): ExecResult | null {
   if (tail) {
     const limit = Number(tail[1])
     const path = unquote(tail[2])
+    // 心跳按读取时刻生成：让预览里的「运行中/已停止」随时间自然成立
+    if (path.endsWith('/LiveTime.chr')) return ok(liveTimeText())
     const content = files.get(path)
     if (content === undefined) return missing()
     return ok(content.slice(-limit))

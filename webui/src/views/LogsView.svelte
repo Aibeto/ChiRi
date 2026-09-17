@@ -18,8 +18,10 @@
     { id: 'status', label: t('logs.source.status') }
   ])
 
+  // 档位名与 daemon.log 里的级别字面量一致：最宽的一档就是 TRACE（不设阈值 = 显示全部，
+  // 旧文案「全部/ALL」不体现这一点，用户要求直接叫 TRACE）
   const levelItems = $derived([
-    { id: 'TRACE', label: t('logs.level.all') },
+    { id: 'TRACE', label: 'TRACE' },
     { id: 'DEBUG', label: 'DEBUG' },
     { id: 'INFO', label: 'INFO' },
     { id: 'WARN', label: 'WARN' },
@@ -124,7 +126,13 @@
     {#if source === 'daemon'}
       <div class="ak-field u-mt-3">
         <span class="ak-label">{t('logs.level')}</span>
-        <Segmented items={levelItems} value={level} onselect={id => (level = id as LogLevelName)} />
+        <!-- 5 档在窄屏会被压到看不清：整条左右滑动（scroll），项按内容宽度排列 -->
+        <Segmented
+          items={levelItems}
+          value={level}
+          scroll
+          onselect={id => (level = id as LogLevelName)}
+        />
       </div>
     {/if}
   </Panel>
@@ -282,8 +290,12 @@
     color: var(--ak-text-secondary);
   }
 
+  /* 档名最长 5 字（TRACE/ERROR）：列宽固定为「5 字符 + 字距」的宽度（11px 等宽
+     ≈ 0.6em/字 → 0.6875×0.6×5 + 字距 ≈ 2.27rem，取 2.3rem）。各行每行都是独立
+     grid，只有固定列宽才能让模块列对齐；3.4rem 那种宽档位则会在级别与模块之间
+     留出一大段空白（用户反馈的问题）。 */
   .log__level {
-    min-width: 3.4rem;
+    min-width: 2.3rem;
     color: var(--ak-text-secondary);
     font-weight: 700;
     letter-spacing: 0.06em;

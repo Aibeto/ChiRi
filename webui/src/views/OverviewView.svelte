@@ -9,11 +9,10 @@
 
   let confirmOpen = $state(false);
 
+  // 存活判据是心跳文件（LiveTime.chr）新鲜度，细节文案由状态本身决定；
+  // 读取/内容异常时用 daemonError 覆盖（比通用 detail 更有排查价值）
   const daemonDetail = $derived(
-    app.daemonError ||
-      (app.daemonState === "unknown" && !app.flockAvailable ?
-        t("daemon.unknown.detail")
-      : t(`daemon.${app.daemonState}.detail`)),
+    app.daemonError || t(`daemon.${app.daemonState}.detail`),
   );
   // 调度未运行（daemonState=stopped）时不把 current_mode.chr 的陈旧值当「当前模式」
   // 展示：文件里的旧值不代表现在，卡片只陈述「调度未运行」（家族/模式名/id 都不显示）。
@@ -30,6 +29,23 @@
   );
   const modeId = $derived(
     modeIdle || app.modeMissing ? "—" : app.modeInfo.id || "—",
+  );
+  // 三层信息（家族 / 模式名 / 原始 id）逐级去重，同一个词只说一次：
+  // ① 家族行只在名字看不出家族时显示——clg/lab/stardust 的成员名（default / vector /
+  //    息屏场景）不体现家族；fas / down / 特调 / 未知的名字本身就是家族（mode.fas = 'FAS'
+  //    = mode.family.fas），再列一行等于重复；
+  // ② id 行只在它与模式名不是同一个词时显示——CLG 与实验室档的 mode.* 值就是 id 本身
+  //    （mode.default = 'default' = id），否则「子模式」会在卡片上出现两次（用户反馈）。
+  const FAMILY_KINDS = new Set(["clg", "lab", "stardust"]);
+  const showFamily = $derived(
+    familyLabel !== "" && FAMILY_KINDS.has(app.modeInfo.kind),
+  );
+  const nameKey = $derived(modeName.trim().toLowerCase());
+  const showModeId = $derived(
+    !modeIdle &&
+      !app.modeMissing &&
+      modeId !== "—" &&
+      modeId.trim().toLowerCase() !== nameKey,
   );
   const modeSignal = $derived(modeIdle ? "info" : app.modeInfo.signal);
   const deviceLabel = $derived(
@@ -109,7 +125,8 @@
       {/if}
     </div>
     {#if app.powerAvgMissing}
-      <p class="u-note u-danger u-mt-2">{t("overview.power.missing")}</p>
+      <!-- 文件缺失是「调度没跑过」的正常形态，不是错误 → 次要色说明，不用危险色 -->
+      <p class="u-note u-mt-2">{t("overview.power.missing")}</p>
     {/if}
   </Panel>
 
@@ -130,11 +147,13 @@
   >
     <div class="mode" data-signal={modeSignal}>
       <div class="mode__main">
-        {#if familyLabel}
+        {#if showFamily}
           <p class="mode__family">{familyLabel}</p>
         {/if}
         <p class="mode__name">{modeName}</p>
-        <p class="mode__id u-mono">{modeId}</p>
+        {#if showModeId}
+          <p class="mode__id u-mono">{modeId}</p>
+        {/if}
       </div>
       {#if app.modeError}
         <StateBox
@@ -330,6 +349,16 @@
   .mode {
     display: grid;
     gap: var(--ak-space-2);
+  }
+
+  /* 家族名：小字上标（与 .mode__id 同档）。此前无规则 → `<p>` 的默认外边距会
+     顶开 .mode__main 的 0.2rem 行距，三行看起来是散的 */
+  .mode__family {
+    margin: 0;
+    color: var(--ak-text-secondary);
+    font-size: 0.6875rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
   }
 
   .mode__main {

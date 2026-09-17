@@ -84,11 +84,12 @@
 
 <style>
   /* 弹层骨架/皮肤全部来自官方 .ak-dialog（深色适配在 app.css [ak-adapt]），
-     这里只保留项目特有的「注意事项」竖条 */
+     这里只保留项目特有的「注意事项」竖条。竖条跟随弹层信号色（CONFIRM 暖黄 /
+     DANGER 危险红）——固定暖色会在危险弹层里多出第三种颜色，红条红字之间夹一条黄线 */
   .note {
     margin-top: var(--ak-space-3);
     padding-left: var(--ak-space-3);
-    border-left: 2px solid var(--ak-signal-action);
+    border-left: 2px solid var(--ak-dialog-signal);
     color: var(--ak-text-secondary);
   }
 </style>

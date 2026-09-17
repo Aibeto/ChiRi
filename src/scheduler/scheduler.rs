@@ -61,6 +61,10 @@ impl CpuScheduler {
             return Ok(());
         }
 
+        // 逐设备逐参数收集，最后一次批量写：单节点失败 debug、全部失败 warn
+        // （见 utils::write_nodes）——块设备/参数节点各机型差异大，不预判 exists，
+        // 让真实写入结果说话
+        let mut items: Vec<(String, String)> = Vec::new();
         if let Ok(entries) = fs::read_dir(block_dir) {
             for entry in entries.flatten() {
                 let dev_path = entry.path();
@@ -68,37 +72,26 @@ impl CpuScheduler {
                 if !queue_path.exists() {
                     continue;
                 }
-
-                if !io.scheduler.is_empty() {
-                    let p = queue_path.join("scheduler");
-                    if p.exists() {
-                        let _ = utils::try_write_file(&p, &io.scheduler);
-                    }
-                }
-                if !io.read_ahead_kb.is_empty() {
-                    let p = queue_path.join("read_ahead_kb");
-                    if p.exists() {
-                        let _ = utils::try_write_file(&p, &io.read_ahead_kb);
-                    }
-                }
-                if !io.nomerges.is_empty() {
-                    let p = queue_path.join("nomerges");
-                    if p.exists() {
-                        let _ = utils::try_write_file(&p, &io.nomerges);
-                    }
-                }
-                if !io.iostats.is_empty() {
-                    let p = queue_path.join("iostats");
-                    if p.exists() {
-                        let _ = utils::try_write_file(&p, &io.iostats);
+                for (name, value) in [
+                    ("scheduler", &io.scheduler),
+                    ("read_ahead_kb", &io.read_ahead_kb),
+                    ("nomerges", &io.nomerges),
+                    ("iostats", &io.iostats),
+                ] {
+                    if !value.is_empty() {
+                        items.push((
+                            queue_path.join(name).to_string_lossy().into_owned(),
+                            value.clone(),
+                        ));
                     }
                 }
                 log::debug!(
-                    "IOOptimization: applied to {:?}",
+                    "IOOptimization: device queued: {:?}",
                     dev_path.file_name().unwrap_or_default()
                 );
             }
         }
+        let _ = utils::write_nodes(&items, "io-tuning");
 
         log::info!("{}", t("apply-io-settings-start"));
         Ok(())

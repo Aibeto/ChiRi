@@ -1,59 +1,50 @@
 // daemon.ts: [liveness] [watchdog] [stop] [recover]
 // 守护进程存活判据与生命周期操作。硬规则（见计划文档与项目记忆）：
-// - 存活判据只能用 daemon.lock 的 flock 探测，pidof 是弱信号；
-// - 探测必须「取锁后立刻释放」，否则 daemon 下次启动抢不到锁会静默退出；
-// - 绝不删除 daemon.lock（flock 是 inode 级，删除会让新实例在旧 inode 之外加锁成功 → 双实例）；
+// - 存活判据 = 心跳文件 LiveTime.chr（daemon 每 15s 写一次本地时间 MM:SS）：
+//   与本机时间比对，超过容差（20s）判「已停止」。此前用 flock 探测 daemon.lock，
+//   依赖 toybox 是否带 flock applet，缺失时只能显示「无法判定」；
+// - daemon.lock 仍由 daemon 自己持有（单实例锁，模块根、不随 logs/ 归档）：WebUI
+//   不再探测、也绝不删除——flock 是 inode 级，删除会让新实例在旧 inode 之外加锁成功；
 // - 关闭调度必须先杀看门狗再杀主进程，否则看门狗 3s 后会把 daemon 拉回来。
 import { absOf, shQuote } from './paths'
 import { exists, readText } from './read'
+import {
+  LIVE_TIME_FILE,
+  isLiveTimeFresh,
+  nowSecondsOfHour,
+  parseLiveTimeSeconds
+} from '@/data/live-time'
 import { isLive, run } from '@/kernel/shell'
 import { absent, failed, ok, shellError, type ReadResult } from './errors'
 
 // [liveness]
 export type DaemonState =
-  /** 锁被持有 = 有活跃实例 */
+  /** 心跳新鲜 = 有活跃实例 */
   | 'running'
-  /** 能拿到锁 = 没有实例在跑 */
+  /** 心跳过期或文件缺失 = 没有实例在跑 */
   | 'stopped'
-  /** 无法判定（无 flock applet 或环境不支持）——界面如实显示，不退回 pidof */
+  /** 无法判定（环境不支持 / 读失败 / 内容非法）——界面如实显示，不猜 */
   | 'unknown'
 
-let flockAvailable: boolean | null = null
+/** 心跳文件极小（`MM:SS\n`，64 字节足够） */
+const LIVE_TIME_READ_BYTES = 64
 
-/** flock applet 可用性（Android 由 toybox/busybox 提供，缺失时无法判定存活） */
-export async function hasFlock(): Promise<boolean> {
-  if (flockAvailable !== null) return flockAvailable
-  if (!isLive()) return (flockAvailable = false)
-  try {
-    const { stdout } = await run('command -v flock >/dev/null 2>&1 && echo 1 || echo 0')
-    flockAvailable = stdout.trim() === '1'
-  } catch {
-    flockAvailable = false
-  }
-  return flockAvailable
-}
-
-/** 仅测试用：注入 flock 可用性 */
-export function setFlockAvailableForTest(v: boolean | null): void {
-  flockAvailable = v
-}
-
+/**
+ * 探测存活：读心跳文件并与本机时间比对。
+ * - 文件缺失 → stopped（没有任何实例在写心跳）
+ * - 内容非法 → failed（读到了但不可用：界面报错，不谎报「已停止」）
+ */
 export async function probeLiveness(): Promise<ReadResult<DaemonState>> {
   if (!isLive()) return absent<DaemonState>('unsupported-env')
-  if (!(await hasFlock())) return ok<DaemonState>('unknown')
-  try {
-    // 带命令形式（flock -n FILE true）：命令结束即释放锁；不带命令会从 stdin 持续持锁
-    const { errno, stdout, stderr } = await run(
-      `flock -n ${shQuote(absOf('daemonLock'))} true >/dev/null 2>&1 && echo FREE || echo HELD`
-    )
-    if (errno !== 0) return failed<DaemonState>(shellError(errno, stderr))
-    const verdict = stdout.trim()
-    if (verdict === 'FREE') return ok<DaemonState>('stopped')
-    if (verdict === 'HELD') return ok<DaemonState>('running')
-    return ok<DaemonState>('unknown')
-  } catch (e) {
-    return failed<DaemonState>(e instanceof Error ? e.message : String(e))
+  const r = await readText(absOf('liveTime'), 'not-created', LIVE_TIME_READ_BYTES)
+  if (r.kind === 'absent') return ok<DaemonState>('stopped')
+  if (r.kind !== 'ok') return r
+  const fileSeconds = parseLiveTimeSeconds(r.value)
+  if (fileSeconds === null) {
+    return failed<DaemonState>(`${LIVE_TIME_FILE} 内容非法：${r.value.trim() || '(空)'}`)
   }
+  const fresh = isLiveTimeFresh(fileSeconds, nowSecondsOfHour())
+  return ok<DaemonState>(fresh ? 'running' : 'stopped')
 }
 
 // [watchdog]

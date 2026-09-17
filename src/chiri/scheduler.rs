@@ -72,6 +72,10 @@ impl CpuScheduler {
             return Ok(());
         }
 
+        // 逐设备逐参数收集，最后一次批量写：单节点失败 debug、全部失败 warn
+        // （见 utils::write_nodes）。不再逐节点预判 exists——块设备/参数节点各机型
+        // 差异大，预判会让日志与真实写入结果脱节。
+        let mut items: Vec<(String, String)> = Vec::new();
         if let Ok(entries) = fs::read_dir(block_dir) {
             for entry in entries.flatten() {
                 let dev_path = entry.path();
@@ -79,37 +83,26 @@ impl CpuScheduler {
                 if !queue_path.exists() {
                     continue;
                 }
-
-                if !io.scheduler.is_empty() {
-                    let p = queue_path.join("scheduler");
-                    if p.exists() {
-                        let _ = utils::try_write_file(&p, &io.scheduler);
-                    }
-                }
-                if !io.read_ahead_kb.is_empty() {
-                    let p = queue_path.join("read_ahead_kb");
-                    if p.exists() {
-                        let _ = utils::try_write_file(&p, &io.read_ahead_kb);
-                    }
-                }
-                if !io.nomerges.is_empty() {
-                    let p = queue_path.join("nomerges");
-                    if p.exists() {
-                        let _ = utils::try_write_file(&p, &io.nomerges);
-                    }
-                }
-                if !io.iostats.is_empty() {
-                    let p = queue_path.join("iostats");
-                    if p.exists() {
-                        let _ = utils::try_write_file(&p, &io.iostats);
+                for (name, value) in [
+                    ("scheduler", &io.scheduler),
+                    ("read_ahead_kb", &io.read_ahead_kb),
+                    ("nomerges", &io.nomerges),
+                    ("iostats", &io.iostats),
+                ] {
+                    if !value.is_empty() {
+                        items.push((
+                            queue_path.join(name).to_string_lossy().into_owned(),
+                            value.clone(),
+                        ));
                     }
                 }
                 log::debug!(
-                    "IOOptimization: applied to {:?}",
+                    "IOOptimization: device queued: {:?}",
                     dev_path.file_name().unwrap_or_default()
                 );
             }
         }
+        let _ = utils::write_nodes(&items, "io-tuning");
 
         log::info!("{}", t("apply-io-settings-start"));
         Ok(())
@@ -118,29 +111,26 @@ impl CpuScheduler {
     // [touch_boost]
     /// 屏蔽 Android/内核自带的触摸升频（cpu_boost 驱动），改由 ChiRi 触摸升频统一接管：
     /// 关闭 input_boost 与 sched_boost_on_input，避免内核一上一下互抢导致频率抖动。
-    /// 各节点按存在性逐一尝试，设备内核无对应节点时静默跳过（非 ChiRi 通用内核不报错）。
+    /// 候选节点逐条尝试写（不再预判存在性）：单点失败 debug、**全部**失败 warn
+    /// （见 utils::write_nodes）——非 ChiRi 通用内核可能一个节点都没有。
     fn apply_disable_touch_boost(&self) -> Result<()> {
-        let targets = [
-            ("/sys/module/cpu_boost/parameters/input_boost_enabled", "0"),
-            ("/sys/module/cpu_boost/parameters/sched_boost_on_input", "0"),
-            ("/sys/module/cpu_boost/parameters/input_boost_ms", "0"),
-            ("/sys/module/cpu_boost/parameters/boost_ms", "0"),
-        ];
-        let mut any_written = false;
-        for (path, val) in targets {
-            if std::path::Path::new(path).exists() {
-                let _ = utils::try_write_file(path, val);
-                any_written = true;
-                log::debug!(
-                    "{}",
-                    t_with_args(
-                        "touch-boost-disable-node",
-                        &fluent_args!("path" => path.to_string())
-                    )
-                );
-            }
+        let items: Vec<(String, String)> = [
+            "/sys/module/cpu_boost/parameters/input_boost_enabled",
+            "/sys/module/cpu_boost/parameters/sched_boost_on_input",
+            "/sys/module/cpu_boost/parameters/input_boost_ms",
+            "/sys/module/cpu_boost/parameters/boost_ms",
+        ]
+        .iter()
+        .map(|path| (path.to_string(), "0".to_string()))
+        .collect();
+        let written = utils::write_nodes(&items, "touch-boost-disable");
+        for path in &written {
+            log::debug!(
+                "{}",
+                t_with_args("touch-boost-disable-node", &fluent_args!("path" => path.clone()))
+            );
         }
-        if any_written {
+        if !written.is_empty() {
             log::info!("{}", t("touch-boost-disable-applied"));
         }
         Ok(())

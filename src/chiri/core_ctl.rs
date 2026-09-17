@@ -338,14 +338,18 @@ impl CoreCtlManager {
     /// 动态管理），重新从组内移除。只读 online 文件 + 组 cpus（每 2s 数次
     /// 小读），无写发生时零开销。
     fn reassert_offline(&mut self) {
+        // 逐核收集需要重新下线的核，一次批量写：单核失败 debug、全部失败 warn
+        // （见 utils::write_nodes）——此前静默 `let _ =`，全核写不回去也毫无痕迹
+        let mut items: Vec<(String, String)> = Vec::new();
         for (cpu, _) in &self.offlined {
             let path = format!("/sys/devices/system/cpu/cpu{}/online", cpu);
             if let Ok(v) = fs::read_to_string(&path) {
                 if v.trim() != "0" {
-                    let _ = crate::utils::try_write_file(&path, "0");
+                    items.push((path, "0".to_string()));
                 }
             }
         }
+        let _ = crate::utils::write_nodes(&items, "corectl-reassert-offline");
         if let Some(core) = self.reserved_core {
             crate::chiri::affinity::exclude_core_from_cpusets(core, &mut self.reserved_cpusets);
         }
