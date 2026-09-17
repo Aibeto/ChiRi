@@ -94,10 +94,12 @@ describe('meta.yaml 校验（复刻守护进程口径）', () => {
     expect(validateMeta(valid)).toEqual([])
   })
 
-  it('缺字段 / 未知字段都会导致整文件非法', () => {
+  it('缺字段合法（缺省 = 沿用内嵌默认）、未知字段仍判非法', () => {
+    // 字段全部可选：老文件/精简文件不再判非法（见 src/common.rs::parse_disk_meta）
     const missing = { ...valid } as Record<string, unknown>
     delete missing.author
-    expect(validateMeta(missing).some(p => p.includes('author'))).toBe(true)
+    delete missing.power_avg
+    expect(validateMeta(missing)).toEqual([])
 
     expect(validateMeta({ ...valid, extra: 1 }).some(p => p.includes('extra'))).toBe(true)
   })

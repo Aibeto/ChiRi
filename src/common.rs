@@ -695,68 +695,50 @@ pub fn embedded_ftl_str(lang: &str) -> &'static str {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MetaYamlFile {
-    name: String,
-    author: String,
-    language: String,
-    loglevel: String,
-    dev_record: bool,
-    fas_enabled: bool,
-    scenemode_enabled: bool,
+    name: Option<String>,
+    author: Option<String>,
+    language: Option<String>,
+    loglevel: Option<String>,
+    dev_record: Option<bool>,
+    fas_enabled: Option<bool>,
+    scenemode_enabled: Option<bool>,
     /// 线程摆放总开关（affinity + core_ctl），详见 ExternalMetaOverrides
-    thread_bind: bool,
-    /// 功耗口径开关（PowerAVG.chr），详见 ExternalMetaOverrides（可选，缺省 false）
-    #[serde(default)]
-    power_avg: bool,
-    /// 「不改」开关（可选字段，模板不写）：详见 ExternalMetaOverrides
-    #[serde(default)]
-    nofix: bool,
-    /// 耗电读数满量程 W（可选字段，默认 12）：详见 ExternalMetaOverrides
-    #[serde(default = "crate::utils::default_power_max_w")]
-    power_max_w: f32,
+    thread_bind: Option<bool>,
+    /// 功耗口径开关（PowerAVG.chr），详见 ExternalMetaOverrides（缺省 false）
+    power_avg: Option<bool>,
+    /// 「不改」开关（模板不写）：详见 ExternalMetaOverrides
+    nofix: Option<bool>,
+    /// 耗电读数满量程 W（缺省 12）：详见 ExternalMetaOverrides
+    power_max_w: Option<f32>,
 }
 
-/// 磁盘 meta.yaml 校验通过后交给 Config::load 的覆盖值（全字段必有效）。
-/// daemon 只消费其中 6 项（name/author 仅 WebUI 展示，直接读文件即可）。
-#[derive(Debug, Clone)]
+/// 磁盘 meta.yaml 交给 Config::load 的覆盖值：**None = 文件里没写这个键 → 沿用内嵌默认**
+/// （与 rhine 影响项同一「缺省 = 不变更」语义；字段全部可选，老文件/精简文件都合法）。
+/// daemon 只消费其中 7 项（name/author 仅 WebUI 展示，直接读文件即可）。
+#[derive(Debug, Clone, Default)]
 pub struct ExternalMetaOverrides {
-    pub loglevel: String,
-    pub language: String,
-    pub dev_record: bool,
-    pub fas_enabled: bool,
-    pub scenemode_enabled: bool,
+    pub loglevel: Option<String>,
+    pub language: Option<String>,
+    pub dev_record: Option<bool>,
+    pub fas_enabled: Option<bool>,
+    pub scenemode_enabled: Option<bool>,
     /// 线程摆放总开关：false = 关闭线程功能，CPU 亲和/绑核与 core_ctl 核心在线
     /// 接管全部交还系统（**把所有绑定分配改成全核心**）。与机型内嵌 config.yaml 的
     /// `Affinity.enabled` / `CoreCtl.enabled` 取「与」——任一为假即视为关闭线程功能，
     /// 见 chiri/config.rs::Config::load。
-    pub thread_bind: bool,
+    pub thread_bind: Option<bool>,
     /// 功耗口径开关（PowerAVG.chr）：false（默认）= 参考值（每次与上次取半递推，
     /// 偏近期）；true = 累计平均值（等权全史）。daemon 只在 ChiRi 的 1s 状态采样里
     /// 消费（Yumi 无效）；写侧走「单次读-改-写」顶层行替换，见 WebUI contract/meta.ts。
-    pub power_avg: bool,
-    /// 「不改」开关（meta.yaml 可选字段 `nofix`，默认 false，且默认不写进配置）：
+    pub power_avg: Option<bool>,
+    /// 「不改」开关（meta.yaml 字段 `nofix`，默认 false，且默认不写进配置）：
     /// true = 启动时跳过所有「二进制内容对外部文件的覆盖类操作」——webui 资产还原
     /// （webui_asset::restore_webroot）与 meta.yaml 快照自愈（sync_meta_snapshot）。
     /// 用户自担文件被篡改的风险；rhine 实验（用户主动开启）与 WebUI 写入不受影响。
-    pub nofix: bool,
-    /// 耗电读数满量程 W（meta.yaml `power_max_w`，可选字段，默认 12）：只影响 WebUI
-    /// 状态页仪表盘的进度换算，不参与任何调度决策。
-    pub power_max_w: f32,
-}
-
-impl Default for ExternalMetaOverrides {
-    fn default() -> Self {
-        Self {
-            loglevel: "INFO".to_string(),
-            language: "en".to_string(),
-            dev_record: false,
-            fas_enabled: true,
-            scenemode_enabled: true,
-            thread_bind: true,
-            power_avg: false,
-            nofix: false,
-            power_max_w: crate::utils::default_power_max_w(),
-        }
-    }
+    pub nofix: Option<bool>,
+    /// 耗电读数满量程 W（meta.yaml `power_max_w`，缺省 12）：只影响 WebUI 状态页
+    /// 仪表盘的进度换算，不参与任何调度决策。
+    pub power_max_w: Option<f32>,
 }
 
 /// 读磁盘 meta.yaml（先经 sync_meta_snapshot 校验/纠正）。文件缺失或仍非法时返回
@@ -770,7 +752,9 @@ pub fn read_external_meta(path: &Path) -> Option<ExternalMetaOverrides> {
 /// 调用——晚了文件可能已被内嵌默认覆盖（该覆盖本身就是要跳过的操作之一）。
 /// 文件缺失/非法时返回 false（照常自愈）。
 pub fn read_nofix_flag(path: &Path) -> bool {
-    read_external_meta(path).map(|m| m.nofix).unwrap_or(false)
+    read_external_meta(path)
+        .and_then(|m| m.nofix)
+        .unwrap_or(false)
 }
 
 // 「不改」进程级标志：main 启动期判定后置位，此后所有覆盖类操作入口（webui 资产
@@ -828,19 +812,30 @@ fn sanitize_language(raw: &str) -> Option<String> {
 /// 任一字段异常返回 None——调用方以二进制内嵌默认值覆盖修正，用户乱改不会生效。
 fn parse_disk_meta(text: &str) -> Option<ExternalMetaOverrides> {
     let f: MetaYamlFile = serde_yaml::from_str(text).ok()?;
-    if f.name.trim().is_empty() || f.author.trim().is_empty() {
+    // 出现即校验（缺省跳过）：name/author 非空
+    if f.name.as_deref().is_some_and(|v| v.trim().is_empty())
+        || f.author.as_deref().is_some_and(|v| v.trim().is_empty())
+    {
         return None;
     }
     // 满量程：非有限/非正/超 200 视为写错，回退内嵌默认 12 —— 不判整个文件非法：
     // 单个数笔误不该连带丢掉用户其它设置（WebUI 写入侧另有 1..=200 校验）
-    let power_max_w = if f.power_max_w.is_finite() && f.power_max_w > 0.0 && f.power_max_w <= 200.0 {
-        f.power_max_w
-    } else {
-        crate::utils::default_power_max_w()
-    };
+    let power_max_w = f.power_max_w.map(|v| {
+        if v.is_finite() && v > 0.0 && v <= 200.0 {
+            v
+        } else {
+            crate::utils::default_power_max_w()
+        }
+    });
     Some(ExternalMetaOverrides {
-        loglevel: sanitize_loglevel(&f.loglevel)?,
-        language: sanitize_language(&f.language)?,
+        loglevel: match f.loglevel.as_deref() {
+            Some(v) => Some(sanitize_loglevel(v)?),
+            None => None,
+        },
+        language: match f.language.as_deref() {
+            Some(v) => Some(sanitize_language(v)?),
+            None => None,
+        },
         dev_record: f.dev_record,
         fas_enabled: f.fas_enabled,
         scenemode_enabled: f.scenemode_enabled,

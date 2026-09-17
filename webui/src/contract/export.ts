@@ -51,10 +51,13 @@ function stamp(now = new Date()): string {
  */
 export async function startExport(): Promise<ReadResult<ExportJob>> {
   if (!isLive()) return absent<ExportJob>('unsupported-env')
-  const base = `${DOWNLOAD_DIR}/logd_${stamp()}.tar`
+  // pack.sh export 的 dest_base 语义是**不带扩展名的基准名**：脚本自己生成
+  // <base>.tar 再压成 <base>.tar.gz。这里若传带 .tar 的名字，产物会变成
+  // logd_X.tar.tar.gz、轮询永远找不到 logd_X.tar.gz（卡在最后一格 + 已压缩 0.0 MB）
+  const base = `${DOWNLOAD_DIR}/logd_${stamp()}`
   const job: ExportJob = {
-    target: `${base}.gz`,
-    fallback: base,
+    target: `${base}.tar.gz`,
+    fallback: `${base}.tar`,
     failFlag: FAIL_FILE
   }
   // 打包交给外部脚本（与守护进程启动归档共用同一份，见 module/scripts/pack.sh）：

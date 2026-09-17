@@ -50,6 +50,7 @@ export default {
   'overview.device.unknown': '无法判定',
   'overview.power.ref': '参考功耗',
   'overview.power.avg': '平均功耗',
+  'overview.power.missing': 'PowerAVG.chr 缺失或为空：该文件由调度运行期写入，未运行过时不会产生',
   'overview.module': '模块信息',
   'overview.module.version': '版本',
   'overview.module.author': '作者',

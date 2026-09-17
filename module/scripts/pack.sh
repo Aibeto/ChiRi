@@ -67,7 +67,10 @@ case "$1" in
     [ -d "$SRC" ] || { echo 3 > "$FAIL"; exit 3; }
     [ -n "$(ls -A "$SRC" 2>/dev/null)" ] || { echo 5 > "$FAIL"; exit 5; }
     if [ -n "$TOTAL" ]; then
-      find "$SRC" -type f 2>/dev/null | wc -l > "$TOTAL"
+      # tar -v 每处理一个条目打一行，**包含根目录条目 "./"**——总数必须同口径
+      # （文件数 + 1），否则进度会显示 11/10、百分比永远差最后一格
+      n=$(find "$SRC" -type f 2>/dev/null | wc -l)
+      echo $((n + 1)) > "$TOTAL"
     fi
     : > "$PROG"
     $TAR_BIN -cvf "$BASE.tar.part" -C "$SRC" . >> "$PROG" 2>&1 || { rm -f "$BASE.tar.part"; echo 4 > "$FAIL"; exit 4; }

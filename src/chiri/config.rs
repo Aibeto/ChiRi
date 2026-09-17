@@ -7,6 +7,38 @@ use crate::i18n::t_with_args;
 
 /// 全局元信息段（对应 meta.yaml 顶层字段）
 // [meta]
+
+/// 把 meta 覆盖值应用到生效配置：**None = 文件里没写该键 → 不改动**（沿用内嵌默认），
+/// 与 common.rs::ExternalMetaOverrides 的「缺省 = 不变更」语义一致。
+fn apply_meta_overrides(meta: &mut Meta, o: &crate::common::ExternalMetaOverrides) {
+    if let Some(v) = &o.loglevel {
+        meta.loglevel = v.clone();
+    }
+    if let Some(v) = &o.language {
+        meta.language = v.clone();
+    }
+    if let Some(v) = o.dev_record {
+        meta.dev_record = v;
+    }
+    if let Some(v) = o.fas_enabled {
+        meta.fas_enabled = v;
+    }
+    if let Some(v) = o.scenemode_enabled {
+        meta.scenemode_enabled = v;
+    }
+    if let Some(v) = o.thread_bind {
+        meta.thread_bind = v;
+    }
+    if let Some(v) = o.power_avg {
+        meta.power_avg = v;
+    }
+    if let Some(v) = o.power_max_w {
+        meta.power_max_w = v;
+    }
+    if let Some(v) = o.nofix {
+        meta.nofix = v;
+    }
+}
 #[derive(Debug, Deserialize, Default)]
 pub struct Meta {
     /// 日志级别：DEBUG / INFO / WARN / ERROR，热重载时即时生效
@@ -784,26 +816,11 @@ impl Config {
     /// （fas_available / scenemode 判定读取）。
     pub fn load(path: &str) -> anyhow::Result<Self> {
         let mut config: Config = serde_yaml::from_str(crate::common::embedded_feature_str())?;
+        // 缺省 = 沿用上一层：先内嵌默认，再按磁盘文件「写了哪个字段才覆盖哪个」
         let d = crate::common::embedded_meta_defaults();
-        config.meta.loglevel = d.loglevel;
-        config.meta.language = d.language;
-        config.meta.dev_record = d.dev_record;
-        config.meta.fas_enabled = d.fas_enabled;
-        config.meta.scenemode_enabled = d.scenemode_enabled;
-        config.meta.thread_bind = d.thread_bind;
-        config.meta.power_avg = d.power_avg;
-        config.meta.power_max_w = d.power_max_w;
-        config.meta.nofix = d.nofix;
+        apply_meta_overrides(&mut config.meta, &d);
         if let Some(m) = crate::common::read_external_meta(std::path::Path::new(path)) {
-            config.meta.loglevel = m.loglevel;
-            config.meta.language = m.language;
-            config.meta.dev_record = m.dev_record;
-            config.meta.fas_enabled = m.fas_enabled;
-            config.meta.scenemode_enabled = m.scenemode_enabled;
-            config.meta.thread_bind = m.thread_bind;
-            config.meta.power_avg = m.power_avg;
-            config.meta.power_max_w = m.power_max_w;
-            config.meta.nofix = m.nofix;
+            apply_meta_overrides(&mut config.meta, &m);
         }
         // 功能总开关同步到进程级原子标志（覆盖启动 + config_watcher 热重载两条路径）
         crate::common::set_fas_enabled(config.meta.fas_enabled);

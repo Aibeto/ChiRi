@@ -50,6 +50,7 @@ export default {
   'overview.device.unknown': 'Undetermined',
   'overview.power.ref': 'Reference power',
   'overview.power.avg': 'Average power',
+  'overview.power.missing': 'PowerAVG.chr missing or empty: it is written while the scheduler runs, so it does not exist before that',
   'overview.module': 'Module',
   'overview.module.version': 'Version',
   'overview.module.author': 'Author',

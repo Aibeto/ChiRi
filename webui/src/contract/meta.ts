@@ -1,8 +1,8 @@
 // meta.ts: [fields] [active] [read] [validate] [write]
 // meta.yaml 是唯一可写配置。守护进程侧规则（src/common.rs::parse_disk_meta +
-// sync_meta_snapshot）：8 字段必填 + 3 可选字段（power_avg / nofix / power_max_w，见
-// OPTIONAL_FIELDS——后加字段一律可选，老文件缺行依然合法）、
-// 拒绝未知键、类型必须严格（布尔只能是
+// sync_meta_snapshot）：**字段全部可选**（缺省 = 沿用二进制内嵌默认，与 rhine 影响项
+// 同一「缺省 = 不变更」语义；老文件/精简文件都合法，缺字段不再拒绝写入）、
+// 拒绝未知键、出现即校验类型（布尔只能是
 // YAML 字面量 true/false），任一异常 → 整个文件被内嵌默认覆盖（用户其他键一起丢）。
 // 因此写入策略是「单次读-改-写 + 顶层行替换」，只动目标字段、保留注释与其他键。
 import { load as loadYaml } from 'js-yaml'
@@ -12,6 +12,7 @@ import { readText } from './read'
 import { absent, failed, ok, shellError, type ReadResult } from './errors'
 
 // [fields]
+/** 已知字段全集（= 守护进程允许出现的键） */
 export const META_FIELDS = [
   'name',
   'author',
@@ -20,18 +21,12 @@ export const META_FIELDS = [
   'dev_record',
   'fas_enabled',
   'scenemode_enabled',
-  'thread_bind'
+  'thread_bind',
+  'power_avg',
+  'nofix',
+  'power_max_w'
 ] as const
 export type MetaField = (typeof META_FIELDS)[number]
-
-/**
- * 可选字段：守护进程（src/common.rs::MetaYamlFile）允许整行缺失，缺省走二进制内嵌默认。
- * - nofix：true = 跳过二进制对外部文件的覆盖类操作（webui 资产还原 / meta 快照自愈）
- * - power_max_w：耗电仪表盘满量程（W，默认 12）
- * 缺失合法、出现时校验类型（范围由 daemon 兜底回退默认）；nofix 不提供 UI 写入口。
- */
-export const OPTIONAL_FIELDS = ['power_avg', 'nofix', 'power_max_w'] as const
-export type OptionalField = (typeof OPTIONAL_FIELDS)[number]
 
 /** 允许 WebUI 修改的字段（name/author 仅展示：daemon 不消费，改了也不影响行为） */
 export const WRITABLE_FIELDS = [
@@ -132,12 +127,10 @@ function normalizeScalar(v: unknown): string {
 /** 复刻守护进程 parse_disk_meta 的校验口径（大小写不敏感去引号后比对） */
 export function validateMeta(values: Record<string, unknown>): string[] {
   const problems: string[] = []
-  const keys = Object.keys(values)
-  for (const f of META_FIELDS) {
-    if (!(f in values)) problems.push(`缺少字段 ${f}`)
-  }
-  const known = new Set<string>([...META_FIELDS, ...OPTIONAL_FIELDS])
-  for (const k of keys) {
+  // **字段全部可选**（缺省 = 沿用二进制内嵌默认，daemon 侧同语义）：缺字段不是问题，
+  // 只剩「未知键」与「类型不符」两类硬错误
+  const known = new Set<string>(META_FIELDS)
+  for (const k of Object.keys(values)) {
     if (!known.has(k)) problems.push(`存在未知字段 ${k}`)
   }
 
@@ -162,7 +155,7 @@ export function validateMeta(values: Record<string, unknown>): string[] {
     }
   }
 
-  // 可选字段：类型必须对得上（serde 类型不符会让整个文件判非法、被内嵌默认覆盖）；
+  // 出现即校验类型（serde 类型不符会让整个文件判非法、被内嵌默认覆盖）；
   // 数值范围不限报——守护进程对越界的 power_max_w 只回退默认值，界面同口径
   if ('nofix' in values && typeof values.nofix !== 'boolean') {
     problems.push('nofix 必须是布尔值 true/false')
@@ -291,11 +284,7 @@ export async function writeMetaFields(
     const value = patch[key] as string | boolean | number
     let next = replaceTopLevelField(content, key, value)
     if (next === null) {
-      // 可选字段（如 power_max_w）在旧版文件里可能整行缺失——缺失本身合法，补在文件尾；
-      // 必填字段缺失说明文件已被外部改坏，放弃写入、交给快照自愈
-      if (!(OPTIONAL_FIELDS as readonly string[]).includes(key)) {
-        return failed<MetaSnapshot>(`未找到字段 ${key}，已放弃写入`)
-      }
+      // 字段缺失本身合法（缺省 = 沿用内嵌默认，daemon 侧同语义）：直接补在文件尾
       next = appendTopLevelField(content, key, value)
     }
     content = next

@@ -241,6 +241,7 @@ class AppStore {
       this.actionAvailable = actionOk
       // 功耗参考/平均值（W）：缺失/为空/非法统一按「无值」显示 —，不打断其它数据
       this.powerAvgWatt = powerAvg.kind === 'ok' ? powerAvg.value.watt : null
+      this.powerAvgMissing = powerAvg.kind === 'ok' ? powerAvg.value.missing : false
       await this.loadCommon()
       } finally {
         this.loading = false
@@ -509,6 +510,8 @@ class AppStore {
   /** 功耗参考/平均值（W）：null = PowerAVG.chr 缺失/为空/非法（显示 —） */
   powerAvgWatt = $state<number | null>(null)
   /** 口径开关写入中（高级设置直写 meta.yaml） */
+  /** 文件缺失/为空（daemon 未运行过）：界面红字提示，不静默显示 — */
+  powerAvgMissing = $state(false)
   powerAvgPending = $state(false)
   powerAvgError = $state('')
 

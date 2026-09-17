@@ -330,12 +330,21 @@ impl Config {
     /// （common::get_config_path()），缺失或非法时 meta 回退嵌入默认值。
     pub fn load(path: &str) -> anyhow::Result<Self> {
         let mut config: Config = serde_yaml::from_str(crate::common::embedded_feature_str())?;
+        // 缺省 = 沿用上一层（内嵌默认 → 文件写了才覆盖）：Option 语义见 common.rs
         let d = crate::common::embedded_meta_defaults();
-        config.meta.loglevel = d.loglevel;
-        config.meta.language = d.language;
+        if let Some(v) = d.loglevel {
+            config.meta.loglevel = v;
+        }
+        if let Some(v) = d.language {
+            config.meta.language = v;
+        }
         if let Some(m) = crate::common::read_external_meta(std::path::Path::new(path)) {
-            config.meta.loglevel = m.loglevel;
-            config.meta.language = m.language;
+            if let Some(v) = m.loglevel {
+                config.meta.loglevel = v;
+            }
+            if let Some(v) = m.language {
+                config.meta.language = v;
+            }
         }
         Ok(config)
     }

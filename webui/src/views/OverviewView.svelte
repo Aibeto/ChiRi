@@ -108,6 +108,9 @@
         </div>
       {/if}
     </div>
+    {#if app.powerAvgMissing}
+      <p class="u-note u-danger u-mt-2">{t("overview.power.missing")}</p>
+    {/if}
   </Panel>
 
   {#if app.loading && !app.ready}

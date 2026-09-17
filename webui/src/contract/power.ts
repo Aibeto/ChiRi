@@ -15,15 +15,16 @@ export interface PowerAvgSnapshot {
   path: string
   /** 当前留存值（W）；文件缺失/为空/内容非法时为 null */
   watt: number | null
+  /** 无值（文件缺失/为空/内容非法）：界面据此红字提示，而不是静默显示 — */
+  missing: boolean
 }
 
 export async function readPowerAvg(): Promise<ReadResult<PowerAvgSnapshot>> {
   const path = absOf('powerAvg')
   const text = await readText(path, 'not-created', POWER_AVG_READ_BYTES)
   if (text.kind === 'failed') return text
-  // 缺失（absent）与空内容同口径：无值，不报缺失（守护进程跑起来就会写）
-  return ok({
-    path,
-    watt: parsePowerAvgWatt(text.kind === 'ok' ? text.value : '')
-  })
+  // 缺失（absent）与空内容一律「无值 + missing」：值由 daemon 运行期写入，
+  // 界面对缺失给出可解释的提示（而不是静默 —，让用户无从判断是没跑还是没数据）
+  const watt = parsePowerAvgWatt(text.kind === 'ok' ? text.value : '')
+  return ok({ path, watt, missing: watt === null })
 }

@@ -347,15 +347,21 @@ fn apply(root: &Path, meta_path: &Path, key: &str) -> Result<(), String> {
         return Err(format!("meta.yaml unreadable: {}", meta_path.display()));
     };
 
+    // 快照必须记「当前生效值」：文件没写该键时等于内嵌默认（缺省 = 沿用）
+    let d = common::embedded_meta_defaults();
+    let eff_fas = meta.fas_enabled.or(d.fas_enabled).unwrap_or(true);
+    let eff_scenemode = meta.scenemode_enabled.or(d.scenemode_enabled).unwrap_or(true);
+    let eff_thread = meta.thread_bind.or(d.thread_bind).unwrap_or(true);
+
     let backup = Backup {
         origin: key.to_string(),
         global_mode: def.global_mode.as_ref().map(|_| current_global_mode()),
-        fas_enabled: def.fas_enabled.map(|_| meta.fas_enabled),
-        scenemode_enabled: def.scenemode_enabled.map(|_| meta.scenemode_enabled),
+        fas_enabled: def.fas_enabled.map(|_| eff_fas),
+        scenemode_enabled: def.scenemode_enabled.map(|_| eff_scenemode),
         special_tuned: def
             .special_tuned
             .map(|_| !common::lab_special_tuned_disabled()),
-        thread_bind: def.thread_bind.map(|_| meta.thread_bind),
+        thread_bind: def.thread_bind.map(|_| eff_thread),
     };
     if !write_backup(root, &backup) {
         return Err("failed to write backup".to_string());
@@ -459,10 +465,12 @@ fn write_fallback_backup(root: &Path, key: &str) {
             .global_mode
             .as_ref()
             .map(|_| common::embedded_rules().global_mode.clone()),
-        fas_enabled: def.fas_enabled.map(|_| d.fas_enabled),
-        scenemode_enabled: def.scenemode_enabled.map(|_| d.scenemode_enabled),
+        fas_enabled: def.fas_enabled.map(|_| d.fas_enabled.unwrap_or(true)),
+        scenemode_enabled: def
+            .scenemode_enabled
+            .map(|_| d.scenemode_enabled.unwrap_or(true)),
         special_tuned: def.special_tuned.map(|_| true),
-        thread_bind: def.thread_bind.map(|_| d.thread_bind),
+        thread_bind: def.thread_bind.map(|_| d.thread_bind.unwrap_or(true)),
     };
     if write_backup(root, &backup) {
         lock_note(NOTE_BACKUP_REBUILT);
@@ -514,9 +522,9 @@ fn restore(root: &Path, meta_path: &Path) -> Option<String> {
             let defaults = common::embedded_meta_defaults();
             let ok = common::rewrite_meta_toggles(
                 meta_path,
-                Some(defaults.fas_enabled),
-                Some(defaults.scenemode_enabled),
-                Some(defaults.thread_bind),
+                defaults.fas_enabled.or(Some(true)),
+                defaults.scenemode_enabled.or(Some(true)),
+                defaults.thread_bind.or(Some(true)),
             );
             if ok {
                 common::set_lab_global_mode(None);
