@@ -584,6 +584,14 @@ pub fn default_power_max_w() -> f32 {
     12.0
 }
 
+/// 电池读数单位校准默认值（毫单位 → V/A/W）：meta.yaml `unit_divisor` 与遥测层共用
+pub const DEFAULT_UNIT_DIVISOR: f32 = 1000.0;
+
+/// Serde 默认值辅助函数：单位校准除数（meta.yaml 的 `unit_divisor` 默认 1000）
+pub fn default_unit_divisor() -> f32 {
+    DEFAULT_UNIT_DIVISOR
+}
+
 /// 读取文件内容并解析为 i32
 pub fn read_i32_from_file(path: &str) -> Result<i32> {
     let mut content = String::new();

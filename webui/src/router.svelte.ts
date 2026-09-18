@@ -1,22 +1,22 @@
 // router.svelte.ts: [routes] [nav]
 // hash 路由：不用第三方 router，够小且便于在 WebView 中直接定位。
-// 两级视图：主视图进底部导航，二级视图（实验室）只能从所属主视图进入，
+// 两级视图：主视图进底部导航，二级视图（实验室、电池读数）只能从所属主视图进入，
 // 但同样有 hash，刷新/后退行为与主视图一致。
 export type ViewId = 'overview' | 'config' | 'apps' | 'logs'
 /** 二级视图：不占底部导航位，从主视图进入 */
-export type SubViewId = 'lab'
+export type SubViewId = 'lab' | 'battery'
 export type RouteId = ViewId | SubViewId
 
 export const VIEW_IDS: readonly ViewId[] = ['overview', 'config', 'apps', 'logs']
 
-/** 可解析的全部路由（主视图 ∪ 二级视图） */
-const ROUTE_IDS: readonly RouteId[] = [...VIEW_IDS, 'lab']
-
 /** 二级视图归属的主视图：底部导航据此保持高亮 */
-const SUB_OF: Record<SubViewId, ViewId> = { lab: 'config' }
+const SUB_OF: Record<SubViewId, ViewId> = { lab: 'config', battery: 'config' }
+
+/** 可解析的全部路由（主视图 ∪ 二级视图） */
+const ROUTE_IDS: readonly RouteId[] = [...VIEW_IDS, 'lab', 'battery']
 
 export function isSubView(id: RouteId): boolean {
-  return id === 'lab'
+  return id in SUB_OF
 }
 
 /** 当前路由对应的主导航项（二级视图回落到它的父视图） */

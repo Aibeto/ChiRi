@@ -719,6 +719,12 @@ struct MetaYamlFile {
     power_avg: Option<bool>,
     /// 常驻状态通知开关，详见 ExternalMetaOverrides（缺省 true）
     notify: Option<bool>,
+    /// 电池读数：OPlus 私有节点 / 双电芯 / 倍电压 / 倍电流 / 单位校准，缺省见结构注释
+    oplus_chg: Option<bool>,
+    oplus_dual_cell: Option<bool>,
+    voltage_double: Option<bool>,
+    current_double: Option<bool>,
+    unit_divisor: Option<f32>,
     /// 「不改」开关（模板不写）：详见 ExternalMetaOverrides
     nofix: Option<bool>,
     /// 耗电读数满量程 W（缺省 12）：详见 ExternalMetaOverrides
@@ -750,6 +756,22 @@ pub struct ExternalMetaOverrides {
     /// 见 src/notify.rs。false = 不投递，并**撤销已投递的通知**（daemon 自己还在跑，
     /// 有能力清理）。同样只在 ChiRi 的 1s 循环里消费（Yumi 无效）。
     pub notify: Option<bool>,
+    /// OPlus 私有电压/电流节点（`oplus_chg`，默认 false）：true = 优先读
+    /// `/sys/class/oplus_chg/battery/bcc_parms`（下标 6 电芯电压0、8 电流、11 电芯电压1，
+    /// 毫单位 mV/mA，随采样刷新），读不到才回退标准 power_supply 节点。仅 OPlus 机型有意义。
+    pub oplus_chg: Option<bool>,
+    /// OPlus 双电芯（`oplus_dual_cell`，默认 false）：私有节点电压取「电芯0 + 电芯1」
+    /// （下标 6 + 11，串联）。仅在 `oplus_chg` 打开时生效。
+    pub oplus_dual_cell: Option<bool>,
+    /// 倍电压（`voltage_double`，默认 false）：标准节点路径电压 ×2（双电芯机型上标准
+    /// 节点只报单节值）。**与 `oplus_chg` 互斥**：私有开关打开时被强制关闭。
+    pub voltage_double: Option<bool>,
+    /// 倍电流（`current_double`，默认 false）：标准节点路径电流 ×2，互斥关系同上。
+    pub current_double: Option<bool>,
+    /// 单位校准除数（`unit_divisor`，默认 1000，须 > 0）：读数先折算到毫单位
+    /// （标准节点 µV/µA ÷1000 属于 Android ABI；私有节点本身就是 mV/mA），
+    /// 再除以该值得到 V/A/W。用来替代原先代码里的量级启发式与物理范围门。
+    pub unit_divisor: Option<f32>,
     /// 「不改」开关（meta.yaml 字段 `nofix`，默认 false，且默认不写进配置）：
     /// true = 启动时跳过所有「二进制内容对外部文件的覆盖类操作」——webui 资产还原
     /// （webui_asset::restore_webroot）与 meta.yaml 快照自愈（sync_meta_snapshot）。
@@ -846,6 +868,15 @@ fn parse_disk_meta(text: &str) -> Option<ExternalMetaOverrides> {
             crate::utils::default_power_max_w()
         }
     });
+    // 单位校准：非有限/非正视为写错，回退内嵌默认（与 power_max_w 同口径，
+    // 单个数笔误不判整个文件非法；WebUI 写入侧另有 > 0 校验）
+    let unit_divisor = f.unit_divisor.map(|v| {
+        if v.is_finite() && v > 0.0 {
+            v
+        } else {
+            crate::utils::DEFAULT_UNIT_DIVISOR
+        }
+    });
     Some(ExternalMetaOverrides {
         loglevel: match f.loglevel.as_deref() {
             Some(v) => Some(sanitize_loglevel(v)?),
@@ -861,6 +892,11 @@ fn parse_disk_meta(text: &str) -> Option<ExternalMetaOverrides> {
         thread_bind: f.thread_bind,
         power_avg: f.power_avg,
         notify: f.notify,
+        oplus_chg: f.oplus_chg,
+        oplus_dual_cell: f.oplus_dual_cell,
+        voltage_double: f.voltage_double,
+        current_double: f.current_double,
+        unit_divisor,
         nofix: f.nofix,
         power_max_w,
     })
@@ -952,9 +988,9 @@ pub(crate) fn write_file_no_panic(path: &Path, bytes: &[u8]) -> bool {
 /// meta.yaml 顶层行替换：只匹配缩进为 0 的 `键: 值` 行，保留键名大小写、分隔空白与
 /// 行内注释。字段不存在返回 None，调用方据此放弃写入，绝不退化成整文件重排。
 ///
-/// 为什么不直接 serde 反序列化再序列化整份：`MetaYamlFile` 是 8 字段全必填 +
-/// deny_unknown_fields，整文件重排会吃掉用户写的注释；而且只要漏掉一个字段，
-/// 下一次 sync_meta_snapshot 就会判非法，用内嵌默认把整个文件覆盖掉。
+/// 为什么不直接 serde 反序列化再序列化整份：整文件重排会吃掉用户写的注释，而且
+/// `MetaYamlFile` 带 deny_unknown_fields，漏掉一个新字段就会让下一次
+/// sync_meta_snapshot 判非法、用内嵌默认把整个文件覆盖掉。
 /// 口径与 WebUI `contract/meta.ts::replaceTopLevelField` 一致，两边不要各写一套。
 pub(crate) fn replace_top_level_bool(content: &str, field: &str, value: bool) -> Option<String> {
     let want = field.to_ascii_lowercase();

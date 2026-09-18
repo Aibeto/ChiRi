@@ -35,6 +35,21 @@ fn apply_meta_overrides(meta: &mut Meta, o: &crate::common::ExternalMetaOverride
     if let Some(v) = o.notify {
         meta.notify = v;
     }
+    if let Some(v) = o.oplus_chg {
+        meta.oplus_chg = v;
+    }
+    if let Some(v) = o.oplus_dual_cell {
+        meta.oplus_dual_cell = v;
+    }
+    if let Some(v) = o.voltage_double {
+        meta.voltage_double = v;
+    }
+    if let Some(v) = o.current_double {
+        meta.current_double = v;
+    }
+    if let Some(v) = o.unit_divisor {
+        meta.unit_divisor = v;
+    }
     if let Some(v) = o.power_max_w {
         meta.power_max_w = v;
     }
@@ -95,6 +110,27 @@ pub struct Meta {
     /// 撤销已投递的那条（daemon 自己还在跑，有能力清理）。热重载即时生效。
     #[serde(default = "crate::utils::default_true", alias = "Notify")]
     pub notify: bool,
+
+    /// 电池读数：OPlus 私有节点优先（meta.yaml `oplus_chg`，默认 false）——读
+    /// `/sys/class/oplus_chg/battery/bcc_parms`（随采样刷新），读不到回退标准节点
+    #[serde(default, alias = "OplusChg")]
+    pub oplus_chg: bool,
+
+    /// OPlus 双电芯（`oplus_dual_cell`，默认 false）：私有节点电压取「电芯0 + 电芯1」
+    #[serde(default, alias = "OplusDualCell")]
+    pub oplus_dual_cell: bool,
+
+    /// 倍电压（`voltage_double`，默认 false）：标准节点路径电压 ×2，与私有开关互斥
+    #[serde(default, alias = "VoltageDouble")]
+    pub voltage_double: bool,
+
+    /// 倍电流（`current_double`，默认 false）：标准节点路径电流 ×2，互斥同上
+    #[serde(default, alias = "CurrentDouble")]
+    pub current_double: bool,
+
+    /// 单位校准除数（`unit_divisor`，默认 1000，须 > 0）：读数折算到毫单位后除以它得 V/A/W
+    #[serde(default = "crate::utils::default_unit_divisor", alias = "UnitDivisor")]
+    pub unit_divisor: f32,
 
     /// 「不改」开关（meta.yaml 可选字段 `nofix`，默认 false，默认不写进配置）：
     /// true = 启动时跳过「二进制内容对外部文件的覆盖类操作」（webui 资产还原与
@@ -845,6 +881,15 @@ impl Config {
         config.merge_scenemode();
         config.thermal.normalize();
         config.affinity.normalize();
+        // 电池读数选项同步到遥测层（原子量，热重载即时生效）。倍电压/倍电流与私有节点
+        // 互斥：私有开关打开时这里强制关掉它们——UI 侧同时置灰并清值，手改 meta 也兜得住
+        crate::monitor::telemetry::set_battery_options(
+            config.meta.oplus_chg,
+            config.meta.oplus_dual_cell,
+            !config.meta.oplus_chg && config.meta.voltage_double,
+            !config.meta.oplus_chg && config.meta.current_double,
+            config.meta.unit_divisor,
+        );
         Ok(config)
     }
 

@@ -1,5 +1,5 @@
 #!/system/bin/sh
-# customize.sh: [busybox] [i18n] [welcome] [hot-update-check] [mode-select] [hot-update-flow] [full-install]
+# customize.sh: [busybox] [i18n] [welcome] [hot-update-check] [volume-key] [config-keep] [mode-select] [hot-update-flow] [full-install] [oplus-detect]
 #
 # ChiRi Scheduler Installation Script
 
@@ -44,6 +44,15 @@ MSG_SERVICE_FAIL="Restart process failed, please try again or choose normal inst
 MSG_HOT_UPDATE_HINT="If you encounter any errors at the end, please ignore them. Run Action manually, or the scheduler will stop once the manager closes."
 MSG_INSTALL_CANCELLED="Installation cancelled"
 MSG_HOT_UPDATE_ABORT="Hot update done. Please run Action manually, or the scheduler will stop once the manager closes."
+MSG_KEEP_CONFIG_ASK="Keep the existing module configuration?"
+MSG_KEEP_CONFIG_UP="[Volume UP] Keep existing configuration (not recommended)"
+MSG_KEEP_CONFIG_DOWN="[Volume DOWN] Overwrite the existing configuration with the defaults"
+MSG_KEEP_CONFIG_YES="Existing configuration kept"
+MSG_KEEP_CONFIG_NO="Replaced with the default configuration"
+MSG_OPLUS_ON="OPlus private node detected; enabled private-node readings in the new config"
+MSG_OPLUS_DUAL_ON="Second cell detected (index 11); enabled dual-cell voltage"
+MSG_OPLUS_NO_META="Could not locate this device's meta.yaml, so the OPlus switches were not auto-enabled (turn them on in the WebUI battery page)"
+MSG_OPLUS_NO_SED="sed is unavailable, so the OPlus switches were not auto-enabled (turn them on in the WebUI battery page)"
 
 if echo "$CURRENT_LOCALE" | $BUSYBOX grep -qi "zh"; then
   LANG_CODE="zh"
@@ -64,9 +73,18 @@ if echo "$CURRENT_LOCALE" | $BUSYBOX grep -qi "zh"; then
   MSG_RESTARTING_SCHEDULER="正在重启调度器..."
   MSG_VERIFY_SERVICE="正在确认守护进程状态..."
   MSG_SERVICE_FAIL="重启进程失败，请重试或使用普通安装"
-  MSG_HOT_UPDATE_HINT="如有报错请忽略。调度未启动，需要手动执行一次Action。"
+  MSG_HOT_UPDATE_HINT="如有报错请忽略。调度未启动，需要手动执行一次Action"
   MSG_INSTALL_CANCELLED="安装已取消"
-  MSG_HOT_UPDATE_ABORT="热更新已完成，如有报错请忽略。调度未启动，需要手动执行一次Action。"
+  MSG_HOT_UPDATE_ABORT="热更新已完成，如有报错请忽略。调度未启动，需要手动执行一次Action"
+  MSG_KEEP_CONFIG_ASK="是否保留模块内已有的配置？"
+  MSG_KEEP_CONFIG_UP="[ 音量 + ] 保留现有配置（不建议）"
+  MSG_KEEP_CONFIG_DOWN="[ 音量 - ] 使用默认配置覆盖现有配置"
+  MSG_KEEP_CONFIG_YES="已保留"
+  MSG_KEEP_CONFIG_NO="已更换为默认配置"
+  MSG_OPLUS_ON="检测到 OPlus 私有节点，已为新配置启用私有节点读取"
+  MSG_OPLUS_DUAL_ON="检测到第二个电芯，已启用双电芯电压"
+  MSG_OPLUS_NO_META="未定位到当前机型的 meta.yaml，OPlus 开关未自动启用（可在 WebUI 电池读数页开启）"
+  MSG_OPLUS_NO_SED="检测为非 oplus 机型，继续安装"
 fi
 
 # [welcome] 
@@ -89,6 +107,127 @@ if [ -f "$ZIP_HOT_UPDATE_FLAG" ] && [ "$(cat "$ZIP_HOT_UPDATE_FLAG")" = "1" ] &&
     HOT_UPDATE_AVAILABLE=true
 fi
 
+# [volume-key]
+# 音量键检测（兼容 Magisk/KernelSU 环境）：安装模式选择与「是否保留配置」两处共用。
+# 返回 0 = 音量上键，返回 1 = 音量下键，返回 2 = 错误（多次按下事件）。
+# 说明：单次物理按键可能被多个输入设备重复上报，检测时需去重，
+#       同一轮轮询内同键的多次 DOWN 视为同一次按下，避免误判。
+detect_volume_key() {
+    ui_print "等待音量键按下..."
+    ui_print "Waiting for volume key press..."
+
+    # 临时文件写入模块暂存目录（安装环境 /tmp 可能不可写）
+    local tmp_file="$MODPATH/.getevent_output"
+    rm -f "$tmp_file"
+
+    # 后台监听所有输入设备的音量键事件
+    getevent -l > "$tmp_file" 2>/dev/null &
+    local getevent_pid=$!
+
+    local round=0
+    local first_key=""
+    local first_round=-1
+    local last_up=0
+    local last_down=0
+
+    # 每 0.1 秒轮询一次：前 10 秒等待第一次按下，之后 1 秒确认窗口
+    while [ $round -lt 120 ]; do
+        local up=$(grep -c "KEY_VOLUMEUP.*DOWN" "$tmp_file" 2>/dev/null || echo 0)
+        local down=$(grep -c "KEY_VOLUMEDOWN.*DOWN" "$tmp_file" 2>/dev/null || echo 0)
+
+        if [ -z "$first_key" ]; then
+            # 记录第一个按下事件（同轮内多设备重复上报视为同一次按下）
+            if [ "$up" -gt 0 ]; then
+                first_key="KEY_VOLUMEUP"
+                first_round=$round
+                last_up=$up
+            elif [ "$down" -gt 0 ]; then
+                first_key="KEY_VOLUMEDOWN"
+                first_round=$round
+                last_down=$down
+            fi
+        else
+            # 确认窗口：第一个按键后再监听 1 秒，确认无第二次按下
+            if [ $((round - first_round)) -ge 10 ]; then
+                kill $getevent_pid 2>/dev/null
+                rm -f "$tmp_file"
+                if [ "$first_key" = "KEY_VOLUMEUP" ]; then
+                    return 0
+                else
+                    return 1
+                fi
+            fi
+            # 第二次按下：出现另一按键，或同键计数在新轮次增加
+            if [ "$first_key" = "KEY_VOLUMEUP" ]; then
+                if [ "$down" -gt 0 ] || [ "$up" -gt "$last_up" ]; then
+                    kill $getevent_pid 2>/dev/null
+                    rm -f "$tmp_file"
+                    ui_print "错误：检测到多个音量键按下事件！"
+                    ui_print "Error: Multiple volume key press events detected!"
+                    return 2
+                fi
+            else
+                if [ "$up" -gt 0 ] || [ "$down" -gt "$last_down" ]; then
+                    kill $getevent_pid 2>/dev/null
+                    rm -f "$tmp_file"
+                    ui_print "错误：检测到多个音量键按下事件！"
+                    ui_print "Error: Multiple volume key press events detected!"
+                    return 2
+                fi
+            fi
+        fi
+        sleep 0.1
+        round=$((round + 1))
+    done
+
+    # 超时，清理并使用默认选择
+    kill $getevent_pid 2>/dev/null
+    rm -f "$tmp_file"
+    if [ -n "$first_key" ]; then
+        if [ "$first_key" = "KEY_VOLUMEUP" ]; then
+            return 0
+        else
+            return 1
+        fi
+    fi
+    ui_print "未检测到音量键，使用默认选项..."
+    ui_print "No volume key detected, using the default choice..."
+    return 0
+}
+
+# [config-keep]
+# 「是否保留现有配置」：音量上键 = 保留（默认，超时也走这支），音量下键 = 不保留。
+#   保留   → 删掉暂存目录的 config/：安装器随后不管走哪条路（完整安装的暂存落地、
+#            热更新的 cp -r）都不会覆盖模块里已有的配置；
+#   不保留 → 什么都不做，按当前流程由包内模板覆盖（旧行为）。
+# 保留不等于放任旧文件：daemon 在启动与每次热重载前都会调 common::sync_meta_snapshot()
+# ——缺键按内嵌默认补齐（meta 字段全部可选，老文件本来就合法），格式非法才用内嵌
+# 默认整份覆盖并追加警告注释（meta 的 `nofix` 开关会跳过这层自愈）。
+# 注意 config/ 里还有 i18n/*.ftl 与 normal/*.yaml 这类随包副本：运行期不读（都用
+# 二进制内嵌的那份），保留时它们会停在旧版本。
+ask_keep_config() {
+    ui_print "$MSG_KEEP_CONFIG_ASK"
+    ui_print "$MSG_KEEP_CONFIG_UP"
+    ui_print "$MSG_KEEP_CONFIG_DOWN"
+    ui_print " "
+
+    detect_volume_key
+    keep_result=$?
+    if [ $keep_result -eq 2 ]; then
+        ui_print "$MSG_INSTALL_CANCELLED"
+        abort "$MSG_INSTALL_CANCELLED"
+    fi
+    if [ $keep_result -eq 0 ]; then
+        ui_print "$MSG_KEEP_CONFIG_YES"
+        CONFIG_KEPT=true
+        rm -rf "$MODPATH/config"
+    else
+        ui_print "$MSG_KEEP_CONFIG_NO"
+        CONFIG_KEPT=false
+    fi
+    ui_print " "
+}
+
 # [mode-select] 
 # 安装模式选择（音量键交互）
 if [ "$HOT_UPDATE_AVAILABLE" = "true" ]; then
@@ -98,95 +237,7 @@ if [ "$HOT_UPDATE_AVAILABLE" = "true" ]; then
     ui_print "$MSG_VOLUME_DOWN"
     ui_print " "
     
-    # 音量键检测函数（兼容 Magisk/KernelSU 环境）
-    # 返回 0 表示音量上键，返回 1 表示音量下键
-    # 返回 2 表示错误（多次按下事件）
-    # 说明：单次物理按键可能被多个输入设备重复上报，检测时需去重，
-    #       同一轮轮询内同键的多次 DOWN 视为同一次按下，避免误判。
-    detect_volume_key() {
-        ui_print "等待音量键按下..."
-        ui_print "Waiting for volume key press..."
-        
-        # 临时文件写入模块暂存目录（安装环境 /tmp 可能不可写）
-        local tmp_file="$MODPATH/.getevent_output"
-        rm -f "$tmp_file"
-        
-        # 后台监听所有输入设备的音量键事件
-        getevent -l > "$tmp_file" 2>/dev/null &
-        local getevent_pid=$!
-        
-        local round=0
-        local first_key=""
-        local first_round=-1
-        local last_up=0
-        local last_down=0
-        
-        # 每 0.1 秒轮询一次：前 10 秒等待第一次按下，之后 1 秒确认窗口
-        while [ $round -lt 120 ]; do
-            local up=$(grep -c "KEY_VOLUMEUP.*DOWN" "$tmp_file" 2>/dev/null || echo 0)
-            local down=$(grep -c "KEY_VOLUMEDOWN.*DOWN" "$tmp_file" 2>/dev/null || echo 0)
-            
-            if [ -z "$first_key" ]; then
-                # 记录第一个按下事件（同轮内多设备重复上报视为同一次按下）
-                if [ "$up" -gt 0 ]; then
-                    first_key="KEY_VOLUMEUP"
-                    first_round=$round
-                    last_up=$up
-                elif [ "$down" -gt 0 ]; then
-                    first_key="KEY_VOLUMEDOWN"
-                    first_round=$round
-                    last_down=$down
-                fi
-            else
-                # 确认窗口：第一个按键后再监听 1 秒，确认无第二次按下
-                if [ $((round - first_round)) -ge 10 ]; then
-                    kill $getevent_pid 2>/dev/null
-                    rm -f "$tmp_file"
-                    if [ "$first_key" = "KEY_VOLUMEUP" ]; then
-                        return 0
-                    else
-                        return 1
-                    fi
-                fi
-                # 第二次按下：出现另一按键，或同键计数在新轮次增加
-                if [ "$first_key" = "KEY_VOLUMEUP" ]; then
-                    if [ "$down" -gt 0 ] || [ "$up" -gt "$last_up" ]; then
-                        kill $getevent_pid 2>/dev/null
-                        rm -f "$tmp_file"
-                        ui_print "错误：检测到多个音量键按下事件！"
-                        ui_print "Error: Multiple volume key press events detected!"
-                        return 2
-                    fi
-                else
-                    if [ "$up" -gt 0 ] || [ "$down" -gt "$last_down" ]; then
-                        kill $getevent_pid 2>/dev/null
-                        rm -f "$tmp_file"
-                        ui_print "错误：检测到多个音量键按下事件！"
-                        ui_print "Error: Multiple volume key press events detected!"
-                        return 2
-                    fi
-                fi
-            fi
-            sleep 0.1
-            round=$((round + 1))
-        done
-        
-        # 超时，清理并使用默认选择
-        kill $getevent_pid 2>/dev/null
-        rm -f "$tmp_file"
-        if [ -n "$first_key" ]; then
-            if [ "$first_key" = "KEY_VOLUMEUP" ]; then
-                return 0
-            else
-                return 1
-            fi
-        fi
-        ui_print "未检测到音量键，使用完整安装流程..."
-        ui_print "No volume key detected, proceeding with full installation..."
-        return 0
-    }
-    
-    # 等待用户按键选择（脚本顶层非函数环境，不能用 local）
+    # 等待用户按键选择（音量键检测函数见 [volume-key] 段）
     detect_volume_key
     choice_result=$?
     
@@ -197,6 +248,9 @@ if [ "$HOT_UPDATE_AVAILABLE" = "true" ]; then
         # 残留会让管理器把模块标记为「待重启更新」、屏蔽 Action/WebUI
         abort "$MSG_INSTALL_CANCELLED"
     fi
+
+    # 模式已选定：再问一次是否保留模块内已有的配置（完整安装与热更新共用这一问）
+    ask_keep_config
     
 # [hot-update-flow] 
     if [ $choice_result -eq 0 ]; then
@@ -366,9 +420,70 @@ else
     # 热更新不可用，显示提示信息
     ui_print "$MSG_HOT_UPDATE_UNAVAILABLE"
     ui_print " "
+    # 没有模式选择，但「是否保留现有配置」照问（首次安装时没有旧配置，保留也无害）
+    ask_keep_config
 fi
 
 # [full-install] 
-# 完整安装流程（原逻辑）
-# 保留默认配置，不执行文件操作
-# 完整安装将由 Magisk 自动处理模块文件复制
+# 完整安装流程（原逻辑）：模块文件由 Magisk 从暂存目录复制过来
+# （唯一例外是下面的 [oplus-detect]：覆盖安装时会按机型修 staged 的 meta.yaml）
+
+# [oplus-detect]
+# OPlus 私有节点存在就为新配置开好开关：`bcc_parms` 存在 → 顶层 `oplus_chg: false`
+# 改 true；字段数 ≥ 12（0 基下标 11 存在）→ `oplus_dual_cell: false` 改 true（双电芯）。
+# 只动**当前机型**那一份 meta.yaml：
+#   1) 优先按模块里的 active_config.chr（daemon 写的生效配置相对路径，如 8550/meta.yaml）；
+#   2) 退一步用 ro.soc.model 的数字部分（SM8550 → 8550）拼机型目录；
+#   3) 都拿不到就打印说明跳过，不去猜别的机型文件。
+# 只在用户选择「不保留配置」时执行（见文件末尾调用）——保留时那份 meta.yaml 是用户
+# 自己的文件，安装器不该碰；开关可以随时在 WebUI 电池读数页改。
+OPLUS_BCC="/sys/class/oplus_chg/battery/bcc_parms"
+
+apply_oplus_defaults() {
+    [ -f "$OPLUS_BCC" ] || return 0
+
+    local rel=""
+    local active="/data/adb/modules/chiri/active_config.chr"
+    if [ -f "$active" ]; then
+        rel=$(cat "$active" 2>/dev/null | tr -d ' \t\r\n')
+    fi
+    if [ -z "$rel" ]; then
+        local soc=$(getprop ro.soc.model 2>/dev/null | tr -cd '0-9')
+        if [ -n "$soc" ] && [ -f "$MODPATH/config/$soc/meta.yaml" ]; then
+            rel="$soc/meta.yaml"
+        fi
+    fi
+    if [ -z "$rel" ] || [ ! -f "$MODPATH/config/$rel" ]; then
+        ui_print "$MSG_OPLUS_NO_META"
+        return 0
+    fi
+
+    local meta="$MODPATH/config/$rel"
+    local sed_cmd=""
+    if [ -n "$BUSYBOX" ] && [ -x "$BUSYBOX" ]; then
+        sed_cmd="$BUSYBOX sed"
+    elif command -v sed >/dev/null 2>&1; then
+        sed_cmd="sed"
+    fi
+    if [ -z "$sed_cmd" ]; then
+        ui_print "$MSG_OPLUS_NO_SED"
+        return 0
+    fi
+
+    if grep -q "^oplus_chg: false" "$meta"; then
+        $sed_cmd -i "s/^oplus_chg: false/oplus_chg: true/" "$meta"
+        ui_print "$MSG_OPLUS_ON"
+    fi
+    # 第 12 个字段非空 = 这台机器报出了第二个电芯（索引 11）
+    if [ -n "$(cut -d ',' -f 12 "$OPLUS_BCC" 2>/dev/null)" ]; then
+        if grep -q "^oplus_dual_cell: false" "$meta"; then
+            $sed_cmd -i "s/^oplus_dual_cell: false/oplus_dual_cell: true/" "$meta"
+            ui_print "$MSG_OPLUS_DUAL_ON"
+        fi
+    fi
+}
+
+# 覆盖安装（用户没选保留）时才自动开 OPlus 私有节点
+if [ "$CONFIG_KEPT" != "true" ]; then
+    apply_oplus_defaults
+fi

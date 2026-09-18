@@ -165,12 +165,13 @@
         onchange={next => app.setDraft('thread_bind', next)}
       />
 
+      <!-- 常驻状态通知：功能未完成，长期置灰（保留开关位置，文案见 config.notify.hint） -->
       <ToggleField
         label={t('config.notify')}
         hint={t('config.notify.hint')}
         checked={notifyOn}
         pending={app.draft.notify !== undefined}
-        disabled={!app.metaValid}
+        disabled
         onchange={next => app.setDraft('notify', next)}
       />
     </div>
@@ -224,19 +225,25 @@
       {#if app.downError}
         <p class="u-note u-danger u-mt-2">{app.downError}</p>
       {/if}
-      <!-- 功耗口径：直写 meta.yaml 的 power_avg（不走草稿，立即热重载） -->
-      <ToggleField
-        label={t('config.powerAvg')}
-        hint={t('config.powerAvg.hint')}
-        checked={app.powerAvgUsesAverage}
-        disabled={app.powerAvgPending || !app.metaValid}
-        onchange={next => app.setPowerAvg(next)}
-      />
-      {#if app.powerAvgError}
-        <p class="u-note u-danger u-mt-2">{app.powerAvgError}</p>
-      {/if}
+      <!-- 功耗口径与电池读数（电流/电压/功率）的设置都在「电池读数」二级页 -->
     </div>
   </Panel>
+
+  {#if app.isChiri}
+    <!-- 电池读数：二级页面入口（电流/电压/功率的来源、双电芯、单位换算、功耗口径）。
+        ChiRi 专属：遥测线程只在 ChiRi SoC 上启动，Yumi 上这些开关没有消费方 -->
+    <Panel title={t('battery.title')} desc={t('battery.entry.hint')}>
+      <div class="entry__row">
+        <button
+          type="button"
+          class="ak-button btn btn--ghost entry__open"
+          onclick={() => go('battery')}
+        >
+          {t('battery.entry.open')}
+        </button>
+      </div>
+    </Panel>
+  {/if}
 
   {#if app.isChiri}
     <!-- 实验室：二级页面入口。只显示「有没有启用」这一个事实，具体在实验室页里管 -->

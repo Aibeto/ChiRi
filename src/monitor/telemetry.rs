@@ -1,9 +1,10 @@
-//! telemetry.rs: [data] [parse] [loop]
+//! telemetry.rs: [data] [options] [parse] [loop]
 
 /// 遥测数据源（ChiRi 专属，1s 轮询）：
 /// - PSI 压力信息（/proc/pressure/{cpu,io,memory} 的 some avg10，无 PSI 的设备恒为 0）
 /// - GPU 利用率（高通 kgsl gpu_busy_percentage / MTK ged gpu_loading，缺失为 None）
-/// - 电池电流/电压（/sys/class/power_supply/battery/{current_now,voltage_now}，缺失为 None）
+/// - 电池电流/电压（默认 Android 标准节点 /sys/class/power_supply/battery/{current_now,voltage_now}；
+///   meta `oplus_chg` 打开时优先 OPlus 私有节点 bcc_parms，读不到才回退标准节点；缺失为 None）
 ///
 /// 数据写入进程级共享原子量（monitor 层写、chiri 调度层读），不占用事件通道容量；
 /// 消费端为 chiri scheduler_ipc 的 2s 热循环：telemetry.log CSV 落盘 + 周期 debug 摘要。
@@ -49,6 +50,57 @@ static BATT_UNAVAIL_WARNED: AtomicBool = AtomicBool::new(false);
 /// GPU 利用率候选节点全部不存在时的告警去重（只报一次）
 static GPU_UNAVAIL_WARNED: AtomicBool = AtomicBool::new(false);
 
+/// OPlus 私有节点缺失告警去重（节点在运行期出现/重新可用时重新武装）
+static BCC_MISSING_WARNED: AtomicBool = AtomicBool::new(false);
+
+/// 私有节点存在性复查间隔：驱动加载晚于 daemon（或节点被 recreate）时，
+/// 不会因为开机瞬间探到「不存在」就永远钉在回退标准节点的状态
+const BCC_PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+
+// [options]
+/// 电池读数的机型选项（meta.yaml 五个字段：oplus_chg / oplus_dual_cell /
+/// voltage_double / current_double / unit_divisor）。由 chiri `Config::load` 写入
+/// （含热重载），读点在 1s 遥测线程与各消费点——用原子量，不每轮解析 YAML。
+///
+/// - `OPLUS_CHG`：优先读 OPlus 私有节点（bcc_parms，随采样刷新），读不到才回退标准节点；
+/// - `OPLUS_DUAL_CELL`：私有节点电压取「电芯0 + 电芯1」（下标 6 + 11，串联双电芯）；
+/// - `VOLTAGE_DOUBLE` / `CURRENT_DOUBLE`：标准节点路径的倍电压/倍电流（双电芯机型上
+///   标准节点可能只报单节/单芯值）。**与私有节点互斥**：私有开关打开时 UI 强制关闭
+///   这两个开关，这里再判一次，手改 meta 也挡得住；
+/// - `UNIT_DIVISOR`：单位校准。读数先折算到毫单位（标准节点 µV/µA ÷1000 是 Android
+///   ABI；私有节点本身就是 mV/mA），再除以该值得到 V/A/W。默认 1000。
+static OPLUS_CHG: AtomicBool = AtomicBool::new(false);
+static OPLUS_DUAL_CELL: AtomicBool = AtomicBool::new(false);
+static VOLTAGE_DOUBLE: AtomicBool = AtomicBool::new(false);
+static CURRENT_DOUBLE: AtomicBool = AtomicBool::new(false);
+static UNIT_DIVISOR_BITS: AtomicU32 =
+    AtomicU32::new(crate::utils::DEFAULT_UNIT_DIVISOR.to_bits());
+
+/// 写入电池读数选项。单位校准非有限/非正时退回默认值——单项笔误不牵连其它选项。
+pub fn set_battery_options(
+    oplus_chg: bool,
+    oplus_dual_cell: bool,
+    voltage_double: bool,
+    current_double: bool,
+    unit_divisor: f32,
+) {
+    OPLUS_CHG.store(oplus_chg, Ordering::Relaxed);
+    OPLUS_DUAL_CELL.store(oplus_dual_cell, Ordering::Relaxed);
+    VOLTAGE_DOUBLE.store(voltage_double, Ordering::Relaxed);
+    CURRENT_DOUBLE.store(current_double, Ordering::Relaxed);
+    let d = if unit_divisor.is_finite() && unit_divisor > 0.0 {
+        unit_divisor
+    } else {
+        crate::utils::DEFAULT_UNIT_DIVISOR
+    };
+    UNIT_DIVISOR_BITS.store(d.to_bits(), Ordering::Relaxed);
+}
+
+/// 单位校准除数（1 个 V/A/W 对应多少毫单位），恒 > 0
+fn unit_divisor() -> f32 {
+    f32::from_bits(UNIT_DIVISOR_BITS.load(Ordering::Relaxed))
+}
+
 /// 取进程级遥测快照
 pub fn telemetry() -> &'static Telemetry {
     &TELEMETRY
@@ -70,23 +122,18 @@ impl Telemetry {
         let v = f32::from_bits(self.gpu_busy.load(Ordering::Relaxed));
         if v.is_nan() { None } else { Some(v) }
     }
-    /// 电池电流（mA，保留方向符号）；None = 不可用
+    /// 电池电流（mA，保留方向符号）；None = 不可用。
+    /// 存储口径 µA → ÷1000 得毫单位 → ÷ 单位校准得 A → ×1000 回 mA，即 µA ÷ 单位校准
+    /// （默认校准 1000 时与原口径一致：µA/1000）
     pub fn batt_current_ma(&self) -> Option<f32> {
         let v = self.batt_current_ua.load(Ordering::Relaxed);
-        if v == UNAVAIL {
-            None
-        } else {
-            Some(v as f32 / 1000.0)
-        }
+        (v != UNAVAIL).then(|| v as f32 / unit_divisor())
     }
-    /// 电池电压（V）；None = 不可用
+    /// 电池电压（V）；None = 不可用。
+    /// 存储口径 µV → ÷1000 得毫单位 → ÷ 单位校准得 V（默认校准 1000 时 = µV/1e6）
     pub fn batt_voltage_v(&self) -> Option<f32> {
         let v = self.batt_voltage_uv.load(Ordering::Relaxed);
-        if v == UNAVAIL {
-            None
-        } else {
-            Some(v as f32 / 1_000_000.0)
-        }
+        (v != UNAVAIL).then(|| v as f32 / 1000.0 / unit_divisor())
     }
     /// 电池瞬时功率（W，电流取绝对值）；电流或电压缺失返回 None
     pub fn batt_power_w(&self) -> Option<f32> {
@@ -117,17 +164,27 @@ fn read_i32(path: &str) -> Option<i32> {
         .and_then(|s| s.trim().parse::<i32>().ok())
 }
 
-/// OPlus 私有节点（bcc_parms）：逗号分隔字段，下标 6 = 电芯1电压、8 = 电流、
-/// 11 = 电芯2电压（双电芯机型，0 = 无）。该节点由 BCC 硬件直出、随采样刷新，
+/// 标准 Android 节点（Android ABI：µV / µA）；不可用返回哨兵 [`UNAVAIL`]
+fn read_standard_battery() -> (i32, i32) {
+    (
+        read_i32("/sys/class/power_supply/battery/current_now").unwrap_or(UNAVAIL),
+        read_i32("/sys/class/power_supply/battery/voltage_now").unwrap_or(UNAVAIL),
+    )
+}
+
+/// OPlus 私有节点（bcc_parms）：逗号分隔字段，**0 基下标**（首项是下标 0）——
+/// 下标 6 = 电芯0电压（第 7 项）、8 = 电流（第 9 项）、11 = 电芯1电压（第 12 项，
+/// 双电芯机型；单电芯机型为 0）。该节点由 BCC 硬件直出、随采样刷新，
 /// 而 OPlus 内核标准 power_supply 节点（current_now/voltage_now）约每 10s
 /// 才刷新一次——1s 精度的功耗统计必须优先走该节点，否则读到的是重复旧值。
 const OPLUS_BCC_PARMS: &str = "/sys/class/oplus_chg/battery/bcc_parms";
 
-/// 读 OPlus bcc_parms，归一化为 (电压 µV, 电流 µA)。
-/// 字段单位随机型可能是 µV/µA 或 mV/mA，按量级启发式归一；
-/// 归一后超出物理合理范围（电压 2–6V、电流 ±30A）视为脏数据返回 None，
-/// 由调用方回退标准 power_supply 节点。
-fn read_oplus_bcc() -> Option<(i32, i32)> {
+/// 读 OPlus bcc_parms，归一化为 (电压 µV, 电流 µA) 供共享快照使用。
+/// 字段按**毫单位**（mV/mA）解读、乘 1000 存成与标准节点一致的 µV/µA 口径：
+/// 不再做量级启发式猜测（旧的 mV/V、mA/A 自动识别 + 2–6V/±30A 物理范围门已删除），
+/// 单位不匹配交给 meta 的「单位校准」（unit_divisor）修正。
+/// 字段缺失/越界返回 None（调用方回退标准 power_supply 节点）。
+fn read_oplus_bcc(dual_cell: bool) -> Option<(i32, i32)> {
     let text = std::fs::read_to_string(OPLUS_BCC_PARMS).ok()?;
     let f: Vec<&str> = text.split(',').map(str::trim).collect();
     let v0: i64 = match f.get(6).and_then(|s| s.parse().ok()) {
@@ -141,33 +198,17 @@ fn read_oplus_bcc() -> Option<(i32, i32)> {
     if v0 == 0 && cur == 0 {
         return None;
     }
-    // 双电芯串联：下标 11 非零时电压取两节之和
-    let v1: i64 = f.get(11).and_then(|s| s.parse().ok()).unwrap_or(0);
-    let v_raw = if v1 != 0 { v0 + v1 } else { v0 };
-
-    // 量级归一：电压 → µV
-    let av = v_raw.abs();
-    let v_uv = if av > 100_000 {
-        v_raw
-    } else if av > 100 {
-        v_raw * 1_000 // mV
+    // 双电芯串联（`oplus_dual_cell` 打开时）：电压取两节之和；下标 11 缺失或 0
+    // 视为单电芯机型的该字段无意义，仍用下标 6
+    let v_raw = if dual_cell {
+        let v1: i64 = f.get(11).and_then(|s| s.parse().ok()).unwrap_or(0);
+        if v1 != 0 { v0 + v1 } else { v0 }
     } else {
-        v_raw * 1_000_000 // V
+        v0
     };
-    // 量级归一：电流 → µA
-    let ai = cur.abs();
-    let i_ua = if ai > 100_000 {
-        cur
-    } else if ai > 100 {
-        cur * 1_000 // mA
-    } else {
-        cur * 1_000_000 // A
-    };
-
-    if !(2_000_000..=6_000_000).contains(&v_uv) || i_ua.abs() > 30_000_000 {
-        return None;
-    }
-    Some((v_uv as i32, i_ua as i32))
+    let v_uv = i32::try_from(v_raw.checked_mul(1000)?).ok()?;
+    let i_ua = i32::try_from(cur.checked_mul(1000)?).ok()?;
+    Some((v_uv, i_ua))
 }
 
 /// 电压/电流字段不可用：告警一次并返回 None（调用方回退标准 power_supply 节点）。
@@ -189,11 +230,9 @@ pub fn telemetry_loop() {
     ];
     let mut gpu_path: Option<&str> = None;
 
-    // OPlus 私有节点探测（一次性）：存在则功耗读取走 BCC 实时数据
-    let bcc_available = std::path::Path::new(OPLUS_BCC_PARMS).exists();
-    if bcc_available {
-        log::info!("{}", crate::i18n::t("telemetry-oplus-bcc"));
-    }
+    // OPlus 私有节点：开关打开期间探测（None = 尚未探测）；开关关着时不碰该节点
+    let mut bcc_available: Option<bool> = None;
+    let mut bcc_probed_at: Option<std::time::Instant> = None;
 
     loop {
         // --- PSI ---
@@ -230,13 +269,41 @@ pub fn telemetry_loop() {
         }
 
         // --- 电池电流/电压：OPlus bcc_parms 优先（规避标准节点 10s 缓存），失败回退标准节点 ---
-        let (current, voltage) = match bcc_available.then(read_oplus_bcc) {
-            Some(Some((v, i))) => (i, v),
-            _ => (
-                read_i32("/sys/class/power_supply/battery/current_now").unwrap_or(UNAVAIL),
-                read_i32("/sys/class/power_supply/battery/voltage_now").unwrap_or(UNAVAIL),
-            ),
+        let use_oplus = OPLUS_CHG.load(Ordering::Relaxed);
+        if use_oplus
+            && bcc_probed_at.map_or(true, |t: std::time::Instant| t.elapsed() >= BCC_PROBE_INTERVAL)
+        {
+            let now = std::path::Path::new(OPLUS_BCC_PARMS).exists();
+            // 只在状态变化时打点：可用 = info；不可用 = warn（一次，恢复后重新武装）
+            if bcc_available != Some(now) {
+                if now {
+                    log::info!("{}", crate::i18n::t("telemetry-oplus-bcc"));
+                    BCC_MISSING_WARNED.store(false, Ordering::Relaxed);
+                } else if !BCC_MISSING_WARNED.swap(true, Ordering::Relaxed) {
+                    log::warn!("{}", crate::i18n::t("telemetry-oplus-bcc-missing"));
+                }
+            }
+            bcc_available = Some(now);
+            bcc_probed_at = Some(std::time::Instant::now());
+        }
+        let (mut current, mut voltage) = if use_oplus && bcc_available == Some(true) {
+            match read_oplus_bcc(OPLUS_DUAL_CELL.load(Ordering::Relaxed)) {
+                Some((v, i)) => (i, v),
+                None => read_standard_battery(),
+            }
+        } else {
+            read_standard_battery()
         };
+        // 倍电压/倍电流：只作用于标准节点路径（私有开关打开时 UI 已强制关闭这两个开关，
+        // 这里再判一次，手改 meta 也挡得住）
+        if !use_oplus {
+            if voltage != UNAVAIL && VOLTAGE_DOUBLE.load(Ordering::Relaxed) {
+                voltage = voltage.saturating_mul(2);
+            }
+            if current != UNAVAIL && CURRENT_DOUBLE.load(Ordering::Relaxed) {
+                current = current.saturating_mul(2);
+            }
+        }
         // 候选全失效（BCC 与标准节点都读不到）报一条 warn，恢复后重新武装：
         // 逐候选失败不单独打点——1s 轮询下那是刷屏，读不到的价值由这条汇总体现
         if current == UNAVAIL || voltage == UNAVAIL {

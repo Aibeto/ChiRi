@@ -524,6 +524,34 @@ class AppStore {
     return typeof v === 'number' && Number.isFinite(v) && v > 0 && v <= 200 ? v : 12
   }
 
+  // [batteryRead]
+  /** 电池读数选项（meta.yaml 的 5 个字段，电池读数二级页直写）：读快照，写入走 setBatteryFields */
+  get oplusChg(): boolean {
+    return this.metaSnapshot?.values?.oplus_chg === true
+  }
+  get oplusDualCell(): boolean {
+    return this.metaSnapshot?.values?.oplus_dual_cell === true
+  }
+  get voltageDouble(): boolean {
+    return this.metaSnapshot?.values?.voltage_double === true
+  }
+  get currentDouble(): boolean {
+    return this.metaSnapshot?.values?.current_double === true
+  }
+  /** 单位校准除数：缺省/非法一律按 1000（与 daemon 侧同口径） */
+  get unitDivisor(): number {
+    const v = this.metaSnapshot?.values?.unit_divisor
+    return typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : 1000
+  }
+  /** 电池读数页写入中（直写 meta.yaml） */
+  battPending = $state(false)
+  /**
+   * meta.yaml 直写互斥：写路径是「读-改-写」，两笔并发会各自读旧内容、后一笔把前一笔的
+   * 字段覆盖掉（丢字段）。页面上的直写入口（setBatteryFields / setPowerAvg）共用这一把锁。
+   */
+  metaWritePending = $state(false)
+  battError = $state('')
+
   async loadDown(): Promise<void> {
     if (this.downPending) return
     const result = await readDown()
@@ -566,8 +594,9 @@ class AppStore {
    * 写后回读，界面以实际落盘内容为准。
    */
   async setPowerAvg(useAverage: boolean): Promise<void> {
-    if (this.powerAvgPending) return
+    if (this.powerAvgPending || this.metaWritePending) return
     this.powerAvgPending = true
+    this.metaWritePending = true
     this.powerAvgError = ''
     try {
       const result = await writeMetaFields({ power_avg: useAverage })
@@ -584,6 +613,50 @@ class AppStore {
       toast(useAverage ? t('overview.power.avg') : t('overview.power.ref'))
     } finally {
       this.powerAvgPending = false
+      this.metaWritePending = false
+    }
+  }
+
+  /**
+   * 电池读数页：直写 meta.yaml（不走草稿，立即热重载）。
+   * 开启 OPlus 私有节点时把倍电压/倍电流一并清掉——两者互斥（daemon 侧也只认私有节点）；
+   * 界面同时置灰这两项，这里再兜一次，避免留一个「开着但不生效」的开关。
+   * 写后回读，界面以实际落盘内容为准。
+   */
+  async setBatteryFields(
+    patch: Partial<{
+      oplus_chg: boolean
+      oplus_dual_cell: boolean
+      voltage_double: boolean
+      current_double: boolean
+      unit_divisor: number
+      power_max_w: number
+    }>
+  ): Promise<void> {
+    if (this.battPending || this.metaWritePending) return
+    this.battPending = true
+    this.metaWritePending = true
+    this.battError = ''
+    try {
+      // 强制清空排在展开之后：调用方就算多传 voltage_double: true，也写不出
+      // 「私有节点开 + 倍压开」这种互斥组合（daemon 侧还会再判一次）
+      const fields =
+        patch.oplus_chg === true
+          ? { ...patch, voltage_double: false, current_double: false }
+          : patch
+      const result = await writeMetaFields(fields)
+      if (result.kind !== 'ok') {
+        this.battError = result.kind === 'failed' ? result.error : t('state.unsupportedEnv')
+        toast(this.battError)
+        return
+      }
+      this.metaSnapshot = result.value
+      this.metaValid = result.value.valid
+      this.metaProblems = result.value.problems
+      this.metaPath = result.value.path
+    } finally {
+      this.battPending = false
+      this.metaWritePending = false
     }
   }
 

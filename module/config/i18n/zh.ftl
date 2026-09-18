@@ -155,6 +155,7 @@ gpu-detect-miss = [GPU] 未找到可用的 GPU 频率节点，contingency 的 GP
 # --- SysFS 通用 ---
 sysfs-write-failed = [SysFS] 写入 { $path } 失败: { $error }
 config-scenemode-merged = [Config] 已合并息屏场景配置文件: { $path }
+config-scenemode-parse-failed = [Config] 息屏场景配置解析失败（{ $path }）: { $error }，保持当前生效的 scenemode
 config-watch-error = [Config] 监控配置目录失败: { $error }
 config-apply-mode-failed = [Config] 应用重载的模式设置失败: { $error }
 config-apply-tweaks-failed = [Config] 应用重载的系统微调失败: { $error }
@@ -314,7 +315,8 @@ notify-post-failed = [Notify] cmd notification 的三条候选命令行全部失
 
 # --- Telemetry（遥测）---
 monitor-thread-start-telemetry = [Main] 启动遥测监控线程（PSI/GPU/电池）...
-telemetry-oplus-bcc = [Telemetry] 检测到 OPlus 私有节点 bcc_parms，功耗读取走 BCC 实时数据（规避标准 power_supply 节点 10s 缓存）
+telemetry-oplus-bcc = [Telemetry] 已启用 OPlus 私有节点 bcc_parms，电流/电压读取走 BCC 实时数据（规避标准 power_supply 节点约 10s 的缓存）
+telemetry-oplus-bcc-missing = [Telemetry] meta 开启了 OPlus 私有节点（oplus_chg），但 bcc_parms 节点不存在，本次运行回退标准 power_supply 节点
 telemetry-bcc-unusable = [Telemetry] bcc_parms 下标 6/8（电压/电流）缺失或非整数，BCC 实时功耗不可用，已回退标准 power_supply 节点（约 10s 缓存；其电流单位可能与 µA 假设不一致，功耗列量纲请自行核对）
 telemetry-battery-unavailable = [Telemetry] 电池电流/电压候选节点全部读不到（OPlus BCC 与标准 power_supply 节点都失败），功耗/电压列将写 -（每进入失效态只报一次）
 telemetry-gpu-unavailable = [Telemetry] GPU 利用率候选节点全部不存在（非 Adreno/GED 机型），GPU 列将写 -（只报一次）

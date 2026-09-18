@@ -20,5 +20,14 @@ thread_bind: true
 power_avg: false
 # 常驻状态通知（Android 通知栏，仅 ChiRi）：false = 不投递，并撤销已投递的通知。
 notify: true
+# 电池读数（仅 ChiRi）：OPlus 私有节点优先（bcc_parms，随采样刷新；读不到回退标准节点）
+oplus_chg: false
+# OPlus 双电芯：电压取「电芯0 + 电芯1」（下标 6 + 11），仅上面开关打开时有效
+oplus_dual_cell: false
+# 倍电压 / 倍电流：仅标准节点路径；OPlus 开关打开时这两项被强制关闭
+voltage_double: false
+current_double: false
+# 单位校准：读数折算到毫单位后除以该值得到 V/A/W（默认 1000，须 > 0）
+unit_divisor: 1000
 # 耗电读数满量程（W，WebUI 状态页仪表盘用；可选，默认 12）：只影响显示，不参与调度。
 power_max_w: 12

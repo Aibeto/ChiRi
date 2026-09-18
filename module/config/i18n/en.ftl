@@ -156,6 +156,7 @@ gpu-detect-miss = [GPU] no usable GPU frequency node found; contingency GPU lock
 # --- SysFS generic ---
 sysfs-write-failed = [SysFS] failed to write { $path }: { $error }
 config-scenemode-merged = [Config] Merged scenemode config: { $path }
+config-scenemode-parse-failed = [Config] Failed to parse the scenemode config ({ $path }): { $error }; keeping the current scenemode
 config-watch-error = [Config] Failed to watch config directory: { $error }
 config-apply-mode-failed = [Config] Failed to apply reloaded mode settings: { $error }
 config-apply-tweaks-failed = [Config] Failed to apply reloaded system tweaks: { $error }
@@ -315,7 +316,8 @@ notify-post-failed = [Notify] all three candidate cmd notification command lines
 
 # --- Telemetry ---
 monitor-thread-start-telemetry = [Main] starting telemetry monitor thread (PSI/GPU/battery)...
-telemetry-oplus-bcc = [Telemetry] OPlus private node bcc_parms detected, battery power reads use real-time BCC data (bypassing the 10s cache of standard power_supply nodes)
+telemetry-oplus-bcc = [Telemetry] OPlus private node bcc_parms enabled: battery current/voltage reads use real-time BCC data (bypassing the ~10s cache of standard power_supply nodes)
+telemetry-oplus-bcc-missing = [Telemetry] meta enables the OPlus private node (oplus_chg) but bcc_parms does not exist; falling back to the standard power_supply nodes for this run
 telemetry-bcc-unusable = [Telemetry] bcc_parms fields 6/8 (voltage/current) are missing or non-integer; real-time BCC power is unavailable, so telemetry fell back to the standard power_supply node (~10s cache; its current unit may not match the uA assumption, so verify the power column scale)
 telemetry-battery-unavailable = [Telemetry] all battery current/voltage candidate nodes are unreadable (both OPlus BCC and the standard power_supply nodes failed); power/voltage columns will be written as - (reported once per outage)
 telemetry-gpu-unavailable = [Telemetry] no GPU busy candidate node exists (non-Adreno/GED device); the GPU column stays - (reported once)

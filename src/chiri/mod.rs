@@ -1188,7 +1188,7 @@ pub fn start_scheduler_thread(
                     telemetry_log_counter += 1;
                     // 常驻状态通知：每 5s 更新一次（内容不变不重投；内部自带失败候选与
                     // 告警去重）。标题 = 前台包名，正文 = 模式/家族/子模式/温度/功耗
-                    // ——功耗口径随 meta.power_avg（高级设置里的开关）。
+                    // ——功耗口径随 meta.power_avg（电池读数页里的开关）。
                     // 这里只组装并**非阻塞投递**到 notify 线程（拿不到 `cmd` 的进程创建
                     // 与等待，调度循环照常跑）
                     if !notify_on {

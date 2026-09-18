@@ -24,6 +24,11 @@ export const META_FIELDS = [
   'thread_bind',
   'power_avg',
   'notify',
+  'oplus_chg',
+  'oplus_dual_cell',
+  'voltage_double',
+  'current_double',
+  'unit_divisor',
   'nofix',
   'power_max_w'
 ] as const
@@ -39,6 +44,11 @@ export const WRITABLE_FIELDS = [
   'thread_bind',
   'power_avg',
   'notify',
+  'oplus_chg',
+  'oplus_dual_cell',
+  'voltage_double',
+  'current_double',
+  'unit_divisor',
   'power_max_w'
 ] as const
 export type WritableField = (typeof WRITABLE_FIELDS)[number]
@@ -157,7 +167,11 @@ export function validateMeta(values: Record<string, unknown>): string[] {
     'scenemode_enabled',
     'thread_bind',
     'power_avg',
-    'notify'
+    'notify',
+    'oplus_chg',
+    'oplus_dual_cell',
+    'voltage_double',
+    'current_double'
   ] as const) {
     if (f in values && typeof values[f] !== 'boolean') {
       problems.push(`${f} 必须是布尔值 true/false`)
@@ -174,6 +188,12 @@ export function validateMeta(values: Record<string, unknown>): string[] {
     (typeof values.power_max_w !== 'number' || !Number.isFinite(values.power_max_w))
   ) {
     problems.push('power_max_w 必须是数字')
+  }
+  if (
+    'unit_divisor' in values &&
+    (typeof values.unit_divisor !== 'number' || !Number.isFinite(values.unit_divisor))
+  ) {
+    problems.push('unit_divisor 必须是数字')
   }
   return problems
 }
@@ -196,12 +216,22 @@ export function validateFieldValue(
         ? null
         : '满量程必须是 0~200 之间的数字（W）'
     }
+    case 'unit_divisor': {
+      const n = Number(value)
+      return Number.isFinite(n) && n > 0 && n <= 1e9
+        ? null
+        : '单位校准必须是大于 0 的数字（默认 1000）'
+    }
     case 'dev_record':
     case 'fas_enabled':
     case 'scenemode_enabled':
     case 'thread_bind':
     case 'power_avg':
     case 'notify':
+    case 'oplus_chg':
+    case 'oplus_dual_cell':
+    case 'voltage_double':
+    case 'current_double':
       return typeof value === 'boolean' ? null : `${field} 必须是布尔值`
   }
 }

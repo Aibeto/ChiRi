@@ -5,6 +5,7 @@
   import { onMount } from 'svelte'
   import LiveStatus from '@/components/LiveStatus.svelte'
   import AppsView from '@/views/AppsView.svelte'
+  import BatteryView from '@/views/BatteryView.svelte'
   import ConfigView from '@/views/ConfigView.svelte'
   import LabView from '@/views/LabView.svelte'
   import LogsView from '@/views/LogsView.svelte'
@@ -15,7 +16,7 @@
   import { app } from '@/state.svelte'
 
   const navItems = $derived(VIEW_IDS.map(id => ({ id, label: t(`nav.${id}`) })))
-  // 二级视图（实验室）挂在配置页下，导航高亮跟着父视图走
+  // 二级视图（实验室、电池读数）挂在配置页下，导航高亮跟着父视图走
   const navActive = $derived(navOwner(router.view))
   const daemonLabel = $derived(t(`daemon.${app.daemonState}`))
 
@@ -76,6 +77,8 @@
       <AppsView />
     {:else if router.view === 'logs'}
       <LogsView />
+    {:else if router.view === 'battery'}
+      <BatteryView />
     {:else}
       <LabView />
     {/if}
