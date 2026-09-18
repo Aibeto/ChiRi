@@ -683,14 +683,15 @@ pub fn embedded_ftl_str(lang: &str) -> &'static str {
     embedded_config_file(rel).unwrap_or_default()
 }
 
-/// 磁盘 meta.yaml 的严格结构：八个字段必填 + 三个可选字段（power_avg / nofix / power_max_w）、
+/// 磁盘 meta.yaml 的严格结构：**字段全部可选**（缺省 = 沿用二进制内嵌默认；见
+/// ExternalMetaOverrides 的「None = 不变更」语义）、
 /// 拒绝未知字段。**后加字段一律设计成可选**（serde default）：老文件缺行仍然合法，
 /// 不会因为一次字段扩充就把用户全部设置判非法覆盖掉。
-/// 任一缺失/多余/类型不符，或取值不在白名单内，整文件判非法——
-/// 由 sync_meta_snapshot 用二进制内嵌默认值整体覆盖修正。
-/// **新增字段时四个 meta.yaml 模板（config/meta.yaml 与三个 {soc}/meta.yaml）、WebUI
-/// 的 META_FIELDS 与 chiri::config::Meta / Config::load 的外部覆盖合并必须同步**：
-/// 全必填意味着漏改一处就会让整个文件判非法、用户设置一起丢。
+/// 出现即校验：类型不符 / 取值不在白名单 / 未知键 → 整文件判非法，由
+/// sync_meta_snapshot 用二进制内嵌默认值整体覆盖修正（**缺字段不算非法**）。
+/// **新增字段时四处必须同步**：本结构 + [`ExternalMetaOverrides`]、chiri::config::Meta
+/// 与 Config::load 的合并、四个 meta.yaml 模板、WebUI 的 META_FIELDS/WRITABLE_FIELDS
+/// （与布尔校验列表）——漏改一处会让用户写下的新键被判「未知字段」而整体重置。
 // [external_meta]
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -706,6 +707,8 @@ struct MetaYamlFile {
     thread_bind: Option<bool>,
     /// 功耗口径开关（PowerAVG.chr），详见 ExternalMetaOverrides（缺省 false）
     power_avg: Option<bool>,
+    /// 常驻状态通知开关，详见 ExternalMetaOverrides（缺省 true）
+    notify: Option<bool>,
     /// 「不改」开关（模板不写）：详见 ExternalMetaOverrides
     nofix: Option<bool>,
     /// 耗电读数满量程 W（缺省 12）：详见 ExternalMetaOverrides
@@ -732,6 +735,11 @@ pub struct ExternalMetaOverrides {
     /// **仅亮屏**放电样本）。两者都只在电池放电时取样。daemon 只在 ChiRi 的 1s 状态采样里
     /// 消费（Yumi 无效）；写侧走「单次读-改-写」顶层行替换，见 WebUI contract/meta.ts。
     pub power_avg: Option<bool>,
+    /// 常驻状态通知开关（meta.yaml `notify`，默认 true）：daemon 每 5s 把调度状态
+    /// （前台包名 / 模式 / 家族 / 子模式 / 温度 / 功耗）写到系统通知栏的常驻通知，
+    /// 见 src/notify.rs。false = 不投递，并**撤销已投递的通知**（daemon 自己还在跑，
+    /// 有能力清理）。同样只在 ChiRi 的 1s 循环里消费（Yumi 无效）。
+    pub notify: Option<bool>,
     /// 「不改」开关（meta.yaml 字段 `nofix`，默认 false，且默认不写进配置）：
     /// true = 启动时跳过所有「二进制内容对外部文件的覆盖类操作」——webui 资产还原
     /// （webui_asset::restore_webroot）与 meta.yaml 快照自愈（sync_meta_snapshot）。
@@ -842,6 +850,7 @@ fn parse_disk_meta(text: &str) -> Option<ExternalMetaOverrides> {
         scenemode_enabled: f.scenemode_enabled,
         thread_bind: f.thread_bind,
         power_avg: f.power_avg,
+        notify: f.notify,
         nofix: f.nofix,
         power_max_w,
     })

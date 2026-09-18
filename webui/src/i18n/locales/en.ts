@@ -102,6 +102,8 @@ export default {
   'config.scenemodeEnabled.hint': 'When off, screen-off never enters scenemode',
   'config.threadBind': 'Thread tuning',
   'config.threadBind.hint': 'Turn this off when other thread-placement tools are in use to reduce conflicts',
+  'config.notify': 'Ongoing status notification',
+  'config.notify.hint': 'Keep the foreground app, mode and power in the notification shade (ChiRi only)',
   'config.labTakenOver': 'Taken over by the lab ({mode}); turn the lab off first',
   'config.advanced': 'Advanced',
   'config.advanced.hint': 'Operate under developer guidance',

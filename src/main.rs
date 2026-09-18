@@ -7,6 +7,7 @@ pub mod i18n;
 mod down;
 mod logger;
 mod monitor;
+mod notify;
 mod rhine;
 mod scheduler;
 pub mod utils;

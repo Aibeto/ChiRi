@@ -1,4 +1,4 @@
-# zh.ftl: [main-monitor] [app-detect] [screen-detect] [monitors] [scheduler] [scheduler-config-watcher] [sysfs] [clg] [tuned] [touch] [fas] [fas-whitelist] [scheduler-settings] [fast-lock] [logger] [affinity] [corectl] [telemetry] [config-reload] [governor] [gpu]
+# zh.ftl: [main-monitor] [app-detect] [screen-detect] [monitors] [scheduler] [scheduler-config-watcher] [sysfs] [clg] [tuned] [touch] [fas] [fas-whitelist] [scheduler-settings] [fast-lock] [logger] [affinity] [corectl] [telemetry] [notify] [config-reload] [governor] [gpu]
 # --- Main & Monitor ---
 chiri-module-starting = chiri-module 统一启动中...
 scheduler-module-started = 调度器模块已启动
@@ -65,7 +65,8 @@ screen-detect-source-found = [Screen] 屏幕状态检测源就绪: { $kind } @ {
 screen-detect-no-source = [Screen] 未找到可用屏幕状态检测源（/sys/class/backlight、/sys/class/leds/*backlight*、/sys/class/graphics/fb0/blank 均不可用），屏幕状态无法自动校正，仅能依赖 uevent 事件
 screen-detect-read-failed = [Screen] 屏幕状态检测源读取失败（{ $kind } @ { $path }），连续失败将退役并切换下一个节点；读成功前不再重复告警
 screen-detect-nodes-exhausted = [Screen] 全部 { $count } 个屏幕状态节点已耗尽（不正确或矛盾），进入恒亮屏模式：不再检测息屏，屏幕状态永久按亮屏处理（宁可不节电，不可误判息屏卡死设备）
-screen-off-vetoed = [Screen] 息屏读数被亮屏否决: 节点 { $node } 报告亮屏（来源: { $source }），驳回息屏改判亮屏；不一致持续 15s 后退役该检测节点
+screen-off-vetoed = [Screen] 息屏票不足: 节点 { $node } 报亮屏（来源: { $source }），本次不确认息屏；读数矛盾持续 15s 后退役该检测节点
+screen-off-unconfirmed = [Screen] 没有可读的屏幕状态节点（来源: { $source }），本次不确认息屏
 screen-detect-node-switched = [Screen] 检测节点读数持续不一致/失效，已退役 { $retired }，切换到 { $next }
 screen-uevent-leds = [Screen] leds 背光事件: { $dev } -> state={ $state }
 screen-uevent-leds-unreadable = [Screen] leds 背光状态不可读: { $dev }
@@ -297,6 +298,19 @@ corectl-restore-pending = [CoreCtl] { $count } 个核心恢复上线失败，将
 corectl-self-pinned = [CoreCtl] 调度服务已钉到专用小核 cpu{ $core }
 corectl-unavailable = [CoreCtl] 未发现可用的 core_ctl 节点，接管跳过
 corectl-write-failed = [CoreCtl] core_ctl 写入失败: { $path }
+
+# --- Notify（常驻状态通知）---
+# 通知内容由 daemon 组装（src/notify.rs），通过 `cmd notification post` 投递/更新
+notify-title-fallback = ChiRi 调度
+# 正文各参数只出值、不带字段标签，由 notify::SEPARATOR（· ）拼接
+notify-line-mode = { $mode }
+notify-line-family = { $family }
+notify-line-submode = { $sub }
+notify-line-temp = { $batt }/{ $cpu } °C
+notify-line-power = { $watt } W
+notify-mode-scenemode = 息屏场景
+notify-mode-unknown = 未知
+notify-post-failed = [Notify] cmd notification 的三条候选命令行全部失败，状态通知无法投递（本进程只报一次）
 
 # --- Telemetry（遥测）---
 monitor-thread-start-telemetry = [Main] 启动遥测监控线程（PSI/GPU/电池）...

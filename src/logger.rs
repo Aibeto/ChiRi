@@ -442,9 +442,17 @@ pub fn power_avg_reset() {
 /// **取样口径由调用方保证**（`chiri/mod.rs`）：仅电池放电；且**平均模式排除息屏样本**
 /// （息屏功耗低但占时长大，等权全史会把亮屏读数整体拉低），**参考值保留息屏**。
 /// 被跳过的样本不推进留存次数、不改动文件——文件里始终是本次运行的有效样本结果。
-pub fn power_avg_update(power_w: Option<f32>, use_average: bool) {
+///
+/// 返回**当前留存值**（W）：本次接受则为新值，跳过则沿用上次值，从未采到过为 None
+/// ——调用方（常驻通知）据此展示，不必回读文件。
+pub fn power_avg_update(power_w: Option<f32>, use_average: bool) -> Option<f32> {
+    let current = || {
+        let state = POWER_AVG.lock().unwrap_or_else(|e| e.into_inner());
+        let (value, count) = *state;
+        (count > 0).then_some(value)
+    };
     let Some(p) = power_w.filter(|v| v.is_finite() && *v >= 0.0) else {
-        return;
+        return current(); // 本次跳过（缺测/非放电/息屏进均值）：沿用上次留存值
     };
     let mut state = POWER_AVG.lock().unwrap_or_else(|e| e.into_inner());
     let (value, count) = *state;
@@ -460,6 +468,7 @@ pub fn power_avg_update(power_w: Option<f32>, use_average: bool) {
     // 原子写（tmp+rename）：WebUI 每秒读它展示，绝不能读到半截内容
     let path = common::get_module_root().join(POWER_AVG_CHR);
     let _ = common::write_file_no_panic(&path, format!("{:.2}\n", next).as_bytes());
+    Some(next)
 }
 
 // [live_time]

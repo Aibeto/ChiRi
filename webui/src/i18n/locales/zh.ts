@@ -98,6 +98,8 @@ export default {
   'config.scenemodeEnabled.hint': '关闭后息屏不再进入 scenemode',
   'config.threadBind': '线程调整',
   'config.threadBind.hint': '使用其他线程分配程序时请关闭以减少冲突',
+  'config.notify': '常驻状态通知',
+  'config.notify.hint': '在通知栏常驻显示前台应用、模式与功耗（仅 ChiRi）',
   'config.labTakenOver': '实验室（{mode}）接管中，先关闭实验室才能改',
   'config.advanced': '高级设置',
   'config.advanced.hint': '请在开发者指导下操作',

@@ -1162,16 +1162,48 @@ pub fn start_scheduler_thread(
                     // ② **平均模式再排除息屏**：息屏功耗低但占时长大（常整夜），等权全史
                     //    会把「亮屏放电」读数整体拉低——均值只统计亮屏放电样本；
                     // ③ **参考值保留息屏**：它是偏历史的滑动参考，要反映整段放电过程。
+                    // 判定式记法：`!use_average || is_screen_on` —— 平均模式要求亮屏，
+                    // 参考值不看屏幕。展开：平均 = 放电 && 亮屏，参考 = 放电（含息屏）。
+                    // 2026-09-18 修正：此式原先写作 `use_average || is_screen_on`，两个
+                    // 模式正好互换（平均收了息屏、参考丢了息屏），与 ②③ 相反。屏态来自
+                    // 屏幕检测仲裁（息屏要两个有效节点投票确认，见 monitor::screen_detect）：
+                    // 仲裁判 OFF 的时长直接决定平均值的样本多少——误判息屏只是少收样本，
+                    // 误判断亮屏会把息屏样本混进平均值。
                     // 不满足条件时传 None → 递推整体跳过（不推进留存次数、不改文件）。
                     // 口径开关由 meta.power_avg 决定（热重载即时生效）
-                    let use_average = config_clone.read().unwrap().meta.power_avg;
+                    let (use_average, notify_on) = {
+                        let cfg = config_clone.read().unwrap();
+                        (cfg.meta.power_avg, cfg.meta.notify)
+                    };
                     let sample_ok =
-                        charge_state == "discharging" && (use_average || is_screen_on);
-                    crate::logger::power_avg_update(
+                        charge_state == "discharging" && (!use_average || is_screen_on);
+                    let power_now = crate::logger::power_avg_update(
                         if sample_ok { tm.batt_power_w() } else { None },
                         use_average,
                     );
+                    // 首轮标记：必须在自增**之前**取——第一 tick 时计数器还是 0。此前
+                    // 把 `telemetry_log_counter == 0` 放在自增之后判断，恒为 false，
+                    // 启动首轮清残留通知那条永远不会执行
+                    let first_tick = telemetry_log_counter == 0;
                     telemetry_log_counter += 1;
+                    // 常驻状态通知：每 5s 更新一次（内容不变不重投；内部自带失败候选与
+                    // 告警去重）。标题 = 前台包名，正文 = 模式/家族/子模式/温度/功耗
+                    // ——功耗口径随 meta.power_avg（高级设置里的开关）。
+                    // 这里只组装并**非阻塞投递**到 notify 线程（拿不到 `cmd` 的进程创建
+                    // 与等待，调度循环照常跑）
+                    if !notify_on {
+                        // 开关关闭（meta.yaml `notify`）：撤销已投递的通知；首轮无条件，
+                        // 清掉上一次运行残留的那条（此后每 tick 调用都幂等）
+                        crate::notify::cancel(first_tick);
+                    } else if telemetry_log_counter % crate::notify::INTERVAL_SECS == 0 {
+                        crate::notify::update(&crate::notify::Snapshot {
+                            pkg: &fg_package,
+                            mode: &current_mode,
+                            batt_temp: last_batt_temp,
+                            cpu_temp: last_cpu_temp,
+                            power_w: power_now,
+                        });
+                    }
                     // 开发记录 snap 行（1s）：环境上下文（开启 dev_record 才有 IO；
                     // 前台包名由 set_devimp_package 已同步，行内自动填充）
                     if crate::logger::devimp_active() {

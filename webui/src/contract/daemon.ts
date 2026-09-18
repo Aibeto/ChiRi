@@ -17,6 +17,9 @@ import {
 import { isLive, run } from '@/kernel/shell'
 import { absent, failed, ok, shellError, type ReadResult } from './errors'
 
+/** 常驻状态通知的 tag（与 daemon 侧 src/notify.rs::TAG 对齐）：更新与取消都靠它定位 */
+const NOTIFY_TAG = 'chiri-status'
+
 // [liveness]
 export type DaemonState =
   /** 心跳新鲜 = 有活跃实例 */
@@ -63,7 +66,7 @@ export async function readWatchdogPid(): Promise<ReadResult<number>> {
 
 // [stop]
 /**
- * 关闭调度：先按 pidfile 杀看门狗 → 再杀 chiri → 删 pidfile。
+ * 关闭调度：先按 pidfile 杀看门狗 → 再杀 chiri → 删 pidfile → 撤销常驻通知。
  * 注意副作用（由界面负责提示）：daemon 是被信号杀死、没有还原逻辑，
  * fast 模式的锁频会残留到卸载脚本执行；恢复只能点模块 Action 或重启设备。
  */
@@ -74,7 +77,11 @@ export async function stopScheduler(): Promise<ReadResult<true>> {
     `p=$(cat ${pidFile} 2>/dev/null); ` +
     `case "$p" in ''|0|*[!0-9]*) ;; *) kill "$p" 2>/dev/null ;; esac; ` +
     `killall -9 chiri 2>/dev/null || pkill -9 chiri 2>/dev/null; ` +
-    `rm -f ${pidFile}; sleep 1; echo done`
+    `rm -f ${pidFile}; ` +
+    // daemon 被 -9 杀死、没有清理时机：常驻通知由这里撤销，否则会留着过期的
+    // 状态（旧模式/旧功耗）停在通知栏。失败静默（部分 ROM 无 -d 旗标）
+    `cmd notification post -d ${NOTIFY_TAG} >/dev/null 2>&1; ` +
+    `sleep 1; echo done`
   try {
     const { errno, stderr } = await run(cmd)
     if (errno !== 0) return failed<true>(shellError(errno, stderr))

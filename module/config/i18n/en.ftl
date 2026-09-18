@@ -1,4 +1,4 @@
-# en.ftl: [main-monitor] [app-detect] [screen-detect] [monitors] [scheduler] [scheduler-config-watcher] [sysfs] [clg] [tuned] [touch] [fas] [fas-whitelist] [scheduler-settings] [fast-lock] [logger] [affinity] [corectl] [telemetry] [config-reload] [governor] [gpu]
+# en.ftl: [main-monitor] [app-detect] [screen-detect] [monitors] [scheduler] [scheduler-config-watcher] [sysfs] [clg] [tuned] [touch] [fas] [fas-whitelist] [scheduler-settings] [fast-lock] [logger] [affinity] [corectl] [telemetry] [notify] [config-reload] [governor] [gpu]
 # --- Main & Monitor ---
 chiri-module-starting = chiri-module Unified Starting...
 scheduler-module-started = Scheduler module started.
@@ -66,7 +66,8 @@ screen-detect-source-found = [Screen] Screen state source ready: { $kind } @ { $
 screen-detect-no-source = [Screen] No usable screen state source (/sys/class/backlight, /sys/class/leds/*backlight* and /sys/class/graphics/fb0/blank all unavailable); state cannot be self-healed, uevent events only
 screen-detect-read-failed = [Screen] Screen state source read failed ({ $kind } @ { $path }); node retired and next one selected after consecutive failures, no repeat until success
 screen-detect-nodes-exhausted = [Screen] All { $count } screen state nodes exhausted (incorrect or contradictory), entering always-on mode: screen-off detection disabled, screen state permanently treated as ON (prefer losing power saving over mis-detected screen-off freezing the device)
-screen-off-vetoed = [Screen] Screen-off reading vetoed: node { $node } reports ON (source: { $source }), rejected as screen-on; node retired after 15s of persistent inconsistency
+screen-off-vetoed = [Screen] Not enough screen-off votes: node { $node } reports ON (source: { $source }); screen-off not confirmed; node retired after 15s of persistent inconsistency
+screen-off-unconfirmed = [Screen] No readable screen-state node (source: { $source }); screen-off not confirmed
 screen-detect-node-switched = [Screen] Detection node persistently inconsistent/failed, retired { $retired }, switched to { $next }
 screen-uevent-leds = [Screen] leds backlight event: { $dev } -> state={ $state }
 screen-uevent-leds-unreadable = [Screen] leds backlight state unreadable: { $dev }
@@ -298,6 +299,19 @@ corectl-restore-pending = [CoreCtl] { $count } cores failed to come back online,
 corectl-self-pinned = [CoreCtl] scheduler service pinned to dedicated little core cpu{ $core }
 corectl-unavailable = [CoreCtl] no usable core_ctl node found, takeover skipped
 corectl-write-failed = [CoreCtl] core_ctl write failed: { $path }
+
+# --- Notify (ongoing status notification) ---
+# The daemon builds the text (src/notify.rs) and posts/updates it via `cmd notification post`
+notify-title-fallback = ChiRi scheduler
+# values only, no field labels; joined by notify::SEPARATOR (" · ")
+notify-line-mode = { $mode }
+notify-line-family = { $family }
+notify-line-submode = { $sub }
+notify-line-temp = { $batt }/{ $cpu } °C
+notify-line-power = { $watt } W
+notify-mode-scenemode = Screen-off scene
+notify-mode-unknown = Unknown
+notify-post-failed = [Notify] all three candidate cmd notification command lines failed; the status notification cannot be posted (reported once)
 
 # --- Telemetry ---
 monitor-thread-start-telemetry = [Main] starting telemetry monitor thread (PSI/GPU/battery)...

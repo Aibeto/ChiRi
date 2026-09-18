@@ -1,6 +1,6 @@
 <script lang="ts">
   // ConfigView.svelte: [header] [fields] [commit]
-  // meta.yaml 只有 6 个字段可写；每次写入都会触发守护进程全量热重载，
+  // meta.yaml 的可写字段见 contract/meta.ts::WRITABLE_FIELDS；每次写入都会触发守护进程全量热重载，
   // 因此改动先落草稿、由「保存」一次性提交（单次读-改-写）。
   import { onMount } from 'svelte'
   import Panel from '@/components/Panel.svelte'
@@ -37,6 +37,7 @@
   const fasEnabled = $derived(Boolean(value('fas_enabled', true)))
   const scenemodeEnabled = $derived(Boolean(value('scenemode_enabled', true)))
   const threadBind = $derived(Boolean(value('thread_bind', true)))
+  const notifyOn = $derived(Boolean(value('notify', true)))
 
   /** 实验室接管的开关：置灰不可切换（守护进程正按实验室定义写它，手改也会被写回去） */
   const takeover = $derived(new Set(app.labTakeover))
@@ -162,6 +163,15 @@
         pending={app.draft.thread_bind !== undefined}
         disabled={!app.metaValid || takeover.has('thread_bind')}
         onchange={next => app.setDraft('thread_bind', next)}
+      />
+
+      <ToggleField
+        label={t('config.notify')}
+        hint={t('config.notify.hint')}
+        checked={notifyOn}
+        pending={app.draft.notify !== undefined}
+        disabled={!app.metaValid}
+        onchange={next => app.setDraft('notify', next)}
       />
     </div>
 

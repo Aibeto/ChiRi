@@ -23,6 +23,7 @@ export const META_FIELDS = [
   'scenemode_enabled',
   'thread_bind',
   'power_avg',
+  'notify',
   'nofix',
   'power_max_w'
 ] as const
@@ -37,6 +38,7 @@ export const WRITABLE_FIELDS = [
   'scenemode_enabled',
   'thread_bind',
   'power_avg',
+  'notify',
   'power_max_w'
 ] as const
 export type WritableField = (typeof WRITABLE_FIELDS)[number]
@@ -149,7 +151,14 @@ export function validateMeta(values: Record<string, unknown>): string[] {
       problems.push(`loglevel 只能是 ${LOG_LEVELS.join('/')}`)
     }
   }
-  for (const f of ['dev_record', 'fas_enabled', 'scenemode_enabled', 'thread_bind', 'power_avg'] as const) {
+  for (const f of [
+    'dev_record',
+    'fas_enabled',
+    'scenemode_enabled',
+    'thread_bind',
+    'power_avg',
+    'notify'
+  ] as const) {
     if (f in values && typeof values[f] !== 'boolean') {
       problems.push(`${f} 必须是布尔值 true/false`)
     }
@@ -192,6 +201,7 @@ export function validateFieldValue(
     case 'scenemode_enabled':
     case 'thread_bind':
     case 'power_avg':
+    case 'notify':
       return typeof value === 'boolean' ? null : `${field} 必须是布尔值`
   }
 }

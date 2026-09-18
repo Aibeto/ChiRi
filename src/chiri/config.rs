@@ -32,6 +32,9 @@ fn apply_meta_overrides(meta: &mut Meta, o: &crate::common::ExternalMetaOverride
     if let Some(v) = o.power_avg {
         meta.power_avg = v;
     }
+    if let Some(v) = o.notify {
+        meta.notify = v;
+    }
     if let Some(v) = o.power_max_w {
         meta.power_max_w = v;
     }
@@ -87,6 +90,11 @@ pub struct Meta {
     /// 状态页仪表盘的进度换算，不参与任何调度决策。
     #[serde(default = "crate::utils::default_power_max_w", alias = "PowerMaxW")]
     pub power_max_w: f32,
+
+    /// 常驻状态通知开关（meta.yaml `notify`，默认 true）：false = 不投递通知，并
+    /// 撤销已投递的那条（daemon 自己还在跑，有能力清理）。热重载即时生效。
+    #[serde(default = "crate::utils::default_true", alias = "Notify")]
+    pub notify: bool,
 
     /// 「不改」开关（meta.yaml 可选字段 `nofix`，默认 false，默认不写进配置）：
     /// true = 启动时跳过「二进制内容对外部文件的覆盖类操作」（webui 资产还原与
