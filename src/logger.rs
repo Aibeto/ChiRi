@@ -221,6 +221,54 @@ fn note_write(counter: &AtomicU64, dir: &str, bytes: u64) {
 }
 
 // [init]
+/// 行编码：格式与 `PatternEncoder`（`[{d(%Y-%m-%d %H:%M:%S)}] [{l}] [{M}] {m}{n}`，
+/// 本地时间）完全一致，只把模块路径里**重复的 crate 名前缀剥掉**——包名与子模块
+/// 同名（`src/chiri/`），`chiri::chiri::config` 的首个 `chiri` 属于包名，界面上白占
+/// 一列宽度（2026-09-18 用户要求去掉 `chiri::chiri` 这种情况）。委托 PatternEncoder
+/// 编码（时间/级别格式零改动），再裁剪行首第三个方括号段；非本 crate 的模块路径
+/// （依赖库日志，如 `log4rs::`）原样保留。
+#[derive(Debug)]
+struct LineEncoder {
+    inner: PatternEncoder,
+}
+
+/// crate 名：daemon.log 模块路径里冗余的前缀（crate 自身日志才有）
+const CRATE_PREFIX: &str = "chiri::";
+
+impl Encode for LineEncoder {
+    fn encode(
+        &self,
+        w: &mut dyn log4rs::encode::Write,
+        record: &log::Record,
+    ) -> anyhow::Result<()> {
+        let mut buf = BufferWriter(Vec::new());
+        self.inner.encode(&mut buf, record)?;
+        let line = String::from_utf8_lossy(&buf.0);
+        // 前缀形如 `[时间] [级别] [模块] 消息`：跳过前两对方括号，第三段是模块。
+        // 消息正文里出现 `[`/`]` 不影响——只裁剪前缀，其余字节原样透传。
+        let mut cursor = 0usize;
+        let mut module_at = None;
+        for _ in 0..3 {
+            let Some(open) = line[cursor..].find('[').map(|i| cursor + i) else {
+                break;
+            };
+            let Some(close) = line[open..].find(']').map(|i| open + i) else {
+                break;
+            };
+            cursor = close + 1;
+            module_at = Some(open + 1);
+        }
+        match module_at {
+            Some(at) if line[at..].starts_with(CRATE_PREFIX) => {
+                std::io::Write::write_all(w, line[..at].as_bytes())?;
+                std::io::Write::write_all(w, line[at + CRATE_PREFIX.len()..].as_bytes())?;
+            }
+            _ => std::io::Write::write_all(w, line.as_bytes())?,
+        }
+        Ok(())
+    }
+}
+
 fn build_config(level: LevelFilter) -> Result<Config> {
     let root = common::get_module_root();
     let log_path = root.join(LOG_REL_PATH);
@@ -229,9 +277,9 @@ fn build_config(level: LevelFilter) -> Result<Config> {
         path: log_path.clone(),
         max_bytes: LOG_MAX_BYTES,
         keep: LOG_KEEP_BACKUPS,
-        encoder: Box::new(PatternEncoder::new(
-            "[{d(%Y-%m-%d %H:%M:%S)}] [{l}] [{M}] {m}{n}",
-        )),
+        encoder: Box::new(LineEncoder {
+            inner: PatternEncoder::new("[{d(%Y-%m-%d %H:%M:%S)}] [{l}] [{M}] {m}{n}"),
+        }),
         lock: Mutex::new(()),
     };
 
@@ -506,10 +554,10 @@ pub fn write_live_time() {
 /// 缺失数值的占位
 const NA: &str = "-";
 
-/// 数值格式化（None → "-"）
-fn fmt_num(v: Option<f32>, digits: usize) -> String {
-    v.map(|x| format!("{:.*}", digits, x))
-        .unwrap_or_else(|| NA.to_string())
+/// 数值格式化（None → "-"）。**全精度写入**（2026-09-18 用户口径）：CSV 保留
+/// 全部小数位（f32 的最短往返表示），取整是显示层（WebUI 状态快照 toFixed(1)）的职责
+fn fmt_num(v: Option<f32>) -> String {
+    v.map(|x| x.to_string()).unwrap_or_else(|| NA.to_string())
 }
 
 /// 写 snapshot 行（1s 一条，chiri 调度线程）：
@@ -547,8 +595,8 @@ pub fn status_log_snapshot(
         package,
         charge,
         if screen_on { "1" } else { "0" },
-        &fmt_num(batt_temp, 1),
-        &fmt_num(cpu_temp, 1),
+        &fmt_num(batt_temp),
+        &fmt_num(cpu_temp),
         thermal_cap,
         thermal_free,
         if clg_active { "1" } else { "0" },
@@ -562,7 +610,7 @@ pub fn status_log_snapshot(
         &wakeups.to_string(),
         &migrations.to_string(),
         &freq_trans.to_string(),
-        &fmt_num(fps, 1),
+        &fmt_num(fps),
     ]);
 }
 

@@ -231,8 +231,8 @@
                   <td>{row.mode || '—'}</td>
                   <td>{row.pkg || '—'}</td>
                   <td>{fmt(row.battTemp, 1, t('unit.celsius'))}</td>
-                  <td>{fmt(row.gpuBusy, 0, t('unit.percent'))}</td>
-                  <td>{fmt(row.battPower, 2, t('unit.watt'))}</td>
+                  <td>{fmt(row.gpuBusy, 1, t('unit.percent'))}</td>
+                  <td>{fmt(row.battPower, 1, t('unit.watt'))}</td>
                   <td>{chargeLabel(row.charge)}</td>
                 </tr>
               {/each}
@@ -290,12 +290,10 @@
     color: var(--ak-text-secondary);
   }
 
-  /* 档名最长 5 字（TRACE/ERROR）：列宽固定为「5 字符 + 字距」的宽度（11px 等宽
-     ≈ 0.6em/字 → 0.6875×0.6×5 + 字距 ≈ 2.27rem，取 2.3rem）。各行每行都是独立
-     grid，只有固定列宽才能让模块列对齐；3.4rem 那种宽档位则会在级别与模块之间
-     留出一大段空白（用户反馈的问题）。 */
+  /* 级别列不设固定宽：min-width 会给短档名（INFO/WARN 4 字）留出列内空隙，使
+     「级别→内容」的间距大于「时间→级别」（用户要求两者一致）。代价是 4/5 字
+     档名混排时模块列起点相差约一字宽——模块名长短本就不一，可接受 */
   .log__level {
-    min-width: 2.3rem;
     color: var(--ak-text-secondary);
     font-weight: 700;
     letter-spacing: 0.06em;
@@ -338,7 +336,9 @@
   }
 
   .snapshot {
-    width: 100%;
+    /* 按内容自适应（用户反馈：width:100% 会把多余宽度摊进各列，列比内容宽很多）；
+       窄于容器时左对齐，宽于容器时由外层 .u-scroll 横向滚动 */
+    width: max-content;
     border-collapse: collapse;
   }
 

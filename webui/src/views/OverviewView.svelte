@@ -124,9 +124,11 @@
             aria-valuemin="0"
             aria-valuemax="100"
             aria-valuenow={Math.round(powerPercent)}
-            style={`--ak-progress-value: ${powerPercent.toFixed(1)}%`}
           >
-            <span class="ak-progress__fill"></span>
+            <!-- 宽度直接写在填充元素上：原来靠「把 --ak-progress-value 设在轨道上，
+                 由上游 .ak-progress__fill 继承」，这条继承链在本 WebView 里没生效，
+                 条一直是空的（旁边的百分比数字是另一个元素，所以数字对、条不动） -->
+            <span class="ak-progress__fill" style={`width: ${powerPercent.toFixed(1)}%`}></span>
           </div>
           <!-- 百分比同时出数字：条看起来空时能判断是「读数为 0/缺失」还是「条没画出来」 -->
           <span class="ak-progress__value u-mono">{Math.round(powerPercent)}%</span>
@@ -252,9 +254,9 @@
       {app.exportPhase === "running" ? t("overview.export.running") : t("overview.export.action")}
     </button>
     {#if app.exportPhase === "running"}
-      <!-- 进度区整块用官方 ak-progress（标题行 + 斜纹刻度轨道），进度值走官方
-           --ak-progress-value 变量驱动填充 -->
-      <div class="ak-progress u-mt-3" style={`--ak-progress-value: ${app.exportPercent}%`}>
+      <!-- 进度区整块用官方 ak-progress（标题行 + 斜纹刻度轨道）；填充宽度由下方
+           .ak-progress__fill 的内联 width 决定，不再依赖 --ak-progress-value 继承 -->
+      <div class="ak-progress u-mt-3">
         <div class="ak-progress__header">
           <span>
             {app.exportTotal > 0
@@ -274,7 +276,8 @@
           aria-valuemax="100"
           aria-valuenow={app.exportPercent}
         >
-          <span class="ak-progress__fill"></span>
+          <!-- 同功耗条：宽度直接内联，不依赖上游变量继承 -->
+          <span class="ak-progress__fill" style={`width: ${app.exportPercent}%`}></span>
         </div>
       </div>
     {/if}

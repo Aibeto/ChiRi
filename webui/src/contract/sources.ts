@@ -85,7 +85,7 @@ export function listLogd(): Promise<ReadResult<string[]>> {
 export async function clearArchives(): Promise<ReadResult<true>> {
   if (!isLive()) return absent<true>('unsupported-env')
   const { errno, stderr } = await run(
-    `rm -rf ${shQuote(absOf('logdDir'))} ${shQuote(absOf('devimpDir'))} && echo done`
+    `rm -rf ${shQuote(absOf('logdDir'))} && echo done`
   )
   return errno === 0 ? ok(true) : failed<true>(shellError(errno, stderr))
 }

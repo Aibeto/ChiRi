@@ -1134,6 +1134,13 @@ pub fn start_scheduler_thread(
                         v.map(|x| format!("{:.*}", digits, x))
                             .unwrap_or_else(|| "-".to_string())
                     };
+                    // status.csv 列全精度（2026-09-18 用户口径：文件保留全部小数位，
+                    // 取整交给显示层——WebUI 状态快照统一 toFixed(1)）；fmt_opt 的
+                    // 固定位数留给 devimp 与调试打点
+                    let fmt_opt_full = |v: Option<f32>| {
+                        v.map(|x| x.to_string())
+                            .unwrap_or_else(|| "-".to_string())
+                    };
                     let current_mode = mode_clone.lock().unwrap().clone();
                     // 温度本秒读取一次，status/devimp/thermal（2s）三处共用；
                     // 滤波后的值参与热判定，原始值不再直供任何控制路径
@@ -1165,16 +1172,18 @@ pub fn start_scheduler_thread(
                         is_screen_on,
                         last_batt_temp,
                         last_cpu_temp,
-                        &format!("{:.0}", thermal_cap_current * 100.0),
-                        &format!("{:.0}", thermal_free_current * 100.0),
+                        &format!("{}", thermal_cap_current * 100.0),
+                        &format!("{}", thermal_free_current * 100.0),
                         cpu_governor.is_active(),
-                        &fmt_opt(Some(tm.psi_cpu_some()), 2),
-                        &fmt_opt(Some(tm.psi_io_some()), 2),
-                        &fmt_opt(Some(tm.psi_mem_some()), 2),
-                        &fmt_opt(tm.gpu_busy(), 0),
-                        &fmt_opt(tm.batt_voltage_v(), 3),
-                        &fmt_opt(tm.batt_current_ma(), 0),
-                        &fmt_opt(tm.batt_power_w(), 2),
+                        &fmt_opt_full(Some(tm.psi_cpu_some())),
+                        &fmt_opt_full(Some(tm.psi_io_some())),
+                        &fmt_opt_full(Some(tm.psi_mem_some())),
+                        &fmt_opt_full(tm.gpu_busy()),
+                        &fmt_opt_full(tm.batt_voltage_v()),
+                        // 全精度：电流值的量级由校准值决定（可能是 0.5 这种小数量级），
+                        // 取整会把真值抹平，归档里没法反推单位
+                        &fmt_opt_full(tm.batt_current_ma()),
+                        &fmt_opt_full(tm.batt_power_w()),
                         last_bpf_stats.0,
                         last_bpf_stats.1,
                         last_bpf_stats.2,

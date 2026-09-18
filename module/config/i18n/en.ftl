@@ -159,6 +159,7 @@ config-scenemode-merged = [Config] Merged scenemode config: { $path }
 config-scenemode-parse-failed = [Config] Failed to parse the scenemode config ({ $path }): { $error }; keeping the current scenemode
 battery-status-unknown = [Battery] Unrecognized status node value ({ $raw }); treated as unknown. Power averaging only samples while discharging, so check that the node uses a standard value (Charging / Discharging / Full / Not charging)
 power-avg-skip = [PowerAVG] this sample was not counted ({ $reason }); PowerAVG.chr keeps its previous value. Sampling needs the battery discharging, and average mode also needs the screen on
+telemetry-raw-snapshot = [Telemetry] first-reading snapshot (for unit checking): private node raw voltage={ $v }, raw current={ $i }; divisors voltage/{ $vd }, current/{ $cd } -> V={ $v }/{ $vd }, A={ $i }/{ $cd }
 config-watch-error = [Config] Failed to watch config directory: { $error }
 config-apply-mode-failed = [Config] Failed to apply reloaded mode settings: { $error }
 config-apply-tweaks-failed = [Config] Failed to apply reloaded system tweaks: { $error }

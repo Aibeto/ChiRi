@@ -53,6 +53,9 @@ static GPU_UNAVAIL_WARNED: AtomicBool = AtomicBool::new(false);
 /// OPlus 私有节点缺失告警去重（节点在运行期出现/重新可用时重新武装）
 static BCC_MISSING_WARNED: AtomicBool = AtomicBool::new(false);
 
+/// 私有节点原始值快照是否已打点（单位排查用，一次运行一条）
+static BCC_RAW_LOGGED: AtomicBool = AtomicBool::new(false);
+
 /// 私有节点存在性复查间隔：驱动加载晚于 daemon（或节点被 recreate）时，
 /// 不会因为开机瞬间探到「不存在」就永远钉在回退标准节点的状态
 const BCC_PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
@@ -62,16 +65,21 @@ const BCC_PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(6
 /// voltage_double / current_double / unit_divisor）。由 chiri `Config::load` 写入
 /// （含热重载），读点在 1s 遥测线程与各消费点——用原子量，不每轮解析 YAML。
 ///
-/// - `OPLUS_CHG`：优先读 OPlus 私有节点（bcc_parms，随采样刷新），读不到才回退标准节点；
-/// - `OPLUS_DUAL_CELL`：私有节点电压取「电芯0 + 电芯1」（下标 6 + 11，串联双电芯）；
+/// - `OPLUS_CHG`：读 OPlus 私有节点（bcc_parms，随采样刷新）。**存在且读到有效值时
+///   只认它**：同机型的标准通用节点不可信（OPlus 上约 10s 才刷新、单位也不保证）。
+///   存在但无效（字段缺失/解析失败/全零）或节点不存在时才走标准节点；
+/// - `OPLUS_DUAL_CELL`：私有节点电压取两节**平均**（下标 6 与 11；下标 11 非正时只用
+///   下标 6）。不取和——电流是整包口径的，电压要用单节域才与标准节点同量级（详见
+///   `read_oplus_bcc`）；
 /// - `VOLTAGE_DOUBLE` / `CURRENT_DOUBLE`：标准节点路径的倍电压/倍电流（双电芯机型上
 ///   标准节点可能只报单节/单芯值）。**与私有节点互斥**：私有开关打开时 UI 强制关闭
 ///   这两个开关，这里再判一次，手改 meta 也挡得住；
 /// - `VOLT_DIVISOR` / `CURR_DIVISOR`：单位校准（**电压、电流各一个**）。**全链没有内置
-///   换算**——`输出 = 节点原始值 ÷ 校准值`：电压得到 V、电流得到 mA（`batt_power_w`
-///   仍是 |mA| × V = W）。校准值填多少取决于节点报什么单位：
-///     标准节点（µV / µA）：电压 1000000、电流 1000；
-///     私有节点 bcc_parms（mV / mA）：电压 1000、电流 1。
+///   换算**——`输出 = 节点原始值 ÷ 校准值`：电压得到 V、电流得到**安培**
+///   （`batt_power_w` = 电流值 × 电压 = W）。校准值就是「原始单位 → 输出单位」的除数：
+///     电压：节点报 mV 填 1000、报 µV 填 1000000；
+///     电流：节点报 mA 填 1000、报 µA 填 1000000（私有节点 bcc_parms 报 mV/mA 时
+///           电压 1000、电流 1000）。
 ///   分开的理由：节点的电压与电流单位未必同时错（常见只错一个），一个共用值会让
 ///   功率按平方变化，改了也说不清是谁的锅。
 static OPLUS_CHG: AtomicBool = AtomicBool::new(false);
@@ -140,9 +148,11 @@ impl Telemetry {
         let v = f32::from_bits(self.gpu_busy.load(Ordering::Relaxed));
         if v.is_nan() { None } else { Some(v) }
     }
-    /// 电池电流（mA，保留方向符号）；None = 不可用。
-    /// **没有内置换算**：直接是 `节点原始值 ÷ current_divisor`，单位由电流校准值决定
-    /// （节点报 µA 就填 1000 得到 mA，报 mA 就填 1）
+    /// 电池电流（**单位是安培**，保留方向符号；函数名里的 ma 是历史遗留命名）；None = 不可用。
+    /// **没有内置换算**：直接是 `节点原始值 ÷ current_divisor`，所以校准值就是
+    /// 「原始单位 → 安培」的除数：节点报 mA 填 1000、报 µA 填 1000000、报 A 填 1。
+    /// `batt_power_w` 按安培使用本值（× 电压得瓦），status.csv 的 `batt_current_ma`
+    /// 列写的也是这个值（列名同样遗留）。
     pub fn batt_current_ma(&self) -> Option<f32> {
         let v = self.batt_current_ua.load(Ordering::Relaxed);
         (v != UNAVAIL).then(|| v as f32 / current_divisor())
@@ -216,11 +226,16 @@ fn read_oplus_bcc(dual_cell: bool) -> Option<(i32, i32)> {
     if v0 == 0 && cur == 0 {
         return None;
     }
-    // 双电芯串联（`oplus_dual_cell` 打开时）：电压取两节之和；下标 11 缺失或 0
-    // 视为单电芯机型的该字段无意义，仍用下标 6
+    // 双电芯（`oplus_dual_cell` 打开时）：电压取两节**平均**，不是求和。
+    // 下标 6/11 是两节电芯各自的端压（样本 3841 / 3835 mV，都在 4V 域），而下标 8
+    // 的电流是**整包口径**的（与同机型标准节点的 current_now 同一量级）——V × I
+    // 必须用单节域电压。求和会得到 ~7.7V 的整包串压，同机型标准节点只报 ~4V 时
+    // 功率直接翻倍。判据：私有节点算出的 P 应和「标准节点 V × I」同量级（±20%）；
+    // 若某机型标准节点真报 ~8V（2S 直串、电流为整包电流），那时求和才对，改口径即可。
+    // 下标 11 缺失或非正视为单电芯机型该字段无意义，退回下标 6。
     let v_raw = if dual_cell {
         let v1: i64 = f.get(11).and_then(|s| s.parse().ok()).unwrap_or(0);
-        if v1 != 0 { v0 + v1 } else { v0 }
+        if v1 > 0 { (v0 + v1) / 2 } else { v0 }
     } else {
         v0
     };
@@ -304,8 +319,29 @@ pub fn telemetry_loop() {
             bcc_probed_at = Some(std::time::Instant::now());
         }
         let (mut current, mut voltage) = if use_oplus && bcc_available == Some(true) {
+            // 私有节点**存在且有效**（字段可解析、非全零）时只认它，不回退标准节点——
+            // 同机型的标准通用节点单位与刷新周期都不是给外部读的。存在却无效
+            // （字段缺失、解析失败、全零）时才回退：此刻它是唯一还能给数的来源，
+            // 回退好过整段读数变空（无效原因由 read_oplus_bcc 内的 warn 打点）
             match read_oplus_bcc(OPLUS_DUAL_CELL.load(Ordering::Relaxed)) {
-                Some((v, i)) => (i, v),
+                Some((v, i)) => {
+                    // 首次读到私有节点：把原始值与当前校准值打一条 info，单位对不对看这几个数
+                    if !BCC_RAW_LOGGED.swap(true, Ordering::Relaxed) {
+                        log::info!(
+                            "{}",
+                            crate::i18n::t_with_args(
+                                "telemetry-raw-snapshot",
+                                &crate::fluent_args!(
+                                    "v" => v.to_string(),
+                                    "i" => i.to_string(),
+                                    "vd" => format!("{:.0}", voltage_divisor()),
+                                    "cd" => format!("{:.0}", current_divisor())
+                                )
+                            )
+                        );
+                    }
+                    (i, v)
+                }
                 None => read_standard_battery(),
             }
         } else {

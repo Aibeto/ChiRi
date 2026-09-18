@@ -26,12 +26,16 @@ yumi-*.zip
 output/
 *.log
 logd/
+.tmp-log/
 
-# IDE
+# TRAE & CodeBuddy
+# .trae/
 .trae/documents/
 .trae/specs/
 # .codebuddy/memory/
 .codebuddy/docs/
+.trae-html-share-packages/
+.workbuddy/docs
 
 # reference
 AppOptR/

@@ -158,6 +158,7 @@ config-scenemode-merged = [Config] 已合并息屏场景配置文件: { $path }
 config-scenemode-parse-failed = [Config] 息屏场景配置解析失败（{ $path }）: { $error }，保持当前生效的 scenemode
 battery-status-unknown = [Battery] status 节点取值不认识（原文: { $raw }），按未知处理；功耗均值只在 discharging 时取样，请检查该节点是否为标准取值（Charging / Discharging / Full / Not charging）
 power-avg-skip = [PowerAVG] 本轮取样未计入（原因: { $reason }），PowerAVG.chr 保持原值；取样条件＝电池放电，平均模式还要求亮屏
+telemetry-raw-snapshot = [Telemetry] 首次读数快照（用于核对单位）：私有节点电压原始值={ $v }、电流原始值={ $i }，当前校准 电压÷{ $vd }、电流÷{ $cd } → V={ $v }/{ $vd }、A={ $i }/{ $cd }
 config-watch-error = [Config] 监控配置目录失败: { $error }
 config-apply-mode-failed = [Config] 应用重载的模式设置失败: { $error }
 config-apply-tweaks-failed = [Config] 应用重载的系统微调失败: { $error }

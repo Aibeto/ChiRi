@@ -763,8 +763,8 @@ pub struct ExternalMetaOverrides {
     /// `/sys/class/oplus_chg/battery/bcc_parms`（下标 6 电芯电压0、8 电流、11 电芯电压1，
     /// 毫单位 mV/mA，随采样刷新），读不到才回退标准 power_supply 节点。仅 OPlus 机型有意义。
     pub oplus_chg: Option<bool>,
-    /// OPlus 双电芯（`oplus_dual_cell`，默认 false）：私有节点电压取「电芯0 + 电芯1」
-    /// （下标 6 + 11，串联）。仅在 `oplus_chg` 打开时生效。
+    /// OPlus 双电芯（`oplus_dual_cell`，默认 false）：私有节点电压取两节**平均**
+    /// （下标 6 与 11，单节域）。仅在 `oplus_chg` 打开时生效。
     pub oplus_dual_cell: Option<bool>,
     /// 倍电压（`voltage_double`，默认 false）：标准节点路径电压 ×2（双电芯机型上标准
     /// 节点只报单节值）。**与 `oplus_chg` 互斥**：私有开关打开时被强制关闭。

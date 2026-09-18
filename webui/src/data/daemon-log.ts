@@ -1,8 +1,10 @@
 // daemon-log.ts: [types] [parse]
-// logs/daemon.log 行格式（src/logger.rs:161-163 PatternEncoder）：
-//   [2026-09-13 12:00:00] [INFO] [chiri::chiri] 消息
-// 时间是**设备本地时间**；级别取自 log crate 的 LevelFilter；模块是 Rust 模块路径。
-// 多行消息（含换行）会以不带前缀的续行出现，解析时并入上一条。
+// logs/daemon.log 行格式（src/logger.rs 的 LineEncoder，[init] 块）：
+//   [2026-09-13 12:00:00] [INFO] [chiri] 消息
+// 时间是**设备本地时间**；级别取自 log crate 的 LevelFilter；模块是 Rust 模块路径
+// 且已剥掉 crate 名前缀（`chiri::chiri::config` → `chiri::config`，包名与子模块
+// 同名产生的重复段，daemon 侧编码时裁剪）。多行消息（含换行）会以不带前缀的
+// 续行出现，解析时并入上一条。
 
 // [types]
 export type LogLevelName = 'OFF' | 'ERROR' | 'WARN' | 'INFO' | 'DEBUG' | 'TRACE' | 'OTHER'
@@ -11,7 +13,7 @@ export interface LogLine {
   /** 本地时间字符串，解析失败时为空 */
   time: string
   level: LogLevelName
-  /** Rust 模块路径，如 chiri::chiri */
+  /** Rust 模块路径（已剥 crate 前缀），如 chiri、chiri::config */
   module: string
   message: string
 }
