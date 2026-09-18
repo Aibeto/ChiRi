@@ -346,13 +346,43 @@ body {
 .app__chart {
   position: relative;
   min-width: 0;
+  /* 高度可由用户在右下角手柄拖拽调整（原生 resize:vertical）：
+     SVG 填满容器（height:100%），尺寸变化经 ResizeObserver 触发重绘 */
+  height: var(--analyze-chart);
+  min-height: 10rem;
+  resize: vertical;
+  overflow: hidden;
+  /* 拖动图表时拦截浏览器长按选中/呼出菜单；触屏上拖动手势归图表平移 */
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+  touch-action: none;
+}
+
+/* 图表左右位置滑块 */
+.app__pan {
+  width: 100%;
+  margin-top: var(--ak-space-2);
+  accent-color: var(--ak-signal-info);
+  cursor: pointer;
+}
+
+.app__pan:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.app__svg--overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
 }
 
 .app__svg {
   display: block;
   width: 100%;
   max-width: 100%;
-  height: var(--analyze-chart);
+  height: 100%;
   cursor: crosshair;
   touch-action: none;
 }
@@ -555,9 +585,12 @@ body {
   background: var(--ak-signal-action);
 }
 
-/* 数据表单独限高（平均值表用 .app__avg-scroll 自己的） */
+/* 数据表单独限高（平均值表用 .app__avg-scroll 自己的）；
+   高度同样可在右下角拖拽调整 */
 .app__table-scroll {
-  max-height: var(--analyze-rows);
+  height: var(--analyze-rows);
+  min-height: 6rem;
+  resize: vertical;
 }
 
 .app__table {

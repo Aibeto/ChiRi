@@ -67,8 +67,11 @@
       </div>
       <div class="app__chart">
         <svg class="app__svg" id="chart" role="img" aria-label="CSV 数值曲线"></svg>
+        <svg class="app__svg app__svg--overlay" id="hover" aria-hidden="true"></svg>
         <div class="app__tip" id="tip" hidden></div>
       </div>
+      <input id="panSlider" class="app__pan" type="range" min="0" max="1000" value="0" step="1"
+        aria-label="图表左右位置" />
     </section>
 
     <section class="app__section" id="tablePanel" aria-label="原始数据">
@@ -252,32 +255,47 @@
     }
 
     /** RFC4180 简化解析：支持引号包裹与 "" 转义 */
-    function splitCsv(text, delim) {
+    /** 让出主线程：浏览器得以绘制一帧、响应输入 */
+    const yieldToUI = () => new Promise(resolve => setTimeout(resolve, 0))
+
+    /** 大文件友好：与字符状态机逐字解析语义一致，但按 256K 字符切片、
+     * 每片后让出主线程（单次连续计算 >24ms 才让）——超大 CSV 不再冻结页面 */
+    async function splitCsv(text, delim) {
       const rows = []
       let row = []
       let field = ''
       let inQuote = false
-      for (let i = 0; i < text.length; i++) {
-        const c = text[i]
-        if (inQuote) {
-          if (c === '"') {
-            if (text[i + 1] === '"') {
-              field += '"'
-              i++
-            } else inQuote = false
-          } else field += c
-          continue
+      const SLICE = 262144
+      let i = 0
+      let t0 = performance.now()
+      while (i < text.length) {
+        const end = Math.min(text.length, i + SLICE)
+        for (; i < end; i++) {
+          const c = text[i]
+          if (inQuote) {
+            if (c === '"') {
+              if (text[i + 1] === '"') {
+                field += '"'
+                i++
+              } else inQuote = false
+            } else field += c
+            continue
+          }
+          if (c === '"') inQuote = true
+          else if (c === delim) {
+            row.push(field)
+            field = ''
+          } else if (c === '\n') {
+            row.push(field)
+            rows.push(row)
+            row = []
+            field = ''
+          } else if (c !== '\r') field += c
         }
-        if (c === '"') inQuote = true
-        else if (c === delim) {
-          row.push(field)
-          field = ''
-        } else if (c === '\n') {
-          row.push(field)
-          rows.push(row)
-          row = []
-          field = ''
-        } else if (c !== '\r') field += c
+        if (performance.now() - t0 > 24) {
+          await yieldToUI()
+          t0 = performance.now()
+        }
       }
       row.push(field)
       rows.push(row)
@@ -324,7 +342,9 @@
       )
     }
 
-    function parseCsv(name, rawText) {
+    /** 异步解析：splitCsv 分片让出主线程，数值列扫描每 8 列让一次——
+     * 10 万行 × 20 列的文件不再让界面冻结数秒 */
+    async function parseCsv(name, rawText) {
       if (rawText == null) return { error: '文件为空' }
       const text = rawText.replace(/^﻿/, '')
       if (!text.trim()) return { error: '文件为空（没有可解析内容）' }
@@ -334,7 +354,7 @@
       const delim = detectDelimiter(firstLine)
       if (!delim) return { error: '未检测到分隔符（需要 , ; 制表符 或 |）' }
 
-      let matrix = splitCsv(text, delim)
+      let matrix = await splitCsv(text, delim)
       while (matrix.length && matrix[matrix.length - 1].every(c => c.trim() === '')) matrix.pop()
       if (!matrix.length) return { error: '没有数据行' }
 
@@ -393,27 +413,36 @@
 
       // 数值列。NA 记号不计入分母：偶尔缺测的列仍是曲线（缺测处断线），
       // 整列都是 NA（如 fps 预留列）因 total=0 自然排除
-      const numeric = headers.map((_, i) => {
-        if (i === timeIdx && xMode === 'time') return false
+      const numeric = []
+      for (let ci = 0; ci < headers.length; ci++) {
+        if (ci === timeIdx && xMode === 'time') {
+          numeric.push(false)
+          continue
+        }
         let total = 0
         let hit = 0
         for (const r of rows) {
-          const v = (r[i] == null ? '' : String(r[i])).trim()
+          const v = (r[ci] == null ? '' : String(r[ci])).trim()
           if (NA.has(v)) continue
           total++
           if (toNumber(v) !== null) hit++
         }
-        return total > 0 && hit / total >= 0.8
-      })
+        numeric.push(total > 0 && hit / total >= 0.8)
+        if (ci % 8 === 7) await yieldToUI()
+      }
       if (!numeric.some(Boolean)) warn.push('没有可绘制的数值列（仅显示表格）')
 
       return { headers, rows, numeric, xMode, xs, warn: warn.join('；') }
     }
 
     // ---------- 载入 ----------
-    function addFile(name, text, opts = {}) {
+    async function addFile(name, text, opts = {}) {
       const id = `f${state.files.length + 1}`
-      const parsed = parseCsv(name, text)
+      // 解析是异步分片的：先给出反馈再让出主线程
+      const metaEl = $('meta')
+      if (metaEl) metaEl.textContent = `正在解析 ${name}…`
+      await yieldToUI()
+      const parsed = await parseCsv(name, text)
       const file = {
         id,
         name,
@@ -691,29 +720,87 @@
       s._pc = { k: pk, d, dd, dm }
     }
 
-    function draw() {
-      if (!chart) return
+    /** 量文本宽度：canvas measureText（与 .app__svg text 同为 12px 等宽）；
+     * 无 canvas 环境（如测试）按 12px 等宽 0.6em/字估算——
+     * false 哨兵确保失败环境只尝试一次 */
+    let measureCtx = null // null=未初始化，false=环境无 canvas
+    function textWidth(s) {
+      if (measureCtx === null) {
+        try {
+          const c = document.createElement('canvas')
+          measureCtx = c.getContext ? c.getContext('2d') || false : false
+        } catch (e) {
+          measureCtx = false
+        }
+      }
+      if (!measureCtx) return String(s).length * 7.2
+      measureCtx.font = '12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace'
+      return measureCtx.measureText(String(s)).width
+    }
+
+    /** 当前视窗下的坐标换算：draw 与悬停覆盖层共用同一套比例尺 */
+    function makeScales() {
       const w = chart.clientWidth || 900
       const h = chart.clientHeight || 420
-      chart.setAttribute('viewBox', `0 0 ${w} ${h}`)
-      while (chart.firstChild) chart.removeChild(chart.firstChild)
-
       const plotW = Math.max(10, w - M.l - M.r)
       const plotH = Math.max(10, h - M.t - M.b)
-      const visible = state.series.filter(s => s.visible)
-
-      if (!state.domain || !visible.length) {
-        const t = svgEl('text', { x: w / 2, y: h / 2, 'text-anchor': 'middle' })
-        t.textContent = state.files.length ? '没有可显示的数值列' : '载入 CSV 后在此显示曲线'
-        chart.appendChild(t)
-        return
-      }
-
       const { x0, x1 } = state.view
       const [y0, y1] = yRange()
       // v 是原始时间：断裂轴开启时先映射到显示空间再线性到像素
       const sx = v => M.l + ((xDisp(v) - x0) / (x1 - x0)) * plotW
       const sy = v => M.t + plotH - ((v - y0) / (y1 - y0)) * plotH
+      return { w, h, plotW, plotH, x0, x1, y0, y1, sx, sy }
+    }
+
+    function draw() {
+      if (!chart) return
+      const visible = state.series.filter(s => s.visible)
+      if (!state.domain || !visible.length) {
+        const w = chart.clientWidth || 900
+        const h = chart.clientHeight || 420
+        chart.setAttribute('viewBox', `0 0 ${w} ${h}`)
+        while (chart.firstChild) chart.removeChild(chart.firstChild)
+        const t = svgEl('text', { x: w / 2, y: h / 2, 'text-anchor': 'middle' })
+        t.textContent = state.files.length ? '没有可显示的数值列' : '载入 CSV 后在此显示曲线'
+        chart.appendChild(t)
+        return
+      }
+      // [margins] 左右边距自适应标签宽度（取消固定边距块）：左距 = 最宽纵轴
+      // 标签 + 间隙；右距 = 最宽横轴标签半宽 + 余量（右端刻度以 plot 右缘为
+      // 中心向右伸出半宽）。两轮迭代收敛——刻度数依赖 plotW，先估后量
+      const asClock = state.files.some(f => f.xMode === 'time')
+      const yr = yRange()
+      let plotEst = Math.max(10, (chart.clientWidth || 900) - M.l - M.r)
+      for (let pass = 0; pass < 2; pass++) {
+        const n = Math.min(8, Math.max(3, Math.floor(plotEst / 120)))
+        const yl = []
+        for (let i = 0; i <= 5; i++) yl.push(fmtNum(yr[0] + ((yr[1] - yr[0]) * i) / 5))
+        const xl = []
+        for (let i = 0; i <= n; i++) {
+          const v = state.view.x0 + ((state.view.x1 - state.view.x0) * i) / n
+          xl.push(asClock ? fmtClock(unX(v)).slice(0, 8) : fmtNum(v))
+        }
+        M.l = Math.max(24, Math.min(Math.ceil(Math.max(...yl.map(textWidth))) + 14, (chart.clientWidth || 900) * 0.45))
+        M.r = Math.max(10, Math.min(Math.ceil(Math.max(...xl.map(textWidth)) / 2) + 10, (chart.clientWidth || 900) * 0.3))
+        plotEst = Math.max(10, (chart.clientWidth || 900) - M.l - M.r)
+      }
+
+      const { w, h, plotW, plotH, x0, x1, y0, y1, sx, sy } = makeScales()
+      chart.setAttribute('viewBox', `0 0 ${w} ${h}`)
+      while (chart.firstChild) chart.removeChild(chart.firstChild)
+
+      // 位置滑块反向同步：任何来源（缩放/拖图/重置/滑块本身）的视窗变化都回写。
+      // 视窗覆盖全域时禁用滑块
+      if (panSlider) {
+        const range = state.domain.x1 - state.domain.x0 - (x1 - x0)
+        if (range > 1e-9) {
+          panSlider.disabled = false
+          const v = Math.round(((x0 - state.domain.x0) / range) * 1000)
+          if (panSlider.value !== String(v)) panSlider.value = String(v)
+        } else {
+          panSlider.disabled = true
+        }
+      }
 
       // 网格
       for (let i = 0; i <= 5; i++) {
@@ -727,7 +814,6 @@
         chart.appendChild(label)
       }
       const xTicks = Math.min(8, Math.max(3, Math.floor(plotW / 120)))
-      const asClock = state.files.some(f => f.xMode === 'time')
       for (let i = 0; i <= xTicks; i++) {
         const v = x0 + ((x1 - x0) * i) / xTicks
         const x = sx(v)
@@ -821,27 +907,39 @@
         }
       }
 
-      // 悬停准星
-      if (state.hover) {
-        const hx = sx(state.hover.x)
-        chart.appendChild(
-          svgEl('line', {
-            class: 'app__crosshair',
-            x1: hx,
-            y1: M.t,
-            x2: hx,
-            y2: M.t + plotH
+      // 跨文件虚线连接（2026-09-19 用户补）：同名曲线按首点时间排序后，前文件
+      // 末点 → 后文件首点之间没有任何实线（各文件独立起笔）。**只要时间不重叠
+      // 就画虚线**——无缝切分的归档间隔只有 0~2s，此前 >10s 的阈值把这类接缝
+      // 全漏掉了；虚线标记的是「文件边界」这一事实，与间隔长短无关。
+      // 两端都需在视窗内，同名列同色（colorFor 按列名固定）
+      const byName = new Map()
+      for (const s of visible) {
+        if (!byName.has(s.name)) byName.set(s.name, [])
+        byName.get(s.name).push(s)
+      }
+      for (const list of byName.values()) {
+        if (list.length < 2) continue
+        list.sort((a, b) => a.pts[0].x - b.pts[0].x)
+        for (let i = 1; i < list.length; i++) {
+          const a = list[i - 1].pts[list[i - 1].pts.length - 1]
+          const b = list[i].pts[0]
+          if (!a || !b || b.x - a.x <= 0) continue
+          const xa = sx(a.x)
+          const xb = sx(b.x)
+          if (xa < M.l || xa > M.l + plotW || xb < M.l || xb > M.l + plotW) continue
+          const ya = sy(state.normalize ? normY(list[i - 1], a.y) : a.y)
+          const yb = sy(state.normalize ? normY(list[i], b.y) : b.y)
+          const cpath = svgEl('path', {
+            d: `M${xa.toFixed(2)} ${ya.toFixed(2)}L${xb.toFixed(2)} ${yb.toFixed(2)}`,
+            fill: 'none',
+            'stroke-width': '1.4',
+            class: 'app__dashseg'
           })
-        )
-        for (const item of state.hover.items) {
-          const yv = state.normalize ? normY(item.series, item.p.y) : item.p.y
-          const dot = svgEl('circle', { cx: sx(item.p.x), cy: sy(yv), r: 3 })
-          dot.style.fill = `var(${item.series.color})`
-          chart.appendChild(dot)
+          cpath.style.stroke = `var(${list[i].color})`
+          chart.appendChild(cpath)
         }
       }
 
-      // 高亮行的虚线标识（表格 ↔ 图表联动）：在该行时间处画竖虚线
       // 高亮行的纵向虚线（表格 ↔ 图表联动）：直接用该文件该行的时间戳定位，
       // 不经 series 点找——点只在对应曲线有有效值时存在（该行缺值就整条消失），
       // 且此前误用了 series.points（实际字段是 pts）导致 draw 抛错、虚线从不出现
@@ -855,6 +953,40 @@
           )
         }
       }
+    }
+
+    /** 悬停覆盖层：独立 SVG，指针移动只重建这几个轻量节点——
+     * 主图（网格/曲线/轴）不再随 pointermove 全量重建，这是掉帧的主因 */
+    const panSlider = $('panSlider')
+    const hoverSvg = $('hover')
+    function drawHover() {
+      if (!hoverSvg) return
+      const w = chart.clientWidth || 900
+      const h = chart.clientHeight || 420
+      hoverSvg.setAttribute('viewBox', `0 0 ${w} ${h}`)
+      while (hoverSvg.firstChild) hoverSvg.removeChild(hoverSvg.firstChild)
+      if (!state.hover || !state.view || !state.domain) return
+      const { plotH, sx, sy } = makeScales()
+      const hx = sx(state.hover.x)
+      hoverSvg.appendChild(
+        svgEl('line', { class: 'app__crosshair', x1: hx, y1: M.t, x2: hx, y2: M.t + plotH })
+      )
+      for (const item of state.hover.items) {
+        const yv = state.normalize ? normY(item.series, item.p.y) : item.p.y
+        const dot = svgEl('circle', { cx: sx(item.p.x), cy: sy(yv), r: 3 })
+        dot.style.fill = `var(${item.series.color})`
+        hoverSvg.appendChild(dot)
+      }
+    }
+
+    /** rAF 合帧：一帧内多次 pointermove 只重画一次覆盖层 */
+    let hoverRaf = 0
+    function scheduleHover() {
+      if (hoverRaf) return
+      hoverRaf = requestAnimationFrame(() => {
+        hoverRaf = 0
+        drawHover()
+      })
     }
 
     const normCache = new Map()
@@ -936,7 +1068,7 @@
       if (!hit || !hit.items.length) {
         state.hover = null
         tip.hidden = true
-        draw()
+        scheduleHover()
         return
       }
       const px = hit.px
@@ -979,11 +1111,15 @@
       const wrapW = chart.clientWidth || 900
       const left = Math.min(Math.max(px + 14, 8), wrapW - (tip.offsetWidth || 200) - 8)
       tip.style.left = `${left}px`
-      tip.style.top = `${Math.max(
-        8,
+      const topPx =
         ((ev.clientY - rect.top) / rect.height) * (chart.clientHeight || 420) - 10
-      )}px`
-      draw()
+      const boxH = chart.clientHeight || 420
+      // 图表容器现在限高可裁剪（overflow:hidden）：指针靠近底部时把提示翻到光标上方
+      tip.style.top =
+        topPx > boxH * 0.62
+          ? `${Math.max(8, topPx - (tip.offsetHeight || 140) - 18)}px`
+          : `${Math.max(8, topPx)}px`
+      scheduleHover()
     }
 
     function escapeHtml(s) {
@@ -1082,7 +1218,7 @@
       chart.addEventListener('pointerleave', () => {
         state.hover = null
         tip.hidden = true
-        draw()
+        scheduleHover()
       })
       chart.addEventListener('dblclick', resetView)
     }
@@ -1783,13 +1919,28 @@
     // ---------- 交互绑定 ----------
     $('pick').addEventListener('click', () => $('fileInput').click())
     $('fileInput').addEventListener('change', async ev => {
-      for (const file of ev.target.files) addFile(file.name, await file.text())
+      for (const file of ev.target.files) await addFile(file.name, await file.text())
       ev.target.value = ''
     })
     $('clear').addEventListener('click', clearAll)
     $('reset').addEventListener('click', resetView)
     $('zoomIn').addEventListener('click', () => zoomAt(0.5, 1 / 1.6))
     $('zoomOut').addEventListener('click', () => zoomAt(0.5, 1.6))
+    // 左右位置滑块：拖动 = 水平平移视窗（等宽滑动，不缩放）。
+    // 反向同步在 draw() 内做——缩放/拖图/重置等任何视窗变化都会回写滑块位置；
+    // 视窗已覆盖全域（range=0）时禁用。程序化回写不触发 input，无回环
+    panSlider.addEventListener('input', () => {
+      if (!state.domain || !state.view) return
+      const span = state.view.x1 - state.view.x0
+      const range = state.domain.x1 - state.domain.x0 - span
+      if (range <= 0) return
+      state.view.x0 = state.domain.x0 + (Number(panSlider.value) / 1000) * range
+      state.view.x1 = state.view.x0 + span
+      clampView()
+      draw()
+    })
+    // 拖动/长按时拦截浏览器默认的选中与呼出菜单
+    chart.addEventListener('contextmenu', ev => ev.preventDefault())
     $('fitY').addEventListener('click', ev => {
       state.fitY = !state.fitY
       ev.currentTarget.setAttribute('aria-pressed', String(state.fitY))
@@ -1910,10 +2061,25 @@
       drop.hidden = true
       const items = ev.dataTransfer && ev.dataTransfer.files
       if (!items || !items.length) return
-      for (const file of items) addFile(file.name, await file.text())
+      for (const file of items) await addFile(file.name, await file.text())
     })
 
-    window.addEventListener('resize', () => draw())
+    window.addEventListener('resize', () => {
+      draw()
+      scheduleHover()
+    })
+
+    // 右下角原生 resize:vertical 手柄（图表容器 / 原始数据表格）：容器高度
+    // 变化后重算绘制、悬停层与滚动条。jsdom 无 ResizeObserver，守卫跳过
+    if (typeof ResizeObserver === 'function') {
+      const ro = new ResizeObserver(() => {
+        draw()
+        scheduleHover()
+        updateScrollBar()
+      })
+      ro.observe(document.querySelector('.app__chart'))
+      ro.observe($('tableScroll'))
+    }
 
     // 独立页面没有控制台时也要能看见错误：捕获一次显示在页面上（去重）
     let errorShown = false
@@ -1936,12 +2102,44 @@
       box.appendChild(note)
     })
 
+    // ---------- 刷新守卫 ----------
+    // 页面上存在「值得保留的状态」——载入的文件、筛选/搜索、列配置、断裂轴等
+    // 开关、缩放位置、高亮——时拦截刷新/关闭，防止误触丢失分析进度。
+    // 动态判定而非脏标记：新增交互不用记得接线，空页面也不会误拦。
+    // 现代浏览器只弹通用确认框（自定义文案被忽略），确认后照常刷新
+    window.addEventListener('beforeunload', ev => {
+      const viewMoved =
+        state.view &&
+        state.domain &&
+        (state.view.x0 !== state.domain.x0 || state.view.x1 !== state.domain.x1)
+      const touched =
+        state.files.length > 0 ||
+        !!state.highlight ||
+        !!state.searchText.trim() ||
+        !!state.searchText2.trim() ||
+        !!state.searchText3.trim() ||
+        state.filterChg !== 'all' ||
+        state.filterScreen !== 'all' ||
+        state.hiddenCols.size > 0 ||
+        !state.showHead ||
+        state.showFileCol ||
+        !state.shortNames ||
+        !state.showAvg ||
+        !state.gapSkip ||
+        state.normalize ||
+        !state.fitY ||
+        !!viewMoved
+      if (!touched) return
+      ev.preventDefault()
+      ev.returnValue = ''
+    })
+
     // ---------- 默认载入同目录 status.csv ----------
     async function boot() {
       try {
         const res = await fetch('status.csv', { cache: 'no-store' })
         if (!res.ok) throw new Error(`HTTP ${res.status}`)
-        addFile('status.csv', await res.text(), { auto: true })
+        await addFile('status.csv', await res.text(), { auto: true })
       } catch (e) {
         // const box = $('notice')
         // const note = document.createElement('div')
