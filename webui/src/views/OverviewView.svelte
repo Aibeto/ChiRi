@@ -133,9 +133,13 @@
         </div>
       {/if}
     </div>
-    {#if app.powerAvgMissing}
-      <!-- 文件缺失是「调度没跑过」的正常形态，不是错误 → 次要色说明，不用危险色 -->
-      <p class="u-note u-mt-2">{t("overview.power.missing")}</p>
+    {#if app.powerAvgMissing || app.powerStaleReason}
+      <!-- 文件缺失是「调度没跑过」的正常形态，不是错误 → 次要色说明，不用危险色。
+           有具体原因（未取样：非放电 / 平均模式息屏 / 读数不可用）时优先显示它，
+           说不清才回退到 overview.power.missing 那句兜底 -->
+      <p class="u-note u-mt-2">
+        {app.powerStaleReason || t("overview.power.missing")}
+      </p>
     {/if}
   </Panel>
 

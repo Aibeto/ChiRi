@@ -239,6 +239,8 @@ class AppStore {
       // 功耗参考/平均值（W）：缺失/为空/非法统一按「无值」显示 —，不打断其它数据
       this.powerAvgWatt = powerAvg.kind === 'ok' ? powerAvg.value.watt : null
       this.powerAvgMissing = powerAvg.kind === 'ok' ? powerAvg.value.missing : false
+      // 没有取值时把「为什么没有」一并算出来：界面只显示 — 会让人以为是坏的
+      this.powerStaleReason = this.powerAvgWatt === null ? await this.powerStaleWhy() : ''
       await this.loadCommon()
       } finally {
         this.loading = false
@@ -509,6 +511,8 @@ class AppStore {
   /** 口径开关写入中（高级设置直写 meta.yaml） */
   /** 文件缺失/为空（daemon 未运行过）：界面红字提示，不静默显示 — */
   powerAvgMissing = $state(false)
+  /** 没有取到值时的原因文案（空 = 说不清，界面回退到 overview.power.missing） */
+  powerStaleReason = $state('')
   powerAvgPending = $state(false)
   powerAvgError = $state('')
 
@@ -523,6 +527,28 @@ class AppStore {
   get powerMaxWatt(): number {
     const v = this.metaSnapshot?.values?.power_max_w
     return typeof v === 'number' && Number.isFinite(v) && v > 0 && v <= 200 ? v : 12
+  }
+
+  /**
+   * PowerAVG 没取到值时，说明原因（空串 = 说不清，界面回退到 overview.power.missing）。
+   * 判据来自 status.csv 最后一行（daemon 每秒一行，含 charge 与 screen_on）：
+   *   ① 非放电（充电 / 充满 / 未充电 / 状态不可识别）→ 按口径不取样；
+   *   ② 平均模式且息屏 → 不取样（平均口径＝亮屏放电）；
+   *   ③ 放电且屏幕条件满足却仍为空 → 电压/电流读数不可用（或 daemon 还没写过一行）。
+   */
+  private async powerStaleWhy(): Promise<string> {
+    const tail = await readStatusCsvTail(4096)
+    if (tail.kind !== 'ok') return ''
+    const rows = parseStatusCsv(tail.value)
+    const last = rows[rows.length - 1]
+    if (!last) return ''
+    if (last.charge !== 'discharging') {
+      const known = ['charging', 'full', 'not_charging']
+      const name = known.includes(last.charge) ? t(`logs.charge.${last.charge}`) : last.charge
+      return t('overview.power.reason.charge', { state: name })
+    }
+    if (this.powerAvgUsesAverage && !last.screenOn) return t('overview.power.reason.screen')
+    return t('overview.power.reason.noreading')
   }
 
   // [batteryRead]

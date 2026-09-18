@@ -771,11 +771,13 @@ pub struct ExternalMetaOverrides {
     pub voltage_double: Option<bool>,
     /// 倍电流（`current_double`，默认 false）：标准节点路径电流 ×2，互斥关系同上。
     pub current_double: Option<bool>,
-    /// 电压校准除数（`voltage_divisor`，默认 1000，须 > 0）：读数折算到毫单位后
-    /// 除以它得到 V。用来替代原先代码里的量级启发式与物理范围门。
+    /// 电压校准除数（`voltage_divisor`，默认 1000，须 > 0）：**全链没有内置换算**，
+    /// `节点原始值 ÷ 该值 = V`（标准节点 µV 填 1000000，私有节点 mV 填 1000）。
+    /// 用来替代原先代码里的量级启发式与物理范围门。
     pub voltage_divisor: Option<f32>,
-    /// 电流校准除数（`current_divisor`，默认 1000，须 > 0）：折算到毫单位后除以它得到 A。
-    /// 与电压分开：节点的两个量未必同时错单位，分开才能单独校正（W = V×A 保持自洽）。
+    /// 电流校准除数（`current_divisor`，默认 1000，须 > 0）：`节点原始值 ÷ 该值 = mA`
+    /// （标准节点 µA 填 1000，私有节点 mA 填 1）。
+    /// 与电压分开：节点的两个量未必同时错单位，分开才能单独校正（W = |mA| × V 保持自洽）。
     pub current_divisor: Option<f32>,
     /// 「不改」开关（meta.yaml 字段 `nofix`，默认 false，且默认不写进配置）：
     /// true = 启动时跳过所有「二进制内容对外部文件的覆盖类操作」——webui 资产还原

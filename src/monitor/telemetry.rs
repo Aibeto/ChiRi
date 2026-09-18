@@ -67,9 +67,11 @@ const BCC_PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(6
 /// - `VOLTAGE_DOUBLE` / `CURRENT_DOUBLE`：标准节点路径的倍电压/倍电流（双电芯机型上
 ///   标准节点可能只报单节/单芯值）。**与私有节点互斥**：私有开关打开时 UI 强制关闭
 ///   这两个开关，这里再判一次，手改 meta 也挡得住；
-/// - `VOLT_DIVISOR` / `CURR_DIVISOR`：单位校准（**电压、电流各一个**）。读数先折算到
-///   毫单位（标准节点 µV/µA ÷1000 是 Android ABI；私有节点本身就是 mV/mA），电压再除以
-///   电压校准值得到 V、电流除以电流校准值得到 A，W = V×A。默认都是 1000。
+/// - `VOLT_DIVISOR` / `CURR_DIVISOR`：单位校准（**电压、电流各一个**）。**全链没有内置
+///   换算**——`输出 = 节点原始值 ÷ 校准值`：电压得到 V、电流得到 mA（`batt_power_w`
+///   仍是 |mA| × V = W）。校准值填多少取决于节点报什么单位：
+///     标准节点（µV / µA）：电压 1000000、电流 1000；
+///     私有节点 bcc_parms（mV / mA）：电压 1000、电流 1。
 ///   分开的理由：节点的电压与电流单位未必同时错（常见只错一个），一个共用值会让
 ///   功率按平方变化，改了也说不清是谁的锅。
 static OPLUS_CHG: AtomicBool = AtomicBool::new(false);
@@ -139,17 +141,18 @@ impl Telemetry {
         if v.is_nan() { None } else { Some(v) }
     }
     /// 电池电流（mA，保留方向符号）；None = 不可用。
-    /// 存储口径 µA → ÷1000 得毫单位 → ÷ 电流校准得 A → ×1000 回 mA，即 µA ÷ 电流校准
-    /// （默认校准 1000 时与原口径一致：µA/1000）
+    /// **没有内置换算**：直接是 `节点原始值 ÷ current_divisor`，单位由电流校准值决定
+    /// （节点报 µA 就填 1000 得到 mA，报 mA 就填 1）
     pub fn batt_current_ma(&self) -> Option<f32> {
         let v = self.batt_current_ua.load(Ordering::Relaxed);
         (v != UNAVAIL).then(|| v as f32 / current_divisor())
     }
     /// 电池电压（V）；None = 不可用。
-    /// 存储口径 µV → ÷1000 得毫单位 → ÷ 电压校准得 V（默认校准 1000 时 = µV/1e6）
+    /// **没有内置换算**：直接是 `节点原始值 ÷ voltage_divisor`，单位由电压校准值决定
+    /// （节点报 µV 就填 1000000 得到 V，报 mV 就填 1000）
     pub fn batt_voltage_v(&self) -> Option<f32> {
         let v = self.batt_voltage_uv.load(Ordering::Relaxed);
-        (v != UNAVAIL).then(|| v as f32 / 1000.0 / voltage_divisor())
+        (v != UNAVAIL).then(|| v as f32 / voltage_divisor())
     }
     /// 电池瞬时功率（W，电流取绝对值）；电流或电压缺失返回 None
     pub fn batt_power_w(&self) -> Option<f32> {
@@ -195,10 +198,9 @@ fn read_standard_battery() -> (i32, i32) {
 /// 才刷新一次——1s 精度的功耗统计必须优先走该节点，否则读到的是重复旧值。
 const OPLUS_BCC_PARMS: &str = "/sys/class/oplus_chg/battery/bcc_parms";
 
-/// 读 OPlus bcc_parms，归一化为 (电压 µV, 电流 µA) 供共享快照使用。
-/// 字段按**毫单位**（mV/mA）解读、乘 1000 存成与标准节点一致的 µV/µA 口径：
-/// 不再做量级启发式猜测（旧的 mV/V、mA/A 自动识别 + 2–6V/±30A 物理范围门已删除），
-/// 单位不匹配交给 meta 的「单位校准」（unit_divisor）修正。
+/// 读 OPlus bcc_parms，存**节点原始值**（不做任何换算）供共享快照使用。
+/// 单位由 meta 的「电压/电流校准」决定：该节点报 mV / mA，配套填 1000 / 1。
+/// 不做量级启发式猜测（旧的 mV/V、mA/A 自动识别 + 2–6V/±30A 物理范围门已删除）。
 /// 字段缺失/越界返回 None（调用方回退标准 power_supply 节点）。
 fn read_oplus_bcc(dual_cell: bool) -> Option<(i32, i32)> {
     let text = std::fs::read_to_string(OPLUS_BCC_PARMS).ok()?;
@@ -222,9 +224,8 @@ fn read_oplus_bcc(dual_cell: bool) -> Option<(i32, i32)> {
     } else {
         v0
     };
-    let v_uv = i32::try_from(v_raw.checked_mul(1000)?).ok()?;
-    let i_ua = i32::try_from(cur.checked_mul(1000)?).ok()?;
-    Some((v_uv, i_ua))
+    // 原样存：越界（超出 i32）视为不可用，回退标准节点
+    Some((i32::try_from(v_raw).ok()?, i32::try_from(cur).ok()?))
 }
 
 /// 电压/电流字段不可用：告警一次并返回 None（调用方回退标准 power_supply 节点）。

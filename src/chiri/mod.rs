@@ -36,6 +36,9 @@ const SCHEDULER_IPC_RESTART_MAX: u32 = 5;
 const SCHEDULER_IPC_RESTART_BACKOFF: Duration = Duration::from_secs(1);
 /// 电池状态节点（标准 power_supply 接口）：区分充电/放电
 const BATT_STATUS_PATH: &str = "/sys/class/power_supply/battery/status";
+
+/// status 节点取值不认识时的告警去重（值恢复为认识的内容后重新武装）
+static BATT_STATUS_UNKNOWN_WARNED: AtomicBool = AtomicBool::new(false);
 /// 热保护解除斜坡步长：压制加深立即生效，解除方向每个采样周期（2s）最多
 /// 恢复 0.15。温度围绕阈值震荡时，若解除立即全量恢复，温度马上反弹触发
 /// 再压制——cap 在 40/70/100 间以 ~8s 周期反复跳变（bang-bang 振荡，
@@ -49,16 +52,37 @@ const THERMAL_UNPRESS_STEP: f32 = 0.15;
 /// 未知值返回 "-"（与 CSV 缺失占位一致）。电流符号因厂商节点方向不一，
 /// 不可靠，故直接读 status 字符串。
 fn read_battery_charge_state() -> String {
-    match std::fs::read_to_string(BATT_STATUS_PATH) {
-        Ok(s) => match s.trim() {
-            "Charging" => "charging".to_string(),
-            "Discharging" => "discharging".to_string(),
-            "Full" => "full".to_string(),
-            "Not charging" => "not_charging".to_string(),
-            _ => "-".to_string(),
-        },
-        Err(_) => "-".to_string(),
+    let state = match std::fs::read_to_string(BATT_STATUS_PATH) {
+        Ok(s) => {
+            let raw = s.trim();
+            // 大小写与多余空白都容忍：不同内核会写 Charging / charging，规范化后再比对
+            match raw.to_ascii_lowercase().as_str() {
+                "charging" => "charging",
+                "discharging" => "discharging",
+                "full" => "full",
+                "not charging" => "not_charging",
+                _ => {
+                    // 取值不认识 = 功耗均值永远不会取样（门控只认 discharging），
+                    // 必须把原文打出来，否则只看得到「PowerAVG.chr 一直是空的」
+                    if !BATT_STATUS_UNKNOWN_WARNED.swap(true, Ordering::Relaxed) {
+                        log::warn!(
+                            "{}",
+                            crate::i18n::t_with_args(
+                                "battery-status-unknown",
+                                &crate::fluent_args!("raw" => raw.to_string())
+                            )
+                        );
+                    }
+                    "-"
+                }
+            }
+        }
+        Err(_) => "-",
+    };
+    if state != "-" {
+        BATT_STATUS_UNKNOWN_WARNED.store(false, Ordering::Relaxed);
     }
+    state.to_string()
 }
 
 /// 温度传感器滤波器：物理范围门 + 毛刺丢弃 + 3 样本中值 + 斜率限制。
@@ -764,6 +788,8 @@ pub fn start_scheduler_thread(
             // 遥测 CSV 落盘计时（1s 精度）与 debug 摘要计数（每 20 行 = 20s 一条）
             let mut last_telemetry_log = Instant::now();
             let mut telemetry_log_counter: u32 = 0;
+            // 上一次「PowerAVG 取样被跳过」的原因：只在原因变化时打点，避免每秒刷屏
+            let mut sample_skip_reason = String::new();
 
             let mut is_screen_on = true; // 屏幕状态标记
             // 息屏计时：屏幕熄灭时记录，超过 scene_mode_delay_secs 后切到 scenemode 低功耗
@@ -1177,10 +1203,36 @@ pub fn start_scheduler_thread(
                     };
                     let sample_ok =
                         charge_state == "discharging" && (!use_average || is_screen_on);
-                    let power_now = crate::logger::power_avg_update(
-                        if sample_ok { tm.batt_power_w() } else { None },
-                        use_average,
-                    );
+                    let power_reading = if sample_ok { tm.batt_power_w() } else { None };
+                    // 跳过时 PowerAVG.chr 不更新（界面只看得到「文件为空」）——把原因说清：
+                    // 同一原因只报一次，真正写入样本后重新武装（成功时清空 last_skip）
+                    let skip_reason = if !sample_ok {
+                        if charge_state != "discharging" {
+                            Some(format!("not-discharging({charge_state})"))
+                        } else {
+                            Some("screen-on".to_string())
+                        }
+                    } else if power_reading.is_none() {
+                        Some("no-reading".to_string())
+                    } else {
+                        None
+                    };
+                    match skip_reason {
+                        Some(reason) => {
+                            if sample_skip_reason != reason {
+                                log::info!(
+                                    "{}",
+                                    crate::i18n::t_with_args(
+                                        "power-avg-skip",
+                                        &crate::fluent_args!("reason" => reason.clone())
+                                    )
+                                );
+                                sample_skip_reason = reason;
+                            }
+                        }
+                        None => sample_skip_reason.clear(),
+                    }
+                    let power_now = crate::logger::power_avg_update(power_reading, use_average);
                     // 首轮标记：必须在自增**之前**取——第一 tick 时计数器还是 0。此前
                     // 把 `telemetry_log_counter == 0` 放在自增之后判断，恒为 false，
                     // 启动首轮清残留通知那条永远不会执行
@@ -1246,7 +1298,11 @@ pub fn start_scheduler_thread(
 
                     // FAS 延迟退出巡检（1s）：到期完成退出（频率 + governor 已恢复），
                     // 按离开 FAS 时记住的目标模式重新接管；延迟期内切回白名单应用
-                    // 会由 activate 取消延迟（无缝续期），这里 no-op
+                    // 会由 activate 取消延迟（无缝续期），这里 no-op。
+                    // 这个分支在停摆期不可达（所以不需要另加 halted 门控）：tick 只在
+                    // exit_deadline 到期时返回 true，而进入 DOWN 的 deactivate_all()
+                    // 已经把它清空——改这一段时别破坏这个不变量，否则停摆会被 FAS
+                    // 的延迟退出重新接管调度
                     if fas_mgr.tick() {
                         if let Some(mode) = pending_mode_after_fas.take() {
                             *mode_clone.lock().unwrap() = mode.clone();

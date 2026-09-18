@@ -131,11 +131,13 @@ pub struct Meta {
     #[serde(default, alias = "CurrentDouble")]
     pub current_double: bool,
 
-    /// 电压校准除数（`voltage_divisor`，默认 1000，须 > 0）：读数折算到毫单位后除以它得 V
+    /// 电压校准除数（`voltage_divisor`，默认 1000，须 > 0）：节点原始值 ÷ 该值 = V
+    /// （标准节点 µV 填 1000000，私有节点 mV 填 1000；代码里没有内置换算）
     #[serde(default = "crate::utils::default_unit_divisor", alias = "VoltageDivisor")]
     pub voltage_divisor: f32,
 
-    /// 电流校准除数（`current_divisor`，默认 1000，须 > 0）：读数折算到毫单位后除以它得 A
+    /// 电流校准除数（`current_divisor`，默认 1000，须 > 0）：节点原始值 ÷ 该值 = mA
+    /// （标准节点 µA 填 1000，私有节点 mA 填 1）
     #[serde(default = "crate::utils::default_unit_divisor", alias = "CurrentDivisor")]
     pub current_divisor: f32,
 
