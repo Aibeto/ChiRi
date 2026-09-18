@@ -50,6 +50,7 @@ export default {
   'overview.device.unknown': 'Undetermined',
   'overview.power.ref': 'Reference discharge power',
   'overview.power.avg': 'Average discharge power',
+  'overview.power.now': 'Current power',
   'overview.power.missing':
     'PowerAVG.chr missing or empty: the scheduler writes it while the battery discharges, so it stays empty before the first run or while charging',
   'overview.module': 'Module info',

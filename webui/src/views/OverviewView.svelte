@@ -61,6 +61,13 @@
     return Math.min(100, Math.max(0, (w / app.powerMaxWatt) * 100));
   });
 
+  // 当前功耗（status.csv 末行）对满量程的百分比，同口径夹在 0~100
+  const nowPercent = $derived.by(() => {
+    const w = app.powerNowWatt;
+    if (w === null) return 0;
+    return Math.min(100, Math.max(0, (w / app.powerMaxWatt) * 100));
+  });
+
   const configValue = $derived.by(() => {
     if (app.configState === "ok") return app.configRel;
     if (app.configState === "missing") return t("logs.missing");
@@ -118,17 +125,20 @@
               ? "—"
               : `${app.powerAvgWatt.toFixed(2)} ${t("unit.watt")}`}
           </p>
+          <!-- 官方 ak-progress 结构：--ak-progress-signal 与 --ak-progress-value 的默认值
+               都声明在 .ak-progress 根上，fill 的宽度与颜色全部由变量驱动。此前裸用
+               track/fill 时 fill 取不到 signal 变量 → background 透明，条看着是空的
+               （此前两次修宽度方向都错了，宽度早就画上了）。壳层由 .power__bar 剥掉 -->
           <div
-            class="ak-progress__track power__bar"
+            class="ak-progress power__bar"
             role="progressbar"
+            aria-label={app.powerAvgUsesAverage ? t("overview.power.avg") : t("overview.power.ref")}
             aria-valuemin="0"
             aria-valuemax="100"
             aria-valuenow={Math.round(powerPercent)}
+            style={`--ak-progress-value: ${powerPercent.toFixed(1)}%`}
           >
-            <!-- 宽度直接写在填充元素上：原来靠「把 --ak-progress-value 设在轨道上，
-                 由上游 .ak-progress__fill 继承」，这条继承链在本 WebView 里没生效，
-                 条一直是空的（旁边的百分比数字是另一个元素，所以数字对、条不动） -->
-            <span class="ak-progress__fill" style={`width: ${powerPercent.toFixed(1)}%`}></span>
+            <div class="ak-progress__track"><span class="ak-progress__fill"></span></div>
           </div>
           <!-- 百分比同时出数字：条看起来空时能判断是「读数为 0/缺失」还是「条没画出来」 -->
           <span class="ak-progress__value u-mono">{Math.round(powerPercent)}%</span>
@@ -160,6 +170,7 @@
     // desc={t("overview.mode.observed")}
     signal={modeSignal}
   >
+    <div class="mode-card">
     <div class="mode" data-signal={modeSignal}>
       <div class="mode__main">
         {#if showFamily}
@@ -184,6 +195,31 @@
           {/each}
         </ul>
       {/if}
+    </div>
+    {#if app.isChiri}
+      <!-- 当前功耗：status.csv 最后一行的 batt_power_w，结构/样式与首卡的
+           平均/参考放电功耗块完全一致（同一批 .power 类） -->
+      <div class="power">
+        <p class="u-note">{t("overview.power.now")}</p>
+        <p class="power__value u-mono">
+          {app.powerNowWatt === null
+            ? "—"
+            : `${app.powerNowWatt.toFixed(2)} ${t("unit.watt")}`}
+        </p>
+        <div
+          class="ak-progress power__bar"
+          role="progressbar"
+          aria-label={t("overview.power.now")}
+          aria-valuemin="0"
+          aria-valuemax="100"
+          aria-valuenow={Math.round(nowPercent)}
+          style={`--ak-progress-value: ${nowPercent.toFixed(1)}%`}
+        >
+          <div class="ak-progress__track"><span class="ak-progress__fill"></span></div>
+        </div>
+        <span class="ak-progress__value u-mono">{Math.round(nowPercent)}%</span>
+      </div>
+    {/if}
     </div>
   </Panel>
 
@@ -378,6 +414,19 @@
 
   .power__bar {
     width: 100%;
+    /* 官方 .ak-progress 根自带壳层（内距/边框/深底）——标签与数值在外层栅格，
+       条只取它的轨道/填充机制，壳层剥掉保持原布局 */
+    padding: 0;
+    border: 0;
+    background: none;
+  }
+
+  /* 模式卡：左侧模式信息，右侧当前功耗读数板（复用首卡 .power 同款类） */
+  .mode-card {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: var(--ak-space-4);
+    align-items: center;
   }
 
   .daemon__name {

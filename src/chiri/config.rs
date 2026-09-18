@@ -119,7 +119,7 @@ pub struct Meta {
     #[serde(default, alias = "OplusChg")]
     pub oplus_chg: bool,
 
-    /// OPlus 双电芯（`oplus_dual_cell`，默认 false）：私有节点电压取两节平均（单节域）
+    /// OPlus 双电芯（`oplus_dual_cell`，默认 false）：私有节点电压取两节平均、电流 ×2（并联）
     #[serde(default, alias = "OplusDualCell")]
     pub oplus_dual_cell: bool,
 

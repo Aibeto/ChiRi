@@ -3,6 +3,7 @@ alwaysApply: false
 description: commits rule
 scene: git_message
 ---
+
 # ChiRi 提交信息规范
 
 基于 Conventional Commits 格式。
@@ -90,3 +91,4 @@ scene: git_message
 ## 其他规则
 
 - 使用 /humanizer-zh skill 检查文本是否符合中文规范
+- 不要提到版本号变更

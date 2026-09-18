@@ -241,6 +241,13 @@ class AppStore {
       this.powerAvgMissing = powerAvg.kind === 'ok' ? powerAvg.value.missing : false
       // 没有取值时把「为什么没有」一并算出来：界面只显示 — 会让人以为是坏的
       this.powerStaleReason = this.powerAvgWatt === null ? await this.powerStaleWhy() : ''
+      // 当前功耗（status.csv 末行 batt_power_w）：模式卡右侧「当前功耗」块的数据源；
+      // 文件缺失/无行/读数缺失一律 null（显示 —，不打断其它数据）
+      if (this.isChiri) {
+        const tail = await readStatusCsvTail(4096)
+        const rows = tail.kind === 'ok' ? parseStatusCsv(tail.value) : []
+        this.powerNowWatt = rows[rows.length - 1]?.battPower ?? null
+      }
       await this.loadCommon()
       } finally {
         this.loading = false
@@ -515,6 +522,8 @@ class AppStore {
   powerStaleReason = $state('')
   powerAvgPending = $state(false)
   powerAvgError = $state('')
+  /** 当前功耗（W，status.csv 最后一行的 batt_power_w，1s 采样）：null = 无行/无读数，显示 — */
+  powerNowWatt = $state<number | null>(null)
 
   /** 功耗口径：是否使用累计平均值（meta.yaml `power_avg`，默认 false = 参考值） */
   get powerAvgUsesAverage(): boolean {
