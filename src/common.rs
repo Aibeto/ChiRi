@@ -148,14 +148,22 @@ pub fn is_chiri_soc() -> bool {
 /// 返回第一个命中设备硬件标识的处理器片段。
 /// 顺序与 CHIRI_SOC_HINTS 一致。配置已编译进二进制（embedded_config_str），
 /// 匹配只看硬件标识，不再依赖磁盘目录是否存在——磁盘快照缺失/被删不影响识别。
+///
+/// 结果同样只探测一次并缓存：硬件标识在进程生命周期内不可变，而本函数被
+/// `chiri_core_ranges()` 等 20+ 处调用（亲和/热检查等周期块每轮都会走），
+/// 每次重算要逐片段 `to_lowercase()` 分配字符串、再在数 KB 的硬件标识全集上
+/// 做子串匹配——纯属重复劳动。
+static MATCHED_SOC_HINT: OnceLock<Option<&'static str>> = OnceLock::new();
 pub(crate) fn matched_soc_hint() -> Option<&'static str> {
-    if !is_chiri_soc() {
-        return None;
-    }
-    CHIRI_SOC_HINTS
-        .iter()
-        .copied()
-        .find(|hint| hint_matches(hint))
+    *MATCHED_SOC_HINT.get_or_init(|| {
+        if !is_chiri_soc() {
+            return None;
+        }
+        CHIRI_SOC_HINTS
+            .iter()
+            .copied()
+            .find(|hint| hint_matches(hint))
+    })
 }
 
 /// 命中 Chiri 目标 SoC 时，返回其处理器专属配置目录 `config/{命中片段}/`（存在则返回）。
@@ -885,10 +893,7 @@ fn parse_disk_meta(text: &str) -> Option<ExternalMetaOverrides> {
             crate::utils::DEFAULT_UNIT_DIVISOR
         }
     };
-    let voltage_divisor = f
-        .voltage_divisor
-        .or(f.unit_divisor)
-        .map(sane);
+    let voltage_divisor = f.voltage_divisor.or(f.unit_divisor).map(sane);
     let current_divisor = f.current_divisor.map(sane);
     Some(ExternalMetaOverrides {
         loglevel: match f.loglevel.as_deref() {

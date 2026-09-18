@@ -183,14 +183,14 @@ pub mod config;
 pub mod scheduler;
 // FAS（帧感知调度）：引擎位于 crate::scheduler::fas（算法层），ChiRi 侧由 fas_manager 提供多实例生命周期管理。
 pub mod affinity;
-pub mod tuned;
 pub mod core_ctl;
 pub mod cpu_load_governor;
 pub mod fas_manager;
 pub mod fast;
-pub mod gpu;
 pub mod governor;
+pub mod gpu;
 pub mod touch_detect;
+pub mod tuned;
 
 use crate::common;
 use crate::common::DaemonEvent;
@@ -367,12 +367,18 @@ fn sync_lab_governor_gpu(
 
 /// CLG 档位参数获取（未知/空模式名禁用 CLG，避免默认参数意外接管）。
 /// 与调度线程内的 get_clg_cfg 闭包同逻辑；文件级供 FAS 延迟退出等辅助函数使用。
-fn clg_cfg_for(config: &crate::chiri::config::Config, mode: &str) -> crate::chiri::config::CpuLoadGovernorConfig {
-    config.get_mode(mode).map(|m| m.cpu_load_governor.clone()).unwrap_or_else(|| {
-        let mut cfg = crate::chiri::config::CpuLoadGovernorConfig::default();
-        cfg.enabled = false;
-        cfg
-    })
+fn clg_cfg_for(
+    config: &crate::chiri::config::Config,
+    mode: &str,
+) -> crate::chiri::config::CpuLoadGovernorConfig {
+    config
+        .get_mode(mode)
+        .map(|m| m.cpu_load_governor.clone())
+        .unwrap_or_else(|| {
+            let mut cfg = crate::chiri::config::CpuLoadGovernorConfig::default();
+            cfg.enabled = false;
+            cfg
+        })
 }
 
 /// 按目标模式接管频率（特调 / vector / CLG）。FAS 正常退出与延迟退出共用。
@@ -403,8 +409,11 @@ fn apply_mode_takeover(
         fast_lock.release();
         let clg_cfg = clg_cfg_for(config, mode);
         if clg_cfg.enabled {
-            if cpu_governor.is_active() { cpu_governor.reload_config(&clg_cfg); }
-            else { cpu_governor.init_policies(&clg_cfg); }
+            if cpu_governor.is_active() {
+                cpu_governor.reload_config(&clg_cfg);
+            } else {
+                cpu_governor.init_policies(&clg_cfg);
+            }
         } else {
             cpu_governor.release();
         }
@@ -2106,8 +2115,9 @@ pub fn start_scheduler_thread(
                     DaemonEvent::SystemLoadUpdate { core_utils, foreground_max_util } => {
                         // 刷新看门狗心跳：只要有负载事件到达即视为负载源存活
                         last_load_event = Instant::now();
-                        // 快照逐核 util：按核亲和选核打分与 devimp tick 行的输入
-                        last_core_utils = core_utils.clone();
+                        // 逐核 util 快照的赋值延后到下方负载投喂之后：投喂各分支
+                        // 只读借用 core_utils，先移动会打断借用；延后即可用**移动**
+                        // 替代克隆，省掉每 tick 一次 Vec 分配（40ms 特调下 25 次/s）
                         // 该事件常规 160ms / 特调 40ms 一次，仅在 DEBUG 时输出摘要便于排查。
                         // 字符串构造在宏外会被无条件求值（每 tick 分配一次），
                         // 用 log_enabled! 门控——INFO 级别下零分配。
@@ -2129,6 +2139,10 @@ pub fn start_scheduler_thread(
                             // Worker 线程内自主完成决策 + 写频，无需外部 flush
                             cpu_governor.on_load_update(&core_utils);
                         }
+
+                        // 逐核 util 快照：按核亲和选核打分与 devimp tick 行的输入。
+                        // 移动而非克隆（上方投喂只读借用，此后本 tick 不再用 core_utils）
+                        last_core_utils = core_utils;
 
                         // scenemode：息屏超过 scene_mode_delay_secs 后把 CLG 切到低功耗配置
                         // （一次性）。特调模式由 akmode 独立接管不参与；亮屏后恢复原模式。

@@ -12,7 +12,7 @@ use std::time::Duration;
 use crate::fluent_args;
 use crate::i18n::{t, t_with_args};
 
-// [cluster] 
+// [cluster]
 // PolicyRestore — CLG 接管前的系统状态快照，release 时恢复
 
 struct PolicyRestore {
@@ -202,7 +202,7 @@ const TOUCH_BOOST_SUSPENDED: bool = true;
 /// f32 以 bit pattern 存入 AtomicU32（合法的原子操作，所有位组合都是合法 f32）。
 /// 使用 generation 计数器保证 set/get 一致性：Worker 读取时若 generation 不匹配
 /// 则视为写入中、返回 0.0（无升频），下次 tick 重试。
-// [touch_state] 
+// [touch_state]
 struct AtomicTouchState {
     /// 触摸升频地板性能比（f32 的 bit pattern），0 表示无窗口
     floor_bits: AtomicU32,
@@ -264,8 +264,17 @@ impl AtomicTouchState {
     }
 }
 
-// [worker] 
+// [worker]
 // CoreGroupWorker — 每个核心组独立线程的调度 Worker
+
+/// 负载通道发送端：逐核 util 以 Arc 共享（同一 tick 只分配一次，广播给全部 Worker）
+type LoadSender = mpsc::SyncSender<Arc<Vec<f32>>>;
+/// 负载通道接收端（与 [`LoadSender`] 配对）
+type LoadReceiver = mpsc::Receiver<Arc<Vec<f32>>>;
+/// Worker 派生成功后的返回：接管前状态快照 + (线程句柄, 负载发送端)。
+/// 抽成别名仅为压平类型嵌套深度（clippy::type_complexity）。
+type WorkerSpawn = (PolicyRestore, (JoinHandle<()>, LoadSender));
+
 /// 单核心组的独立调度 Worker：在专属线程内持有 ClusterState，
 /// 接收负载数据自主做升降频决策 + 写频，与其他核心组完全并行。
 struct CoreGroupWorker {
@@ -273,7 +282,7 @@ struct CoreGroupWorker {
     cfg: CpuLoadGovernorConfig,
     restore: PolicyRestore,
     core_ranges: crate::common::CoreGroupRanges,
-    load_rx: mpsc::Receiver<Vec<f32>>,
+    load_rx: LoadReceiver,
     stop: Arc<AtomicBool>,
     touch: Arc<AtomicTouchState>,
     /// 热保护性能上限（f32 bit pattern 存 AtomicU32，1.0 = 无压制）。
@@ -539,7 +548,7 @@ impl CoreGroupWorker {
         thermal_cap: Arc<AtomicU32>,
         thermal_free_above: Arc<AtomicU32>,
         stop: Arc<AtomicBool>,
-    ) -> Option<(PolicyRestore, (JoinHandle<()>, mpsc::SyncSender<Vec<f32>>))> {
+    ) -> Option<WorkerSpawn> {
         let pid = policy_id;
         let gov_path = format!(
             "/sys/devices/system/cpu/cpufreq/policy{}/scaling_governor",
@@ -669,7 +678,7 @@ impl CoreGroupWorker {
             cluster.current_freq = init_freq;
         }
 
-        let (load_tx, load_rx) = mpsc::sync_channel::<Vec<f32>>(1);
+        let (load_tx, load_rx) = mpsc::sync_channel::<Arc<Vec<f32>>>(1);
 
         info!(
             "{}",
@@ -732,19 +741,19 @@ impl CoreGroupWorker {
     }
 }
 
-// [worker_handle] 
+// [worker_handle]
 // Worker 句柄（线程 + 负载通道发送端）
 
 /// 每个 Worker 的控制句柄：持有负载通道发送端和线程 JoinHandle。
 struct WorkerHandle {
     policy_id: i32,
-    load_tx: mpsc::SyncSender<Vec<f32>>,
+    load_tx: LoadSender,
     handle: Option<JoinHandle<()>>,
 }
 
 impl WorkerHandle {
     /// 发送负载数据到 Worker（非阻塞，满则丢弃本 tick）
-    fn send_load(&self, core_utils: Vec<f32>) {
+    fn send_load(&self, core_utils: Arc<Vec<f32>>) {
         let _ = self.load_tx.try_send(core_utils);
     }
 
@@ -756,7 +765,7 @@ impl WorkerHandle {
     }
 }
 
-// [governor] 
+// [governor]
 // CpuLoadGovernor — 主控制器（Worker 线程管理器）
 
 pub struct CpuLoadGovernor {
@@ -931,12 +940,17 @@ impl CpuLoadGovernor {
 
     /// 负载事件入口：将 core_utils 广播给所有 Worker（非阻塞，通道满则丢弃本 tick）。
     /// Worker 线程内自主完成决策 + 写频。
+    ///
+    /// 本 tick 只做**一次** Vec 分配，各 Worker 共享同一个 Arc——此前逐 Worker
+    /// `to_vec()` 是每 tick × 每核心组各分配一次（40ms 特调下 25 tick/s × N 簇）。
+    /// Worker 侧只读该切片（决策输入 + devimp 摘要），不持有跨 tick 引用。
     pub fn on_load_update(&mut self, core_utils: &[f32]) {
         if !self.active {
             return;
         }
+        let shared = Arc::new(core_utils.to_vec());
         for w in &self.workers {
-            w.send_load(core_utils.to_vec());
+            w.send_load(Arc::clone(&shared));
         }
     }
 
@@ -955,7 +969,7 @@ impl CpuLoadGovernor {
         // 小核 Worker 无地板、写频去重无副作用）。try_send 满时丢弃：通道里
         // 排队的真实负载数据同样会唤醒 Worker 并应用触摸升频，不丢最终结果。
         for w in &self.workers {
-            w.send_load(Vec::new());
+            w.send_load(Arc::new(Vec::new()));
         }
         debug!(
             "{}",
