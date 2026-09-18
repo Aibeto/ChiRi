@@ -72,7 +72,7 @@ fn family(mode: &str) -> &'static str {
 }
 
 /// 特调模式集合：编译期嵌入的 `special_tuned.yaml` 里 modes 的并集（首次调用构建一次）。
-/// 正则条目无法按包名精确匹配，但模式名本身照收——模式展示只需要名字。
+/// 精确与正则条目同样贡献模式名——这里只取 modes，不涉及包名匹配。
 fn is_special(mode: &str) -> bool {
     static SPECIALS: OnceLock<std::collections::HashSet<String>> = OnceLock::new();
     let set = SPECIALS.get_or_init(|| {

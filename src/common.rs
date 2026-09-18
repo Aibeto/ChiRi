@@ -325,7 +325,16 @@ fn parse_special_tuned(text: &str) -> Vec<SpecialTunedEntry> {
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        let mut parts = line.splitn(3, ':');
+        // "re:" 前缀本身含冒号：先摘掉前缀，再对剩余部分切 `模式列表:回退模式`。
+        // 2026-09-18 修：此前直接对整行 splitn(3, ':')，前缀被当成匹配器、正则体被当成
+        // 模式名——条目的包名成了字面量 "re"（永远不命中，B 站/方舟的台服、Mod 变体实际
+        // 从未被接管），模式列表里还混进 `(?i)arknights` 这类假模式名，触发
+        // 「白名单模式没有对应参数组」告警。正则体按 yaml 约定不含冒号。
+        let (is_regex, body) = match line.strip_prefix("re:") {
+            Some(rest) => (true, rest),
+            None => (false, line),
+        };
+        let mut parts = body.splitn(3, ':');
         let (Some(pkg), Some(modes), Some(fallback)) = (parts.next(), parts.next(), parts.next())
         else {
             log::warn!("special-tuned: malformed entry skipped: {}", line);
@@ -344,15 +353,16 @@ fn parse_special_tuned(text: &str) -> Vec<SpecialTunedEntry> {
             );
             continue;
         }
-        let (package, regex) = match pkg.strip_prefix("re:") {
-            Some(pat) => match regex::Regex::new(pat) {
-                Ok(re) => (pkg.to_string(), Some(re)),
+        let (package, regex) = if is_regex {
+            match regex::Regex::new(pkg) {
+                Ok(re) => (format!("re:{pkg}"), Some(re)),
                 Err(e) => {
-                    log::warn!("special-tuned: invalid regex '{}' skipped: {}", pat, e);
+                    log::warn!("special-tuned: invalid regex '{}' skipped: {}", pkg, e);
                     continue;
                 }
-            },
-            None => (pkg.to_string(), None),
+            }
+        } else {
+            (pkg.to_string(), None)
         };
         out.push(SpecialTunedEntry {
             package,
