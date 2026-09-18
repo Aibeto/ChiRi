@@ -13,6 +13,7 @@ import { pollExport, startExport } from '@/contract/export'
 import { readLab, writeLabMode } from '@/contract/lab'
 import { readMeta, writeMetaFields, type MetaSnapshot, type WritableField } from '@/contract/meta'
 import {
+  clearArchives,
   deviceKind,
   listDevimp,
   listLogd,
@@ -538,9 +539,17 @@ class AppStore {
   get currentDouble(): boolean {
     return this.metaSnapshot?.values?.current_double === true
   }
-  /** 单位校准除数：缺省/非法一律按 1000（与 daemon 侧同口径） */
-  get unitDivisor(): number {
-    const v = this.metaSnapshot?.values?.unit_divisor
+  /** 电压校准除数：缺省/非法一律按 1000；旧键 unit_divisor 作为兜底（daemon 侧同口径） */
+  get voltageDivisor(): number {
+    const values = this.metaSnapshot?.values
+    for (const v of [values?.voltage_divisor, values?.unit_divisor]) {
+      if (typeof v === 'number' && Number.isFinite(v) && v > 0) return v
+    }
+    return 1000
+  }
+  /** 电流校准除数：缺省/非法一律按 1000 */
+  get currentDivisor(): number {
+    const v = this.metaSnapshot?.values?.current_divisor
     return typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : 1000
   }
   /** 电池读数页写入中（直写 meta.yaml） */
@@ -629,7 +638,8 @@ class AppStore {
       oplus_dual_cell: boolean
       voltage_double: boolean
       current_double: boolean
-      unit_divisor: number
+      voltage_divisor: number
+      current_divisor: number
       power_max_w: number
     }>
   ): Promise<void> {
@@ -747,6 +757,28 @@ class AppStore {
   }
 
   // [logs]
+  /** 历史归档删除中（防重复点击） */
+  archivePending = $state(false)
+  /** 删除归档的真实失败（环境不可用 / rm 报错） */
+  archiveError = $state('')
+
+  /** 删除历史归档（logd/ 与 devimp/）：成功后刷新日志页的列表 */
+  async deleteArchives(): Promise<void> {
+    if (this.archivePending) return
+    this.archivePending = true
+    this.archiveError = ''
+    try {
+      const r = await clearArchives()
+      if (r.kind !== 'ok') {
+        this.archiveError = r.kind === 'failed' ? r.error : t('state.unsupportedEnv')
+        return
+      }
+      await this.loadLogs()
+    } finally {
+      this.archivePending = false
+    }
+  }
+
   async loadLogs(source: 'daemon' | 'status' = 'daemon'): Promise<void> {
     if (this.logLoading) return // 自刷新轮询防堆积
     this.logLoading = true

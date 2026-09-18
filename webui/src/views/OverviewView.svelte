@@ -80,6 +80,13 @@
     await app.stopDaemon();
     confirmOpen = false;
   }
+
+  /** 删除历史归档的二次确认 */
+  let deleteOpen = $state(false);
+  async function confirmDelete() {
+    await app.deleteArchives();
+    deleteOpen = false;
+  }
 </script>
 
 <div class="u-stack">
@@ -121,6 +128,8 @@
           >
             <span class="ak-progress__fill"></span>
           </div>
+          <!-- 百分比同时出数字：条看起来空时能判断是「读数为 0/缺失」还是「条没画出来」 -->
+          <span class="ak-progress__value u-mono">{Math.round(powerPercent)}%</span>
         </div>
       {/if}
     </div>
@@ -265,6 +274,19 @@
         </div>
       </div>
     {/if}
+
+    <!-- 历史归档清理：导出之外的另一半，删 logd/ 与 devimp/（二次确认） -->
+    <button
+      type="button"
+      class="ak-button btn btn--danger btn--block u-mt-3"
+      disabled={app.archivePending}
+      onclick={() => (deleteOpen = true)}
+    >
+      {app.archivePending ? t("state.loading") : t("overview.delete.action")}
+    </button>
+    {#if app.archiveError}
+      <p class="u-note u-danger u-mt-2">{app.archiveError}</p>
+    {/if}
   </Panel>
 
   <Panel
@@ -302,6 +324,18 @@
   cancelText={t("action.cancel")}
   onconfirm={confirmStop}
   ondismiss={() => (confirmOpen = false)}
+/>
+
+<ConfirmSheet
+  open={deleteOpen}
+  danger
+  busy={app.archivePending}
+  title={t("overview.delete.confirm.title")}
+  message={t("overview.delete.confirm.message")}
+  confirmText={t("overview.delete.action")}
+  cancelText={t("action.cancel")}
+  onconfirm={confirmDelete}
+  ondismiss={() => (deleteOpen = false)}
 />
 
 <style>

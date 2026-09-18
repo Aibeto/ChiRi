@@ -19,7 +19,8 @@ oplus_dual_cell: false
 # 倍电压 / 倍电流：仅标准节点路径；OPlus 开关打开时这两项被强制关闭
 voltage_double: false
 current_double: false
-# 单位校准：读数折算到毫单位后除以该值得到 V/A/W（默认 1000，须 > 0）
-unit_divisor: 1000
+# 单位校准：读数折算到毫单位后，分别除以这两个值得到 V / A（默认 1000，须 > 0）
+voltage_divisor: 1000
+current_divisor: 1000
 # 耗电读数满量程（W，WebUI 状态页仪表盘用；可选，默认 12）：只影响显示，不参与调度。
 power_max_w: 12

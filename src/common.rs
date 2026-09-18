@@ -724,6 +724,9 @@ struct MetaYamlFile {
     oplus_dual_cell: Option<bool>,
     voltage_double: Option<bool>,
     current_double: Option<bool>,
+    voltage_divisor: Option<f32>,
+    current_divisor: Option<f32>,
+    /// 旧键（曾把电压/电流校准合成一个）：仍接收，等价于只设电压校准
     unit_divisor: Option<f32>,
     /// 「不改」开关（模板不写）：详见 ExternalMetaOverrides
     nofix: Option<bool>,
@@ -768,10 +771,12 @@ pub struct ExternalMetaOverrides {
     pub voltage_double: Option<bool>,
     /// 倍电流（`current_double`，默认 false）：标准节点路径电流 ×2，互斥关系同上。
     pub current_double: Option<bool>,
-    /// 单位校准除数（`unit_divisor`，默认 1000，须 > 0）：读数先折算到毫单位
-    /// （标准节点 µV/µA ÷1000 属于 Android ABI；私有节点本身就是 mV/mA），
-    /// 再除以该值得到 V/A/W。用来替代原先代码里的量级启发式与物理范围门。
-    pub unit_divisor: Option<f32>,
+    /// 电压校准除数（`voltage_divisor`，默认 1000，须 > 0）：读数折算到毫单位后
+    /// 除以它得到 V。用来替代原先代码里的量级启发式与物理范围门。
+    pub voltage_divisor: Option<f32>,
+    /// 电流校准除数（`current_divisor`，默认 1000，须 > 0）：折算到毫单位后除以它得到 A。
+    /// 与电压分开：节点的两个量未必同时错单位，分开才能单独校正（W = V×A 保持自洽）。
+    pub current_divisor: Option<f32>,
     /// 「不改」开关（meta.yaml 字段 `nofix`，默认 false，且默认不写进配置）：
     /// true = 启动时跳过所有「二进制内容对外部文件的覆盖类操作」——webui 资产还原
     /// （webui_asset::restore_webroot）与 meta.yaml 快照自愈（sync_meta_snapshot）。
@@ -869,14 +874,20 @@ fn parse_disk_meta(text: &str) -> Option<ExternalMetaOverrides> {
         }
     });
     // 单位校准：非有限/非正视为写错，回退内嵌默认（与 power_max_w 同口径，
-    // 单个数笔误不判整个文件非法；WebUI 写入侧另有 > 0 校验）
-    let unit_divisor = f.unit_divisor.map(|v| {
+    // 单个数笔误不判整个文件非法；WebUI 写入侧另有 > 0 校验）。
+    // 旧键 `unit_divisor`（曾把电压/电流合一个）仍接收，作为电压校准的兜底值。
+    let sane = |v: f32| {
         if v.is_finite() && v > 0.0 {
             v
         } else {
             crate::utils::DEFAULT_UNIT_DIVISOR
         }
-    });
+    };
+    let voltage_divisor = f
+        .voltage_divisor
+        .or(f.unit_divisor)
+        .map(sane);
+    let current_divisor = f.current_divisor.map(sane);
     Some(ExternalMetaOverrides {
         loglevel: match f.loglevel.as_deref() {
             Some(v) => Some(sanitize_loglevel(v)?),
@@ -896,7 +907,8 @@ fn parse_disk_meta(text: &str) -> Option<ExternalMetaOverrides> {
         oplus_dual_cell: f.oplus_dual_cell,
         voltage_double: f.voltage_double,
         current_double: f.current_double,
-        unit_divisor,
+        voltage_divisor,
+        current_divisor,
         nofix: f.nofix,
         power_max_w,
     })

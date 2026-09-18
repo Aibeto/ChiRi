@@ -271,6 +271,13 @@
 </div>
 
 <style>
+  /* 单按钮的入口行：靠右对齐。原来借 .u-between 但只有一个子元素，space-between
+     等于左对齐；这里显式 flex-end（漏了这条规则时按钮会贴在左边） */
+  .entry__row {
+    display: flex;
+    justify-content: flex-end;
+  }
+
   /* 入口状态文字默认走 .u-note 的次要色，启用时换危险色 */
   .entry__state[data-on='yes'] {
     color: var(--ak-signal-danger);

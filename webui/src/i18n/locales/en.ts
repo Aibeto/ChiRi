@@ -68,6 +68,10 @@ export default {
   'overview.stop.recover.reboot': 'Module action.sh not found; only a reboot can restore it',
   'overview.export.title': 'Export history logs (experimental)',
   'overview.export.desc': 'Pack the logd history archives to /sdcard/Download',
+  'overview.delete.action': 'Delete history logs',
+  'overview.delete.confirm.title': 'Delete history logs?',
+  'overview.delete.confirm.message':
+    'Clears the logd archives and the devimp diagnostic files; the current session logs stay',
   'overview.export.notice.session':
     'Archives from previous runs only; the current session is not included',
   'overview.export.notice.busy':
@@ -119,8 +123,10 @@ export default {
   'battery.currentDouble': 'Double current',
   'battery.currentDouble.hint': 'Doubles the current read from the standard node; for parallel dual-cell packs',
   'battery.double.mutex': 'OPlus private node is on, so doubling is switched off',
-  'battery.unitDivisor': 'Unit calibration',
-  'battery.unitDivisor.hint': 'Readings are converted to milli-units and divided by this value to get V/A/W, default 1000',
+  'battery.voltageDivisor': 'Voltage calibration',
+  'battery.voltageDivisor.hint': 'Voltage in milli-units is divided by this value to get V, default 1000',
+  'battery.currentDivisor': 'Current calibration',
+  'battery.currentDivisor.hint': 'Current in milli-units is divided by this value to get A, default 1000',
   'battery.power.title': 'Power display',
   'battery.powerMax': 'Full scale',
   'battery.powerMax.hint': 'Full scale of the power gauge on the status page (W), default 12',

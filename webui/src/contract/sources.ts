@@ -2,11 +2,12 @@
 // 各接触点的原始读取入口（不解析，解析见 src/data/*）。
 // 缺失语义：白名单类文件只有 ChiRi 机型会产生（→ chiri-only）；日志/快照类
 // 是「尚未产生」（→ not-created）；真正的失败一律 failed，绝不吞成空值。
-import { REL, absOf } from './paths'
+import { REL, absOf, shQuote } from './paths'
 import { listDir, readTail, readText } from './read'
 import { readActiveConfigRel } from './meta'
 import type { ReadResult } from './errors'
-import { ok } from './errors'
+import { absent, failed, ok, shellError } from './errors'
+import { isLive, run } from '@/kernel/shell'
 
 // [device]
 /** 设备形态：读不到生效配置时是 unknown，而不是想当然地当成通用机型 */
@@ -74,6 +75,19 @@ export function listDevimp(): Promise<ReadResult<string[]>> {
 /** logd 归档包列表（只有发生过归档才存在） */
 export function listLogd(): Promise<ReadResult<string[]>> {
   return listDir(absOf('logdDir'), 'not-created')
+}
+
+/**
+ * 删除历史归档：整目录删掉 logd/（历次重启的归档包）与 devimp/（诊断文件）。
+ * 删目录比逐个删文件干净：devimp 由 daemon 启动时重建，logd 下次归档自动出现；
+ * 当前会话的 logs/（daemon.log / status.csv）不在此列，不会被碰到。
+ */
+export async function clearArchives(): Promise<ReadResult<true>> {
+  if (!isLive()) return absent<true>('unsupported-env')
+  const { errno, stderr } = await run(
+    `rm -rf ${shQuote(absOf('logdDir'))} ${shQuote(absOf('devimpDir'))} && echo done`
+  )
+  return errno === 0 ? ok(true) : failed<true>(shellError(errno, stderr))
 }
 
 export { REL }

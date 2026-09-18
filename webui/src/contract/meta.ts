@@ -28,6 +28,9 @@ export const META_FIELDS = [
   'oplus_dual_cell',
   'voltage_double',
   'current_double',
+  'voltage_divisor',
+  'current_divisor',
+  /** 旧键（曾把电压/电流校准合成一个）：daemon 仍接收，等价于只设电压校准 */
   'unit_divisor',
   'nofix',
   'power_max_w'
@@ -48,7 +51,8 @@ export const WRITABLE_FIELDS = [
   'oplus_dual_cell',
   'voltage_double',
   'current_double',
-  'unit_divisor',
+  'voltage_divisor',
+  'current_divisor',
   'power_max_w'
 ] as const
 export type WritableField = (typeof WRITABLE_FIELDS)[number]
@@ -189,11 +193,10 @@ export function validateMeta(values: Record<string, unknown>): string[] {
   ) {
     problems.push('power_max_w 必须是数字')
   }
-  if (
-    'unit_divisor' in values &&
-    (typeof values.unit_divisor !== 'number' || !Number.isFinite(values.unit_divisor))
-  ) {
-    problems.push('unit_divisor 必须是数字')
+  for (const f of ['unit_divisor', 'voltage_divisor', 'current_divisor'] as const) {
+    if (f in values && (typeof values[f] !== 'number' || !Number.isFinite(values[f]))) {
+      problems.push(`${f} 必须是数字`)
+    }
   }
   return problems
 }
@@ -216,11 +219,12 @@ export function validateFieldValue(
         ? null
         : '满量程必须是 0~200 之间的数字（W）'
     }
-    case 'unit_divisor': {
+    case 'voltage_divisor':
+    case 'current_divisor': {
       const n = Number(value)
       return Number.isFinite(n) && n > 0 && n <= 1e9
         ? null
-        : '单位校准必须是大于 0 的数字（默认 1000）'
+        : '校准值必须是大于 0 的数字（默认 1000）'
     }
     case 'dev_record':
     case 'fas_enabled':

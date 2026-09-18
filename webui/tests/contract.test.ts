@@ -121,20 +121,28 @@ describe('meta.yaml 校验（复刻守护进程口径）', () => {
     expect(validateFieldValue('language', 'fr')).not.toBeNull()
     expect(validateFieldValue('dev_record', true)).toBeNull()
     expect(validateFieldValue('dev_record', 'yes' as unknown as string)).not.toBeNull()
-    expect(validateFieldValue('unit_divisor', 1000)).toBeNull()
-    expect(validateFieldValue('unit_divisor', 0)).not.toBeNull()
-    expect(validateFieldValue('unit_divisor', Number.NaN)).not.toBeNull()
+    expect(validateFieldValue('voltage_divisor', 1000)).toBeNull()
+    expect(validateFieldValue('voltage_divisor', 0)).not.toBeNull()
+    expect(validateFieldValue('current_divisor', Number.NaN)).not.toBeNull()
     expect(validateFieldValue('oplus_chg', true)).toBeNull()
     expect(validateFieldValue('oplus_chg', 1 as unknown as boolean)).not.toBeNull()
   })
 
   it('电池读数字段：布尔类型与单位校准的数字类型', () => {
     expect(
-      validateMeta({ ...valid, oplus_chg: true, oplus_dual_cell: false, unit_divisor: 1000 })
+      validateMeta({
+        ...valid,
+        oplus_chg: true,
+        oplus_dual_cell: false,
+        voltage_divisor: 1000,
+        current_divisor: 1000
+      })
     ).toEqual([])
     // 开关写成字符串、校准值写成字符串 → 各报一条（daemon 侧同样判非法）
     expect(validateMeta({ ...valid, current_double: 'true' }).length).toBe(1)
-    expect(validateMeta({ ...valid, unit_divisor: '1000' }).length).toBe(1)
+    expect(validateMeta({ ...valid, current_divisor: '1000' }).length).toBe(1)
+    // 旧键 unit_divisor 仍被接收（daemon 侧等价于电压校准）
+    expect(validateMeta({ ...valid, unit_divisor: 1000 })).toEqual([])
   })
 
   it('日志等级枚举与守护进程一致', () => {

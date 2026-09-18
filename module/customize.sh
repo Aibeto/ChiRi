@@ -1,5 +1,5 @@
 #!/system/bin/sh
-# customize.sh: [busybox] [i18n] [welcome] [hot-update-check] [volume-key] [config-keep] [mode-select] [hot-update-flow] [full-install] [oplus-detect]
+# customize.sh: [busybox] [i18n] [welcome] [hot-update-check] [volume-key] [oplus-detect] [config-keep] [mode-select] [hot-update-flow] [full-install]
 #
 # ChiRi Scheduler Installation Script
 
@@ -53,6 +53,8 @@ MSG_OPLUS_ON="OPlus private node detected; enabled private-node readings in the 
 MSG_OPLUS_DUAL_ON="Second cell detected (index 11); enabled dual-cell voltage"
 MSG_OPLUS_NO_META="Could not locate this device's meta.yaml, so the OPlus switches were not auto-enabled (turn them on in the WebUI battery page)"
 MSG_OPLUS_NO_SED="sed is unavailable, so the OPlus switches were not auto-enabled (turn them on in the WebUI battery page)"
+MSG_OPLUS_CHECK="Checking for the OPlus private node (bcc_parms)..."
+MSG_OPLUS_SKIP="No OPlus private node on this device; leaving the switches as they are"
 
 if echo "$CURRENT_LOCALE" | $BUSYBOX grep -qi "zh"; then
   LANG_CODE="zh"
@@ -85,6 +87,8 @@ if echo "$CURRENT_LOCALE" | $BUSYBOX grep -qi "zh"; then
   MSG_OPLUS_DUAL_ON="检测到第二个电芯，已启用双电芯电压"
   MSG_OPLUS_NO_META="未定位到当前机型的 meta.yaml，OPlus 开关未自动启用（可在 WebUI 电池读数页开启）"
   MSG_OPLUS_NO_SED="检测为非 oplus 机型，继续安装"
+  MSG_OPLUS_CHECK="正在检查 OPlus 私有节点（bcc_parms）..."
+  MSG_OPLUS_SKIP="本机没有 OPlus 私有节点，开关保持原样"
 fi
 
 # [welcome] 
@@ -195,6 +199,67 @@ detect_volume_key() {
     return 0
 }
 
+# [oplus-detect]
+# OPlus 私有节点存在就为新配置开好开关：`bcc_parms` 存在 → 顶层 `oplus_chg: false`
+# 改 true；字段数 ≥ 12（0 基下标 11 存在）→ `oplus_dual_cell: false` 改 true（双电芯）。
+# 只动**当前机型**那一份 meta.yaml：
+#   1) 优先按模块里的 active_config.chr（daemon 写的生效配置相对路径，如 8550/meta.yaml）；
+#   2) 退一步用 ro.soc.model 的数字部分（SM8550 → 8550）拼机型目录；
+#   3) 都拿不到就打印说明跳过，不去猜别的机型文件。
+# 只在用户选择「不保留配置」时调用（见 [config-keep]）——保留时那份 meta.yaml 是用户
+# 自己的文件，安装器不该碰；开关可以随时在 WebUI 电池读数页改。
+# 定义必须早于调用点（普通安装与热更新两条路都会用到）。
+OPLUS_BCC="/sys/class/oplus_chg/battery/bcc_parms"
+
+apply_oplus_defaults() {
+    # 无论走哪条分支都打印：只在成功时才打会让人分不清「没检测」和「检测了但没命中」
+    ui_print "$MSG_OPLUS_CHECK"
+    if [ ! -f "$OPLUS_BCC" ]; then
+        ui_print "$MSG_OPLUS_SKIP"
+        return 0
+    fi
+
+    local rel=""
+    local active="/data/adb/modules/chiri/active_config.chr"
+    if [ -f "$active" ]; then
+        rel=$(cat "$active" 2>/dev/null | tr -d ' \t\r\n')
+    fi
+    if [ -z "$rel" ]; then
+        local soc=$(getprop ro.soc.model 2>/dev/null | tr -cd '0-9')
+        if [ -n "$soc" ] && [ -f "$MODPATH/config/$soc/meta.yaml" ]; then
+            rel="$soc/meta.yaml"
+        fi
+    fi
+    if [ -z "$rel" ] || [ ! -f "$MODPATH/config/$rel" ]; then
+        ui_print "$MSG_OPLUS_NO_META"
+        return 0
+    fi
+
+    local meta="$MODPATH/config/$rel"
+    local sed_cmd=""
+    if [ -n "$BUSYBOX" ] && [ -x "$BUSYBOX" ]; then
+        sed_cmd="$BUSYBOX sed"
+    elif command -v sed >/dev/null 2>&1; then
+        sed_cmd="sed"
+    fi
+    if [ -z "$sed_cmd" ]; then
+        ui_print "$MSG_OPLUS_NO_SED"
+        return 0
+    fi
+
+    if grep -q "^oplus_chg: false" "$meta"; then
+        $sed_cmd -i "s/^oplus_chg: false/oplus_chg: true/" "$meta"
+        ui_print "$MSG_OPLUS_ON"
+    fi
+    # 第 12 个字段非空 = 这台机器报出了第二个电芯（索引 11）
+    if [ -n "$(cut -d ',' -f 12 "$OPLUS_BCC" 2>/dev/null)" ]; then
+        if grep -q "^oplus_dual_cell: false" "$meta"; then
+            $sed_cmd -i "s/^oplus_dual_cell: false/oplus_dual_cell: true/" "$meta"
+            ui_print "$MSG_OPLUS_DUAL_ON"
+        fi
+    fi
+}
+
 # [config-keep]
 # 「是否保留现有配置」：音量上键 = 保留（默认，超时也走这支），音量下键 = 不保留。
 #   保留   → 删掉暂存目录的 config/：安装器随后不管走哪条路（完整安装的暂存落地、
@@ -224,6 +289,8 @@ ask_keep_config() {
     else
         ui_print "$MSG_KEEP_CONFIG_NO"
         CONFIG_KEPT=false
+        # 覆盖安装：按机型把 OPlus 私有节点开关开好（两条安装路径都经过这里）
+        apply_oplus_defaults
     fi
     ui_print " "
 }
@@ -428,62 +495,5 @@ fi
 # 完整安装流程（原逻辑）：模块文件由 Magisk 从暂存目录复制过来
 # （唯一例外是下面的 [oplus-detect]：覆盖安装时会按机型修 staged 的 meta.yaml）
 
-# [oplus-detect]
-# OPlus 私有节点存在就为新配置开好开关：`bcc_parms` 存在 → 顶层 `oplus_chg: false`
-# 改 true；字段数 ≥ 12（0 基下标 11 存在）→ `oplus_dual_cell: false` 改 true（双电芯）。
-# 只动**当前机型**那一份 meta.yaml：
-#   1) 优先按模块里的 active_config.chr（daemon 写的生效配置相对路径，如 8550/meta.yaml）；
-#   2) 退一步用 ro.soc.model 的数字部分（SM8550 → 8550）拼机型目录；
-#   3) 都拿不到就打印说明跳过，不去猜别的机型文件。
-# 只在用户选择「不保留配置」时执行（见文件末尾调用）——保留时那份 meta.yaml 是用户
-# 自己的文件，安装器不该碰；开关可以随时在 WebUI 电池读数页改。
-OPLUS_BCC="/sys/class/oplus_chg/battery/bcc_parms"
-
-apply_oplus_defaults() {
-    [ -f "$OPLUS_BCC" ] || return 0
-
-    local rel=""
-    local active="/data/adb/modules/chiri/active_config.chr"
-    if [ -f "$active" ]; then
-        rel=$(cat "$active" 2>/dev/null | tr -d ' \t\r\n')
-    fi
-    if [ -z "$rel" ]; then
-        local soc=$(getprop ro.soc.model 2>/dev/null | tr -cd '0-9')
-        if [ -n "$soc" ] && [ -f "$MODPATH/config/$soc/meta.yaml" ]; then
-            rel="$soc/meta.yaml"
-        fi
-    fi
-    if [ -z "$rel" ] || [ ! -f "$MODPATH/config/$rel" ]; then
-        ui_print "$MSG_OPLUS_NO_META"
-        return 0
-    fi
-
-    local meta="$MODPATH/config/$rel"
-    local sed_cmd=""
-    if [ -n "$BUSYBOX" ] && [ -x "$BUSYBOX" ]; then
-        sed_cmd="$BUSYBOX sed"
-    elif command -v sed >/dev/null 2>&1; then
-        sed_cmd="sed"
-    fi
-    if [ -z "$sed_cmd" ]; then
-        ui_print "$MSG_OPLUS_NO_SED"
-        return 0
-    fi
-
-    if grep -q "^oplus_chg: false" "$meta"; then
-        $sed_cmd -i "s/^oplus_chg: false/oplus_chg: true/" "$meta"
-        ui_print "$MSG_OPLUS_ON"
-    fi
-    # 第 12 个字段非空 = 这台机器报出了第二个电芯（索引 11）
-    if [ -n "$(cut -d ',' -f 12 "$OPLUS_BCC" 2>/dev/null)" ]; then
-        if grep -q "^oplus_dual_cell: false" "$meta"; then
-            $sed_cmd -i "s/^oplus_dual_cell: false/oplus_dual_cell: true/" "$meta"
-            ui_print "$MSG_OPLUS_DUAL_ON"
-        fi
-    fi
-}
-
-# 覆盖安装（用户没选保留）时才自动开 OPlus 私有节点
-if [ "$CONFIG_KEPT" != "true" ]; then
-    apply_oplus_defaults
-fi
+# 完整安装收尾：OPlus 私有节点的检测与开关修正已在 [config-keep] 里完成
+# （放在那儿是为了热更新路径也走得到——热更新以 abort 结束时不会回到文件末尾）

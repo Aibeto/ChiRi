@@ -67,38 +67,54 @@ const BCC_PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(6
 /// - `VOLTAGE_DOUBLE` / `CURRENT_DOUBLE`：标准节点路径的倍电压/倍电流（双电芯机型上
 ///   标准节点可能只报单节/单芯值）。**与私有节点互斥**：私有开关打开时 UI 强制关闭
 ///   这两个开关，这里再判一次，手改 meta 也挡得住；
-/// - `UNIT_DIVISOR`：单位校准。读数先折算到毫单位（标准节点 µV/µA ÷1000 是 Android
-///   ABI；私有节点本身就是 mV/mA），再除以该值得到 V/A/W。默认 1000。
+/// - `VOLT_DIVISOR` / `CURR_DIVISOR`：单位校准（**电压、电流各一个**）。读数先折算到
+///   毫单位（标准节点 µV/µA ÷1000 是 Android ABI；私有节点本身就是 mV/mA），电压再除以
+///   电压校准值得到 V、电流除以电流校准值得到 A，W = V×A。默认都是 1000。
+///   分开的理由：节点的电压与电流单位未必同时错（常见只错一个），一个共用值会让
+///   功率按平方变化，改了也说不清是谁的锅。
 static OPLUS_CHG: AtomicBool = AtomicBool::new(false);
 static OPLUS_DUAL_CELL: AtomicBool = AtomicBool::new(false);
 static VOLTAGE_DOUBLE: AtomicBool = AtomicBool::new(false);
 static CURRENT_DOUBLE: AtomicBool = AtomicBool::new(false);
-static UNIT_DIVISOR_BITS: AtomicU32 =
+static VOLT_DIVISOR_BITS: AtomicU32 =
+    AtomicU32::new(crate::utils::DEFAULT_UNIT_DIVISOR.to_bits());
+static CURR_DIVISOR_BITS: AtomicU32 =
     AtomicU32::new(crate::utils::DEFAULT_UNIT_DIVISOR.to_bits());
 
-/// 写入电池读数选项。单位校准非有限/非正时退回默认值——单项笔误不牵连其它选项。
+/// 写入电池读数选项。校准值非有限/非正时退回默认值——单项笔误不牵连其它选项。
 pub fn set_battery_options(
     oplus_chg: bool,
     oplus_dual_cell: bool,
     voltage_double: bool,
     current_double: bool,
-    unit_divisor: f32,
+    voltage_divisor: f32,
+    current_divisor: f32,
 ) {
     OPLUS_CHG.store(oplus_chg, Ordering::Relaxed);
     OPLUS_DUAL_CELL.store(oplus_dual_cell, Ordering::Relaxed);
     VOLTAGE_DOUBLE.store(voltage_double, Ordering::Relaxed);
     CURRENT_DOUBLE.store(current_double, Ordering::Relaxed);
-    let d = if unit_divisor.is_finite() && unit_divisor > 0.0 {
-        unit_divisor
-    } else {
-        crate::utils::DEFAULT_UNIT_DIVISOR
-    };
-    UNIT_DIVISOR_BITS.store(d.to_bits(), Ordering::Relaxed);
+    VOLT_DIVISOR_BITS.store(sane_divisor(voltage_divisor).to_bits(), Ordering::Relaxed);
+    CURR_DIVISOR_BITS.store(sane_divisor(current_divisor).to_bits(), Ordering::Relaxed);
 }
 
-/// 单位校准除数（1 个 V/A/W 对应多少毫单位），恒 > 0
-fn unit_divisor() -> f32 {
-    f32::from_bits(UNIT_DIVISOR_BITS.load(Ordering::Relaxed))
+/// 校准值兜底：非有限/非正一律按默认值处理
+fn sane_divisor(v: f32) -> f32 {
+    if v.is_finite() && v > 0.0 {
+        v
+    } else {
+        crate::utils::DEFAULT_UNIT_DIVISOR
+    }
+}
+
+/// 电压校准除数（1 个 V 对应多少毫单位），恒 > 0
+fn voltage_divisor() -> f32 {
+    f32::from_bits(VOLT_DIVISOR_BITS.load(Ordering::Relaxed))
+}
+
+/// 电流校准除数（1 个 A 对应多少毫单位），恒 > 0
+fn current_divisor() -> f32 {
+    f32::from_bits(CURR_DIVISOR_BITS.load(Ordering::Relaxed))
 }
 
 /// 取进程级遥测快照
@@ -123,17 +139,17 @@ impl Telemetry {
         if v.is_nan() { None } else { Some(v) }
     }
     /// 电池电流（mA，保留方向符号）；None = 不可用。
-    /// 存储口径 µA → ÷1000 得毫单位 → ÷ 单位校准得 A → ×1000 回 mA，即 µA ÷ 单位校准
+    /// 存储口径 µA → ÷1000 得毫单位 → ÷ 电流校准得 A → ×1000 回 mA，即 µA ÷ 电流校准
     /// （默认校准 1000 时与原口径一致：µA/1000）
     pub fn batt_current_ma(&self) -> Option<f32> {
         let v = self.batt_current_ua.load(Ordering::Relaxed);
-        (v != UNAVAIL).then(|| v as f32 / unit_divisor())
+        (v != UNAVAIL).then(|| v as f32 / current_divisor())
     }
     /// 电池电压（V）；None = 不可用。
-    /// 存储口径 µV → ÷1000 得毫单位 → ÷ 单位校准得 V（默认校准 1000 时 = µV/1e6）
+    /// 存储口径 µV → ÷1000 得毫单位 → ÷ 电压校准得 V（默认校准 1000 时 = µV/1e6）
     pub fn batt_voltage_v(&self) -> Option<f32> {
         let v = self.batt_voltage_uv.load(Ordering::Relaxed);
-        (v != UNAVAIL).then(|| v as f32 / 1000.0 / unit_divisor())
+        (v != UNAVAIL).then(|| v as f32 / 1000.0 / voltage_divisor())
     }
     /// 电池瞬时功率（W，电流取绝对值）；电流或电压缺失返回 None
     pub fn batt_power_w(&self) -> Option<f32> {

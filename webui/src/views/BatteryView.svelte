@@ -97,14 +97,24 @@
       {#if oplus}
         <p class="u-note">{t('battery.double.mutex')}</p>
       {/if}
+      <!-- 校准分成两个：节点的电压与电流未必同时错单位，分开才能单独校正（W = V×A 自洽） -->
       <NumberField
-        label={t('battery.unitDivisor')}
-        hint={t('battery.unitDivisor.hint')}
-        value={app.unitDivisor}
+        label={t('battery.voltageDivisor')}
+        hint={t('battery.voltageDivisor.hint')}
+        value={app.voltageDivisor}
         min={0.001}
         max={1000000000}
         disabled={!canWrite}
-        onchange={next => app.setBatteryFields({ unit_divisor: next })}
+        onchange={next => app.setBatteryFields({ voltage_divisor: next })}
+      />
+      <NumberField
+        label={t('battery.currentDivisor')}
+        hint={t('battery.currentDivisor.hint')}
+        value={app.currentDivisor}
+        min={0.001}
+        max={1000000000}
+        disabled={!canWrite}
+        onchange={next => app.setBatteryFields({ current_divisor: next })}
       />
     </div>
   </Panel>

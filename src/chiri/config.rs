@@ -47,8 +47,11 @@ fn apply_meta_overrides(meta: &mut Meta, o: &crate::common::ExternalMetaOverride
     if let Some(v) = o.current_double {
         meta.current_double = v;
     }
-    if let Some(v) = o.unit_divisor {
-        meta.unit_divisor = v;
+    if let Some(v) = o.voltage_divisor {
+        meta.voltage_divisor = v;
+    }
+    if let Some(v) = o.current_divisor {
+        meta.current_divisor = v;
     }
     if let Some(v) = o.power_max_w {
         meta.power_max_w = v;
@@ -128,9 +131,13 @@ pub struct Meta {
     #[serde(default, alias = "CurrentDouble")]
     pub current_double: bool,
 
-    /// 单位校准除数（`unit_divisor`，默认 1000，须 > 0）：读数折算到毫单位后除以它得 V/A/W
-    #[serde(default = "crate::utils::default_unit_divisor", alias = "UnitDivisor")]
-    pub unit_divisor: f32,
+    /// 电压校准除数（`voltage_divisor`，默认 1000，须 > 0）：读数折算到毫单位后除以它得 V
+    #[serde(default = "crate::utils::default_unit_divisor", alias = "VoltageDivisor")]
+    pub voltage_divisor: f32,
+
+    /// 电流校准除数（`current_divisor`，默认 1000，须 > 0）：读数折算到毫单位后除以它得 A
+    #[serde(default = "crate::utils::default_unit_divisor", alias = "CurrentDivisor")]
+    pub current_divisor: f32,
 
     /// 「不改」开关（meta.yaml 可选字段 `nofix`，默认 false，默认不写进配置）：
     /// true = 启动时跳过「二进制内容对外部文件的覆盖类操作」（webui 资产还原与
@@ -888,7 +895,8 @@ impl Config {
             config.meta.oplus_dual_cell,
             !config.meta.oplus_chg && config.meta.voltage_double,
             !config.meta.oplus_chg && config.meta.current_double,
-            config.meta.unit_divisor,
+            config.meta.voltage_divisor,
+            config.meta.current_divisor,
         );
         Ok(config)
     }
