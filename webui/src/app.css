@@ -1,13 +1,29 @@
 /* app.css: [fonts] [brand-map] [base] [utilities] [signal-map] [ak-adapt] [buttons] [rows] [lists] */
 
 /* [fonts]
- * 内置衬线（Noto Serif SC Bold 子集，SIL OFL 1.1，许可见同目录 LICENSE-OFL.txt）：
- * Android 设备普遍没有 Noto Serif SC，不内置时 --ak-font-serif/command 会整体回退
- * 系统衬线、中文实际落到黑体、标题失去衬线感。子集只含 UI 文案字符（zh locale
- * + 数字/拉丁/标点，共 487 字），woff2 约 156KB。 */
+ * 内置等宽（JetBrains Mono 拉丁子集，SIL OFL 1.1，许可见同目录
+ * LICENSE-OFL-jetbrains-mono.txt）：遥测数值、日志、路径都走等宽栈，Android 自带的
+ * 等宽字体各家不一，内置后数字对齐与字形稳定。拉丁子集两档共约 43KB——只含拉丁/
+ * 数字/标点，中文仍由系统的 Noto Sans CJK 兜底（不必内置整份 CJK）。
+ * 衬线已按用户要求（2026-09-18「禁止使用衬线字体」）停用：原先内置的 Noto Serif SC
+ * Bold 子集已随字体文件一并移除，--ak-font-serif 保留 token、回落系统衬线，未来
+ * 需要时再按 [fonts] 先例重新内置。 */
+
+/* 内置等宽（JetBrains Mono 拉丁子集，SIL OFL 1.1，许可见同目录
+ * LICENSE-OFL-jetbrains-mono.txt）：遥测数值、日志、路径都走等宽栈，Android 自带的
+ * 等宽字体各家不一，内置后数字对齐与字形稳定。拉丁子集两档共约 43KB——只含拉丁/
+ * 数字/标点，中文仍由系统的 Noto Sans CJK 兜底（不必内置整份 CJK）。 */
 @font-face {
-  font-family: 'ChiRi Serif';
-  src: url('./assets/fonts/noto-serif-sc-bold-subset.woff2') format('woff2');
+  font-family: 'ChiRi Mono';
+  src: url('./assets/fonts/mono-regular.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'ChiRi Mono';
+  src: url('./assets/fonts/mono-bold.woff2') format('woff2');
   font-weight: 700;
   font-style: normal;
   font-display: swap;
@@ -35,15 +51,14 @@
   --ak-signal-danger: #e5484d;
   --ak-signal-disabled: #6b7280;
 
-  /* 设备端字体栈：中文正文由系统提供（Android 为 Noto Sans CJK）；
-     标题/命令字走内置衬线（见 [fonts]），映射进 ak-ui 语义 token */
+  /* 设备端字体栈：中文正文由系统提供（Android 为 Noto Sans CJK）；等宽走内置
+   * ChiRi Mono（见 [fonts]），映射进 ak-ui 语义 token */
   --ak-font-sans: system-ui, -apple-system, 'PingFang SC', 'Noto Sans SC', 'Source Han Sans SC',
     Roboto, 'Helvetica Neue', Arial, sans-serif;
-  --ak-font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  --ak-font-serif: 'ChiRi Serif', 'Noto Serif SC', serif;
-  /* 用户要求「尽量使用无衬线」：命令字/标题统一走无衬线栈（系统 Android 自带 Noto
-   * Sans CJK，与 --ak-font-sans 同源）；内置的 ChiRi Serif 仍保留在 --ak-font-serif，
-   * 需要衬线的地方（如未来的题字）可直接引用 */
+  --ak-font-mono: 'ChiRi Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  --ak-font-serif: 'Noto Serif SC', serif;
+  /* 用户要求「禁止使用衬线字体」：命令字/标题统一走无衬线栈；原先内置的衬线子集已
+   * 随之移除，--ak-font-serif 保留 token 回落系统衬线，未来需要时再按 [fonts] 先例内置 */
   --ak-font-command: var(--ak-font-sans);
 }
 
@@ -306,8 +321,8 @@ label {
   );
 }
 
-/* 卡片标题走品牌命令字体（官方硬编码 Noto Serif SC，会绕开内置 ChiRi Serif）；
- * 字重对齐内置字体的 700，避免合成粗体 */
+/* 卡片标题走品牌命令字体（官方硬编码 Noto Serif SC，会绕开 token）；
+ * 字重对齐 700，避免合成粗体 */
 [data-ak-ui] .ak-card__title {
   font-family: var(--ak-font-command);
   font-weight: 700;

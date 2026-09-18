@@ -1,0 +1,727 @@
+/* analyze.css — 本页样式
+ *
+ * ak-ui.css（包内原文件）提供 token 与少量确实合适的组件（滚动进度条用 ak-progress）。
+ * 密集数据页的骨架、表格、图表容器由本文件自建：颜色、间距、字号、动效一律取 ak-ui
+ * token，但不用 ak-ui 的组件类排版——那些类（浅色纸面的 ak-notice、inline-block 的
+ * ak-card、50px 高的 ak-button）在这种页面上排不出需要的密度与暗色一致性。
+ */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+/* [fonts] 内置字体（均为 SIL OFL 1.1，许可文件见 fonts/ 目录）：
+ * - Analyze Sans：Noto Sans SC 子集（400/700），按本页实际用字裁出 441 字 → 各约 65KB。
+ *   整份简中子集单字重 1.14MB，子集化是必要的（先例同 webui/src/assets/fonts）。
+ * - Analyze Mono：JetBrains Mono 拉丁子集（400/700），数值/表格/刻度都靠它对齐。
+ * 只放允许再分发的字体；Windows 的微软雅黑、SimSun 等系统字体不可随项目分发。 */
+@font-face {
+  font-family: 'Analyze Sans';
+  src: url('fonts/sans-regular.woff') format('woff'), local('Noto Sans SC');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Analyze Sans';
+  src: url('fonts/sans-bold.woff') format('woff'), local('Noto Sans SC');
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Analyze Mono';
+  src: url('fonts/mono-regular.woff2') format('woff2'), local('JetBrains Mono');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Analyze Mono';
+  src: url('fonts/mono-bold.woff2') format('woff2'), local('JetBrains Mono');
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+/* 本项目禁用衬线字体：命令字重走无衬线（角色 token 允许按品牌重映射） */
+:root {
+  --ak-font-sans: 'Analyze Sans', 'Noto Sans SC', system-ui, -apple-system, 'PingFang SC',
+    'Microsoft YaHei', Roboto, Arial, sans-serif;
+  --ak-font-mono: 'Analyze Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --ak-font-command: var(--ak-font-sans);
+  --analyze-rows: clamp(16rem, 42vh, 30rem);
+  --analyze-chart: clamp(15rem, 40vh, 30rem);
+}
+
+/* 页面宽度随屏幕，任何情况下都不横向溢出 */
+html,
+body {
+  margin: 0;
+  max-width: 100%;
+  overflow-x: hidden;
+}
+
+body {
+  background: var(--ak-surface-canvas);
+  color: var(--ak-text-primary);
+  font-family: var(--ak-font-sans);
+  font-size: var(--ak-type-data-size);
+  line-height: 1.6;
+  -webkit-text-size-adjust: 100%;
+}
+
+:focus-visible {
+  outline: var(--ak-focus-width) solid var(--ak-focus-color);
+  outline-offset: var(--ak-focus-offset);
+}
+
+/* ---- 骨架 ---- */
+.app {
+  display: grid;
+  gap: var(--ak-space-4);
+  width: 100%;
+  max-width: 100%;
+  padding: clamp(var(--ak-space-3), 1.6vw, var(--ak-space-5));
+}
+
+/* 栅格子项默认 min-width:0，否则长内容会把容器顶宽 */
+.app > *,
+.app__section > *,
+.app__files > * {
+  min-width: 0;
+}
+
+.app__head {
+  display: grid;
+  gap: var(--ak-space-3);
+  padding: var(--ak-space-4);
+  border: var(--ak-line-hairline) solid var(--ak-surface-raised);
+  border-left: var(--ak-line-strong) solid var(--ak-signal-info);
+  background: var(--ak-surface-inverse);
+}
+
+.app__title {
+  margin: 0;
+  font-family: var(--ak-font-command);
+  font-size: clamp(1.35rem, 2.6vw, 1.9rem);
+  font-weight: 700;
+  letter-spacing: var(--ak-type-tight);
+  line-height: 1.25;
+}
+
+.app__meta {
+  margin: var(--ak-space-1) 0 0;
+  color: var(--ak-text-secondary);
+  font-family: var(--ak-font-mono);
+  font-size: 0.8125rem;
+  letter-spacing: 0.04em;
+  overflow-wrap: anywhere;
+}
+
+.app__toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--ak-space-2);
+  min-width: 0;
+}
+
+/* ---- 按钮（紧凑；ak-ui 的 ak-button 是 50px 高，这里放不下） ---- */
+.app__btn {
+  display: inline-flex;
+  align-items: center;
+  min-height: 2.25rem;
+  padding: 0 var(--ak-space-4);
+  border: var(--ak-line-hairline) solid var(--ak-surface-raised);
+  border-radius: 0;
+  background: transparent;
+  color: var(--ak-text-primary);
+  font-family: var(--ak-font-mono);
+  font-size: 0.8125rem;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  transition: border-color var(--ak-motion-fast) var(--ak-ease-standard),
+    color var(--ak-motion-fast) var(--ak-ease-standard),
+    background var(--ak-motion-fast) var(--ak-ease-standard);
+}
+
+.app__btn:hover {
+  border-color: var(--ak-signal-info);
+  color: var(--ak-signal-info);
+}
+
+.app__btn--on {
+  border-color: var(--ak-signal-action);
+  color: var(--ak-signal-action);
+}
+
+.app__btn--danger:hover {
+  border-color: var(--ak-signal-danger);
+  color: var(--ak-signal-danger);
+}
+
+/* ---- 区块 ---- */
+.app__section {
+  display: grid;
+  gap: var(--ak-space-3);
+  padding: var(--ak-space-4);
+  border: var(--ak-line-hairline) solid var(--ak-surface-raised);
+  border-left: var(--ak-line-strong) solid var(--ak-surface-raised);
+  background: var(--ak-surface-inverse);
+}
+
+.app__label {
+  margin: 0;
+  color: var(--ak-text-secondary);
+  font-family: var(--ak-font-mono);
+  font-size: var(--ak-type-label-size);
+  font-weight: 700;
+  letter-spacing: var(--ak-type-wide);
+}
+
+/* ---- 区块标题行（标题 + 右侧操作） ---- */
+.app__head-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--ak-space-2);
+  align-items: center;
+  justify-content: space-between;
+  min-width: 0;
+}
+
+/* ---- 曲线平均值（表格 + 自适应列宽：列贴内容，不把剩余宽度摊进去）。
+ * 高度不设限：全部行直接展开，不出现内联滚动。边框与滚动条走上面的共享规则 ---- */
+.app__avg-scroll {
+  overflow: auto;
+}
+
+/* 用后代选择器压过 .app__table 的 min-width:100%（同权重时后者在文件里更靠后） */
+.app__avg-scroll .app__table--fit {
+  min-width: 0;
+  width: max-content;
+}
+
+.app__avg-scroll .app__tip-dot {
+  display: inline-block;
+  vertical-align: -0.05em;
+  margin-right: var(--ak-space-2);
+}
+
+/* ---- 文件卡 ---- */
+.app__files {
+  display: grid;
+  gap: var(--ak-space-3);
+}
+
+.app__file {
+  display: grid;
+  gap: var(--ak-space-2);
+  padding: var(--ak-space-3);
+  border: var(--ak-line-hairline) solid var(--ak-surface-raised);
+  background: var(--ak-surface-inverse);
+}
+
+.app__file-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--ak-space-2);
+  min-width: 0;
+}
+
+.app__file-name {
+  font-family: var(--ak-font-mono);
+  font-size: 0.9375rem;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.app__stat {
+  color: var(--ak-text-secondary);
+  font-family: var(--ak-font-mono);
+  font-size: 0.8125rem;
+}
+
+/* 状态徽标：底 + 边 + 字，不只靠颜色 */
+.app__badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 1.75rem;
+  padding: 0 var(--ak-space-3);
+  border: var(--ak-line-hairline) solid var(--app-badge, var(--ak-signal-info));
+  color: var(--app-badge, var(--ak-signal-info));
+  font-family: var(--ak-font-mono);
+  font-size: 0.75rem;
+  letter-spacing: 0.06em;
+}
+
+.app__badge--ok {
+  --app-badge: var(--ak-signal-success);
+}
+
+.app__badge--warn {
+  --app-badge: var(--ak-signal-action);
+}
+
+.app__badge--danger {
+  --app-badge: var(--ak-signal-danger);
+}
+
+/* ---- 提示条 ---- */
+.app__note {
+  padding: var(--ak-space-3);
+  border-left: var(--ak-line-strong) solid var(--ak-signal-action);
+  background: var(--ak-surface-inverse);
+  color: var(--ak-text-secondary);
+  font-size: 0.8125rem;
+}
+
+.app__note--danger {
+  border-left-color: var(--ak-signal-danger);
+}
+
+.app__note-title {
+  margin: 0 0 var(--ak-space-1);
+  color: var(--ak-text-primary);
+  font-family: var(--ak-font-mono);
+  font-size: 0.8125rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.app__note-msg {
+  margin: 0;
+  font-family: var(--ak-font-mono);
+  overflow-wrap: anywhere;
+}
+
+/* ---- 曲线开关 ---- */
+.app__chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--ak-space-2);
+  min-width: 0;
+}
+
+.app__chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 2.125rem;
+  padding: 0 var(--ak-space-3);
+  border: var(--ak-line-hairline) solid color-mix(in srgb, var(--chip-signal) 55%, transparent);
+  border-radius: 0;
+  background: transparent;
+  color: var(--ak-text-primary);
+  font-family: var(--ak-font-mono);
+  font-size: 0.75rem;
+  cursor: pointer;
+  transition: opacity var(--ak-motion-fast) var(--ak-ease-standard),
+    border-color var(--ak-motion-fast) var(--ak-ease-standard);
+}
+
+.app__chip:hover {
+  border-color: var(--chip-signal);
+}
+
+/* 关闭态：删除线 + 降透明度（不只靠颜色区分） */
+.app__chip[aria-pressed='false'] {
+  opacity: 0.4;
+  text-decoration: line-through;
+}
+
+.app__chip__mark {
+  width: 0.7rem;
+  height: 0.7rem;
+  margin-right: var(--ak-space-2);
+  flex: none;
+  background: var(--chip-signal);
+}
+
+/* ---- 图表 ---- */
+.app__chart {
+  position: relative;
+  min-width: 0;
+}
+
+.app__svg {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  height: var(--analyze-chart);
+  cursor: crosshair;
+  touch-action: none;
+}
+
+.app__svg text {
+  fill: var(--ak-text-secondary);
+  font-family: var(--ak-font-mono);
+  font-size: 0.75rem;
+}
+
+.app__grid {
+  stroke: var(--ak-surface-raised);
+  stroke-width: 1;
+}
+
+.app__axis {
+  stroke: var(--ak-color-low);
+  stroke-width: 1;
+}
+
+.app__crosshair {
+  stroke: var(--ak-signal-action);
+  stroke-width: 1;
+  stroke-dasharray: 3 3;
+}
+
+/* 高亮行的图表标识：与悬停准星（细密虚线）区分，用信息色长虚线 */
+.app__markline {
+  stroke: var(--ak-signal-info);
+  stroke-width: 1.5;
+  stroke-dasharray: 6 3;
+}
+
+/* 断裂带：时间被压缩跳过的空档两侧 */
+.app__gapline {
+  stroke: var(--ak-text-secondary);
+  stroke-width: 1;
+  stroke-dasharray: 2 4;
+  opacity: 0.55;
+}
+
+/* 短暂断裂的虚线连接段（颜色随曲线内联给定） */
+.app__dashseg {
+  stroke-dasharray: 3 4;
+  opacity: 0.75;
+}
+
+/* 被筛选掉的行所连的曲线段：不透明度减至 20% */
+.app__dimseg {
+  opacity: 0.2;
+}
+
+/* 列显示菜单 */
+.app__colmenu {
+  position: relative;
+}
+
+.app__colpanel {
+  position: absolute;
+  top: calc(100% + var(--ak-space-2));
+  right: 0;
+  z-index: 30;
+  min-width: 10rem;
+  max-height: 18rem;
+  overflow-y: auto;
+  display: grid;
+  gap: var(--ak-space-1);
+  padding: var(--ak-space-2);
+  border: var(--ak-line-hairline) solid var(--ak-surface-raised);
+  background: var(--ak-surface-inverse);
+}
+
+.app__colpanel label {
+  display: flex;
+  gap: var(--ak-space-2);
+  align-items: center;
+  font-family: var(--ak-font-mono);
+  font-size: 0.75rem;
+  cursor: pointer;
+}
+
+/* hidden 属性会被上面的 display:grid 覆盖（类选择器权重高于 UA 的 [hidden]），
+   必须显式压回去——否则面板永远显示、无法收起 */
+.app__colpanel[hidden] {
+  display: none;
+}
+
+/* 原始数据搜索框与状态筛选 */
+.app__search,
+.app__filter {
+  min-width: 0;
+  padding: var(--ak-space-1) var(--ak-space-2);
+  border: var(--ak-line-hairline) solid var(--ak-surface-raised);
+  background: transparent;
+  color: var(--ak-text-primary);
+  font-family: var(--ak-font-mono);
+  font-size: 0.75rem;
+}
+
+.app__search {
+  width: 10rem;
+}
+
+/* 原生下拉的自绘弹层不吃页面主题——背景与文字都要显式给定，
+   否则深色页面上出现白底白字 */
+.app__filter {
+  background-color: var(--ak-surface-inverse);
+}
+
+.app__filter option {
+  background-color: var(--ak-surface-inverse);
+  color: var(--ak-text-primary);
+}
+
+.app__tip {
+  position: absolute;
+  z-index: 20;
+  min-width: 12rem;
+  max-width: min(22rem, 78%);
+  padding: var(--ak-space-3);
+  border: var(--ak-line-hairline) solid var(--ak-signal-action);
+  background: var(--ak-surface-inverse);
+  box-shadow: var(--ak-shadow-panel);
+  pointer-events: none;
+  font-family: var(--ak-font-mono);
+  font-size: 0.8125rem;
+}
+
+.app__tip-head {
+  margin-bottom: var(--ak-space-2);
+  padding-bottom: var(--ak-space-2);
+  border-bottom: var(--ak-line-hairline) solid var(--ak-surface-raised);
+  color: var(--ak-text-secondary);
+  letter-spacing: 0.04em;
+}
+
+.app__tip-row {
+  display: flex;
+  gap: var(--ak-space-3);
+  align-items: center;
+  justify-content: space-between;
+}
+
+.app__tip-key {
+  display: flex;
+  gap: var(--ak-space-2);
+  align-items: center;
+  min-width: 0;
+}
+
+.app__tip-dot {
+  width: 0.5rem;
+  height: 0.5rem;
+  flex: none;
+  background: var(--tip-signal, var(--ak-signal-info));
+}
+
+/* ---- 列表滚动进度指示条（ak-progress 剥掉外壳，只留轨道） ---- */
+.app__scroll {
+  --ak-progress-signal: var(--ak-signal-info);
+  --ak-progress-value: 0%;
+  padding: 0;
+  border: 0;
+  background: none;
+}
+
+.app__scroll .ak-progress__track {
+  height: 0.35rem;
+}
+
+/* ---- 数据表：限高内联滚动（横竖向都在框内），表头冻结，列宽自适应 ---- */
+.app__table-scroll,
+.app__avg-scroll {
+  max-width: 100%;
+  overflow: auto;
+  border: var(--ak-line-hairline) solid var(--ak-surface-raised);
+  scrollbar-width: thin;
+  scrollbar-color: var(--ak-color-primary) var(--ak-surface-raised);
+}
+
+.app__table-scroll::-webkit-scrollbar,
+.app__avg-scroll::-webkit-scrollbar {
+  width: 0.65rem;
+  height: 0.65rem;
+}
+
+.app__table-scroll::-webkit-scrollbar-track,
+.app__avg-scroll::-webkit-scrollbar-track {
+  background: var(--ak-surface-raised);
+}
+
+.app__table-scroll::-webkit-scrollbar-thumb,
+.app__avg-scroll::-webkit-scrollbar-thumb {
+  border: 2px solid var(--ak-surface-canvas);
+  background: var(--ak-color-primary);
+}
+
+.app__table-scroll::-webkit-scrollbar-thumb:hover,
+.app__avg-scroll::-webkit-scrollbar-thumb:hover {
+  background: var(--ak-signal-action);
+}
+
+/* 数据表单独限高（平均值表用 .app__avg-scroll 自己的） */
+.app__table-scroll {
+  max-height: var(--analyze-rows);
+}
+
+.app__table {
+  width: max-content;
+  min-width: 100%;
+  border-collapse: collapse;
+  font-family: var(--ak-font-mono);
+  font-size: 0.8125rem;
+}
+
+.app__table th,
+.app__table td {
+  padding: var(--ak-space-2) var(--ak-space-3);
+  border-bottom: var(--ak-line-hairline) solid var(--ak-surface-raised);
+  text-align: left;
+  white-space: nowrap;
+}
+
+.app__table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--ak-surface-raised);
+  color: var(--ak-text-secondary);
+  font-size: var(--ak-type-label-size);
+  letter-spacing: var(--ak-type-wide);
+}
+
+.app__table tbody tr:hover td {
+  background: color-mix(in srgb, var(--ak-signal-info) 14%, transparent);
+}
+
+.app__table td.is-num {
+  text-align: right;
+}
+
+/* 高亮条目：底色 + 左侧强规则，不只靠颜色 */
+.app__table tbody tr {
+  cursor: pointer;
+}
+
+.app__table tbody tr.is-active td {
+  background: color-mix(in srgb, var(--ak-signal-action) 26%, transparent);
+}
+
+.app__table tbody tr.is-active td:first-child {
+  box-shadow: inset var(--ak-line-strong) 0 0 0 var(--ak-signal-action);
+}
+
+.app__foot {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--ak-space-3);
+  align-items: center;
+  justify-content: space-between;
+}
+
+/* ---- 排行榜 ---- */
+.app__ranks {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(17rem, 1fr));
+  gap: var(--ak-space-3);
+  min-width: 0;
+}
+
+.app__rank {
+  min-width: 0;
+  padding: var(--ak-space-3);
+  border: var(--ak-line-hairline) solid var(--ak-surface-raised);
+  background: var(--ak-surface-inverse);
+}
+
+.app__rank-title {
+  margin: 0;
+  font-family: var(--ak-font-mono);
+  font-size: 0.8125rem;
+  font-weight: 700;
+}
+
+.app__rank-note {
+  margin: 0 0 var(--ak-space-2);
+  color: var(--ak-text-secondary);
+  font-size: 0.75rem;
+}
+
+.app__rank-item {
+  display: flex;
+  gap: var(--ak-space-2);
+  align-items: baseline;
+  font-family: var(--ak-font-mono);
+  font-size: 0.75rem;
+  line-height: 1.8;
+}
+
+.app__rank-no {
+  min-width: 1.1rem;
+  flex: none;
+  color: var(--ak-text-secondary);
+  text-align: right;
+}
+
+.app__rank-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.app__rank-val {
+  flex: none;
+  font-weight: 700;
+}
+
+/* 表头隐藏开关 */
+.app__table--nohead thead {
+  display: none;
+}
+
+/* ---- 拖放遮罩 ---- */
+.app__drop {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: grid;
+  place-items: center;
+  padding: var(--ak-space-4);
+  background: color-mix(in srgb, var(--ak-surface-canvas) 88%, transparent);
+  color: var(--ak-signal-info);
+  font-family: var(--ak-font-command);
+  font-size: clamp(1.15rem, 3.6vw, 1.6rem);
+  text-align: center;
+}
+
+.app__drop[hidden] {
+  display: none;
+}
+
+/* ---- 窄屏 ---- */
+@media (max-width: 720px) {
+  .app {
+    gap: var(--ak-space-3);
+  }
+
+  .app__head,
+  .app__section {
+    padding: var(--ak-space-3);
+  }
+
+  :root {
+    --analyze-rows: 20rem;
+    --analyze-chart: clamp(13rem, 34vh, 20rem);
+  }
+
+  .app__tip {
+    max-width: 90%;
+    font-size: 0.75rem;
+  }
+
+  .app__btn {
+    padding: 0 var(--ak-space-3);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    transition-duration: 0s !important;
+  }
+}

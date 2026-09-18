@@ -88,6 +88,13 @@
 
 - **CSV 全精度、显示层取整（2026-09-18 用户口径）**：status.csv 数值列全精度写入（`fmt_num` 无 digits、`fmt_opt_full` = f32 最短往返），取整是显示层职责（状态快照统一 `toFixed(1)`）；devimp/调试摘要仍固定位数。daemon.log 模块路径剥 crate 前缀（`LineEncoder` 委托 PatternEncoder 后裁第三段：`chiri::chiri::config`→`chiri::config`）；日志终端级别列不设 min-width（列间距以「时间→级别」为准），快照表 `width: max-content`。
 
+- **字体内置与许可（2026-09-18/19）**：可以放字体文件，但**只能放允许再分发的**（OFL 1.1 等）并随附许可文件；Windows 的微软雅黑/SimSun/SimHei、macOS 的 PingFang/SF 属专有许可，不可随项目分发。OFL 要点：可捆绑/不可单独出售/衍生须续用 OFL/不得用保留字体名。
+  - `webui/src/assets/fonts/`：`mono-regular/bold.woff2`（JetBrains Mono 拉丁子集，~43KB）注册为 'ChiRi Mono' 并前置进 `--ak-font-mono`；**原先内置的衬线子集（noto-serif-sc-bold-subset.woff2，160KB）已删除**——`--ak-font-command` 改走无衬线后它再无引用方，`--ak-font-serif` 保留 token、回落系统衬线。
+  - `analyze/fonts/`：`sans-regular/bold.woff`（Noto Sans SC 子集，**按 index.html 实际用字 441 字裁出**，各 ~65KB）+ `mono-regular/bold.woff2` + 两份 OFL 许可；注册为 'Analyze Sans'/'Analyze Mono'。
+  - 子集做法与工具（pip 坏了就用 `fonttools-*-py3-none-any.whl` 解压 + PYTHONPATH）、CDN 在线加载备选，都写在 `analyze/fonts/README.md`。
+
+- **禁用衬线字体（2026-09-18 用户要求，全项目）**：ak-ui 的 `--ak-font-command` 由 `--ak-font-serif` 重映射为 `--ak-font-sans`（角色 token 允许按品牌重映射；衬线 token 保留定义但不引用）。标题、拖放提示等原本用 `--ak-font-command` 的地方也显式写 `--ak-font-sans`，避免出现"改了 token 但某处直接写了 serif"的漏网。
+
 - **UI 文案只留信息量（2026-09-18 用户要求「删除非必要的 ui 文本 i18n」）**：面板级 hint 与字段级 hint 重复时只留字段级（`Panel` 的 desc 可省）；「已应用」这类无信息量 toast 不写；同一页面标题不要在入口与页面里各起一个键（复用 `battery.title`）；纯派生显示（如「当前：OPlus 私有节点」）能由开关状态直接看出就别单列文案。UI 文案句尾不留句号。
 
 - **兜底三层（电池读数，2026-09-18）**：① 私有节点存在性**每 60s 复查**（`telemetry::BCC_PROBE_INTERVAL`），驱动加载晚于 daemon 不会永久钉在回退态，且只在状态变化时打点（缺失告警自带去重 + 恢复重新武装）；② 互斥（私有节点 vs 倍压/倍流）三处落地——UI 显示为「未开」+ 置灰、`setBatteryFields` 强制清空**排在展开之后**（调用方多传 true 也写不坏）、daemon `(!oplus_chg && x)` 再判一次；③ meta 非法时开关禁用必须给出原因（页面显示 `metaProblems`），否则「点了没反应」无从排查。

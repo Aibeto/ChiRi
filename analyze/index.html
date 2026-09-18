@@ -1,0 +1,1972 @@
+<!doctype html>
+<html lang="zh-CN" data-ak-ui="system">
+
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ChiRi CSV 分析台</title>
+  <!-- 样式全部外置：ak-ui 官方样式 + 本页补充（HTML 内不含任何 CSS） -->
+  <link rel="stylesheet" href="ak-ui.css" />
+  <link rel="stylesheet" href="analyze.css" />
+</head>
+
+<body>
+  <div class="app">
+    <header class="app__head">
+      <div>
+        <h1 class="app__title">ChiRi CSV 分析台</h1>
+        <p class="app__meta" id="meta">等待载入 · 默认读取同目录 status.csv</p>
+      </div>
+      <div class="app__toolbar">
+        <button class="app__btn" id="pick" type="button">
+          载入 CSV
+        </button>
+        <button class="app__btn" id="zoomIn" type="button">
+          放大
+        </button>
+        <button class="app__btn" id="zoomOut" type="button">
+          缩小
+        </button>
+        <button class="app__btn" id="reset" type="button">
+          重置视图
+        </button>
+        <button class="app__btn app__btn--on" id="fitY" type="button" aria-pressed="true">
+          Y 轴自适应
+        </button>
+        <button class="app__btn" id="normalize" type="button" aria-pressed="false">
+          归一化
+        </button>
+        <button class="app__btn" id="clear" type="button">清空</button>
+      </div>
+    </header>
+
+    <div id="notice"></div>
+
+    <section class="app__section" id="legendPanel" aria-label="文件与曲线" hidden>
+      <div class="app__head-row">
+        <p class="app__label">文件与曲线（点击可单独关闭，多文件时按文件分组）</p>
+        <button class="app__btn app__btn--on" id="avgToggle" type="button" aria-pressed="true">
+          平均值
+        </button>
+        <button class="app__btn app__btn--on" id="gapToggle" type="button" aria-pressed="true">
+          断裂轴
+        </button>
+      </div>
+      <div class="app__avg-scroll" id="avgScroll" hidden>
+        <table class="app__table app__table--fit" id="avgTable">
+          <thead id="avgHead"></thead>
+          <tbody id="avgBody"></tbody>
+        </table>
+      </div>
+      <div class="app__files" id="files"></div>
+    </section>
+
+    <section class="app__section" id="chartPanel" aria-label="曲线图">
+      <div class="app__head-row">
+        <p class="app__label">曲线（滚轮缩放 · 拖动平移 · 双击重置）</p>
+      </div>
+      <div class="app__chart">
+        <svg class="app__svg" id="chart" role="img" aria-label="CSV 数值曲线"></svg>
+        <div class="app__tip" id="tip" hidden></div>
+      </div>
+    </section>
+
+    <section class="app__section" id="tablePanel" aria-label="原始数据">
+      <div class="app__head-row">
+        <p class="app__label">原始数据</p>
+        <div class="app__toolbar">
+          <button class="app__btn app__btn--on" id="headToggle" type="button" aria-pressed="true">表头</button>
+          <button class="app__btn" id="fileColToggle" type="button" aria-pressed="false">
+            文件名列
+          </button>
+          <button class="app__btn" id="nameToggle" type="button" aria-pressed="false">
+            详细列名
+          </button>
+          <input id="tableSearch" class="app__search" type="search" placeholder="一级筛选" aria-label="一级搜索筛选" />
+          <input id="tableSearch2" class="app__search" type="search" placeholder="二级筛选" aria-label="二级搜索筛选" />
+          <input id="tableSearch3" class="app__search" type="search" placeholder="三级筛选" aria-label="三级搜索筛选" />
+          <select id="chgFilter" class="app__filter" aria-label="按充放电状态筛选">
+            <option value="all">全部电源状态</option>
+            <option value="discharging">放电</option>
+            <option value="charging">充电</option>
+            <option value="full">充满</option>
+            <option value="not_charging">未充电</option>
+          </select>
+          <select id="screenFilter" class="app__filter" aria-label="按亮屏状态筛选">
+            <option value="all">全部屏幕状态</option>
+            <option value="1">亮屏</option>
+            <option value="0">息屏</option>
+          </select>
+          <div class="app__colmenu">
+            <button class="app__btn" id="colMenuBtn" type="button" aria-expanded="false" aria-haspopup="true">
+              列显示
+            </button>
+            <div class="app__colpanel" id="colPanel" hidden></div>
+          </div>
+        </div>
+      </div>
+      <div class="ak-progress app__scroll" id="scrollBar" role="progressbar" aria-label="列表滚动位置" aria-valuemin="0"
+        aria-valuemax="100" aria-valuenow="0">
+        <div class="ak-progress__track"><span class="ak-progress__fill"></span></div>
+      </div>
+      <div class="app__table-scroll" id="tableScroll">
+        <table class="app__table" id="table">
+          <thead id="thead"></thead>
+          <tbody id="tbody"></tbody>
+        </table>
+      </div>
+      <div class="app__foot">
+        <span class="app__stat" id="tableStat"></span>
+        <!-- 继续载入按钮（用户要求仅注释隐藏）：恢复时同时解开 renderTable /
+             repaintTable 里对 $('more') 的空值守卫
+        <button class="app__btn" id="more" type="button" hidden>继续载入</button>
+        -->
+      </div>
+    </section>
+
+    <section class="app__section" id="rankPanel" aria-label="排行榜" hidden>
+      <div class="app__head-row">
+        <p class="app__label">排行榜（按包名 · 每个样本按 1 秒计 · 基于全部载入数据）</p>
+      </div>
+      <div class="app__ranks" id="ranks"></div>
+    </section>
+  </div>
+
+  <div class="app__drop" id="drop" hidden>松开即载入（可多选）</div>
+  <input id="fileInput" type="file" multiple accept=".csv,.tsv,.txt,text/csv" hidden />
+
+  <script>
+    // ---------- 常量 ----------
+    // 固定配色：按列名写死，同名数据永远同色、不同类型尽量不同色。
+    // 未收录的列名按名字哈希取用（同一列名在任何文件里都取到同一个颜色）。
+    const COLOR_MAP = {
+      // 电量 / 功耗（status.csv）
+      batt_power_w: '--ak-color-accent',
+      batt_voltage_v: '--ak-color-primary',
+      batt_current_ma: '--ak-color-light-blue',
+      // 温度
+      batt_temp: '--ak-signal-danger',
+      cpu_temp: '--ak-color-advanced',
+      // 热保护与开关
+      thermal_cap_pct: '--ak-color-basic',
+      thermal_free_pct: '--ak-color-secondary',
+      clg_active: '--ak-signal-success',
+      screen_on: '--ak-color-low',
+      // 负载与占用
+      psi_cpu_some: '--ak-color-yellow',
+      psi_io_some: '--ak-color-dark-blue',
+      psi_mem_some: '--ak-color-blue',
+      gpu_busy_pct: '--ak-color-white',
+      util_pct: '--ak-color-yellow',
+      max_util: '--ak-color-advanced',
+      over_cores: '--ak-signal-success',
+      under_cores: '--ak-signal-danger',
+      cur_perf: '--ak-color-primary',
+      tgt_perf: '--ak-color-light-blue',
+      cur_freq_khz: '--ak-color-basic',
+      max_freq_khz: '--ak-color-secondary',
+      // 计数
+      wakeups: '--ak-text-secondary',
+      migrations: '--ak-surface-muted',
+      freq_trans: '--ak-surface-raised'
+    }
+    const COLOR_POOL = [
+      '--ak-color-primary',
+      '--ak-signal-success',
+      '--ak-color-advanced',
+      '--ak-color-accent',
+      '--ak-color-light-blue',
+      '--ak-color-secondary',
+      '--ak-color-basic',
+      '--ak-signal-danger',
+      '--ak-color-yellow',
+      '--ak-color-dark-blue',
+      '--ak-color-blue',
+      '--ak-color-white'
+    ]
+
+    function colorFor(name) {
+      const fixed = COLOR_MAP[name]
+      if (fixed) return fixed
+      let h = 0
+      for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) >>> 0
+      return COLOR_POOL[h % COLOR_POOL.length]
+    }
+    const TIME_NAMES = /^(ts|timestamp|time|datetime|date|时间|时刻)$/i
+    const NA = new Set(['', '-', 'NA', 'N/A', 'null', 'NULL', 'nan', 'NaN', 'none'])
+    const ROW_CHUNK = 800
+    const MAX_POINTS = 2600 // 每条曲线的抽稀上限（只影响绘制，表格仍是全量）
+
+    // ---------- 状态 ----------
+    const state = {
+      files: [],
+      series: [],
+      domain: null,
+      view: null,
+      fitY: true,
+      normalize: false,
+      rowsShown: 0,
+      hover: null,
+      highlight: null, // { fileId, row } 高亮条目（图表点击 / 表格点击共用）
+      showAvg: true, // 是否显示曲线平均值
+      showHead: true, // 原始数据表头（默认显示）
+      showFileCol: false, // 文件名列（默认隐藏）
+      shortNames: true, // 列名/charge 值精简（详细列名开时显示原文）
+      searchText: '', // 一级搜索（任意列原文子串，不区分大小写）
+      searchText2: '', // 二级搜索（与一级同时满足）
+      searchText3: '', // 三级搜索（与前两条同时满足）
+      hiddenCols: new Set(), // 列选择性显示：隐藏列名集合（按列名跨文件记忆）
+      filterChg: 'all', // 充放电状态筛选（原文匹配）
+      filterScreen: 'all', // 亮屏状态筛选：'1' 亮屏 / '0' 息屏 / 'all' 不限
+      gapSkip: true, // 断裂轴：无数据空档压缩为固定显示宽度
+      gapMap: [], // 断裂段列表 {a, b, R, shrink, ratio}（原始秒时间）
+      dataVer: 0, // 数据/可见性版本号：失效图表绘制缓存
+      matchedTotal: 0, // 筛选匹配总数缓存（全量扫描贵，追加块复用）
+      matchedDirty: true,
+      renderFrom: 0 // 表格渲染窗口起点（远距跳转切窗后，前缀不再全量物化）
+    }
+
+    const $ = id => document.getElementById(id)
+    const chart = $('chart')
+    const tip = $('tip')
+
+    // ---------- CSV 解析 ----------
+    function detectDelimiter(firstLine) {
+      const candidates = [',', ';', '\t', '|']
+      let best = null
+      let bestCount = 0
+      for (const d of candidates) {
+        let count = 0
+        let inQuote = false
+        for (let i = 0; i < firstLine.length; i++) {
+          const c = firstLine[i]
+          if (c === '"') inQuote = !inQuote
+          else if (c === d && !inQuote) count++
+        }
+        if (count > bestCount) {
+          best = d
+          bestCount = count
+        }
+      }
+      return bestCount > 0 ? best : null
+    }
+
+    /** RFC4180 简化解析：支持引号包裹与 "" 转义 */
+    function splitCsv(text, delim) {
+      const rows = []
+      let row = []
+      let field = ''
+      let inQuote = false
+      for (let i = 0; i < text.length; i++) {
+        const c = text[i]
+        if (inQuote) {
+          if (c === '"') {
+            if (text[i + 1] === '"') {
+              field += '"'
+              i++
+            } else inQuote = false
+          } else field += c
+          continue
+        }
+        if (c === '"') inQuote = true
+        else if (c === delim) {
+          row.push(field)
+          field = ''
+        } else if (c === '\n') {
+          row.push(field)
+          rows.push(row)
+          row = []
+          field = ''
+        } else if (c !== '\r') field += c
+      }
+      row.push(field)
+      rows.push(row)
+      return rows
+    }
+
+    function toNumber(s) {
+      if (s == null) return null
+      const t = String(s).trim()
+      if (NA.has(t)) return null
+      const n = Number(t)
+      return Number.isFinite(n) ? n : null
+    }
+
+    /** HH:MM:SS(.mmm) / HH:MM / ISO → 秒 */
+    function toSeconds(s) {
+      const t = String(s || '').trim()
+      const m = /^(\d{1,2}):(\d{2})(?::(\d{2})(?:\.(\d{1,3}))?)?$/.exec(t)
+      if (m) {
+        return (
+          Number(m[1]) * 3600 +
+          Number(m[2]) * 60 +
+          Number(m[3] || 0) +
+          Number((m[4] || '0').padEnd(3, '0')) / 1000
+        )
+      }
+      const d = Date.parse(t)
+      return Number.isNaN(d) ? null : d / 1000
+    }
+
+    function fmtClock(sec) {
+      if (sec == null || !Number.isFinite(sec)) return '—'
+      const s = ((sec % 86400) + 86400) % 86400
+      const h = Math.floor(s / 3600)
+      const mi = Math.floor((s % 3600) / 60)
+      const r = s % 60
+      return (
+        String(h).padStart(2, '0') +
+        ':' +
+        String(mi).padStart(2, '0') +
+        ':' +
+        (r < 10 ? '0' : '') +
+        r.toFixed(3)
+      )
+    }
+
+    function parseCsv(name, rawText) {
+      if (rawText == null) return { error: '文件为空' }
+      const text = rawText.replace(/^﻿/, '')
+      if (!text.trim()) return { error: '文件为空（没有可解析内容）' }
+      if (text.includes('\u0000')) return { error: '不是文本 CSV（含二进制字节）' }
+
+      const firstLine = text.split(/\r?\n/, 1)[0]
+      const delim = detectDelimiter(firstLine)
+      if (!delim) return { error: '未检测到分隔符（需要 , ; 制表符 或 |）' }
+
+      let matrix = splitCsv(text, delim)
+      while (matrix.length && matrix[matrix.length - 1].every(c => c.trim() === '')) matrix.pop()
+      if (!matrix.length) return { error: '没有数据行' }
+
+      let headers = matrix[0].map((h, i) => String(h).trim() || `col${i + 1}`)
+      let dataRows = matrix.slice(1)
+      const warn = []
+
+      const headerLooksNumeric = matrix[0].every(c => toNumber(c) !== null)
+      if (headerLooksNumeric && dataRows.length) {
+        headers = headers.map((_, i) => `col${i + 1}`)
+        dataRows = matrix.slice()
+        warn.push('首行是数据而非表头，已自动生成列名')
+      }
+
+      const width = headers.length
+      let ragged = 0
+      const rows = dataRows
+        .filter(r => r.some(c => c.trim() !== ''))
+        .map(r => {
+          if (r.length === width) return r
+          ragged++
+          const copy = r.slice(0, width)
+          while (copy.length < width) copy.push('')
+          return copy
+        })
+      if (ragged) warn.push(`${ragged} 行列数不齐（已按表头补齐/截断）`)
+
+      let timeIdx = headers.findIndex(h => TIME_NAMES.test(h))
+      let xMode = 'index'
+      let xs = null
+      if (timeIdx >= 0) {
+        const parsed = rows.map(r => toSeconds(r[timeIdx]))
+        const hit = parsed.filter(v => v !== null).length
+        if (rows.length && hit / rows.length >= 0.8) {
+          // 时钟回绕展开（跨天日志，2026-09-19 断裂轴失效的根因）：toSeconds 给的是
+          // 当天秒数，过 00:00 回到小值 → xs 非单调。域计算与断裂轴检测都要求
+          // 单调——**只要时间倒退就回绕**（暂停可能超过 12h，用半天阈值会漏判，
+          // 例如 22:02 息屏到次日 10:35 恢复），整体 +86400，可跨多天
+          let off = 0
+          let last = null
+          for (let i = 0; i < parsed.length; i++) {
+            const v = parsed[i]
+            if (v === null) {
+              if (last !== null) parsed[i] = last
+              continue
+            }
+            while (last !== null && v + off < last) off += 86400
+            last = v + off
+            parsed[i] = last
+          }
+          xs = parsed
+          xMode = 'time'
+        }
+      }
+      if (!xs) xs = rows.map((_, i) => i)
+
+      // 数值列。NA 记号不计入分母：偶尔缺测的列仍是曲线（缺测处断线），
+      // 整列都是 NA（如 fps 预留列）因 total=0 自然排除
+      const numeric = headers.map((_, i) => {
+        if (i === timeIdx && xMode === 'time') return false
+        let total = 0
+        let hit = 0
+        for (const r of rows) {
+          const v = (r[i] == null ? '' : String(r[i])).trim()
+          if (NA.has(v)) continue
+          total++
+          if (toNumber(v) !== null) hit++
+        }
+        return total > 0 && hit / total >= 0.8
+      })
+      if (!numeric.some(Boolean)) warn.push('没有可绘制的数值列（仅显示表格）')
+
+      return { headers, rows, numeric, xMode, xs, warn: warn.join('；') }
+    }
+
+    // ---------- 载入 ----------
+    function addFile(name, text, opts = {}) {
+      const id = `f${state.files.length + 1}`
+      const parsed = parseCsv(name, text)
+      const file = {
+        id,
+        name,
+        status: parsed.error ? 'error' : parsed.warn ? 'warn' : 'ok',
+        message: parsed.error || parsed.warn || '',
+        headers: parsed.headers || [],
+        rows: parsed.rows || [],
+        numeric: parsed.numeric || [],
+        xMode: parsed.xMode || 'index',
+        xs: parsed.xs || [],
+        auto: !!opts.auto
+      }
+      state.files.push(file)
+
+      // 新 CSV 导入：立即重置视图到全域——computeDomain 只在 view 为空时才设，
+      // 不清掉的话第二个文件会沿用上一个文件的缩放位置
+      state.view = null
+      if (!parsed.error) {
+        file.headers.forEach((h, i) => {
+          if (!file.numeric[i]) return
+          const pts = []
+          for (let r = 0; r < file.rows.length; r++) {
+            const y = toNumber(file.rows[r][i])
+            if (y === null) continue
+            pts.push({ x: file.xs[r], y, raw: file.rows[r], row: r, col: i })
+          }
+          if (!pts.length) return
+          state.series.push({
+            key: `${id}::${h}`,
+            fileId: id,
+            name: h,
+            color: colorFor(h),
+            visible: true,
+            pts
+          })
+        })
+      }
+      rebuild()
+    }
+
+    function clearAll() {
+      state.files = []
+      state.series = []
+      state.domain = null
+      state.view = null
+      state.rowsShown = 0
+      rebuild()
+    }
+
+    // ---------- 域与视窗 ----------
+    // [gap-skip] 断裂轴：相邻样本间隔超过 GAP_MIN 秒视为无数据空档，映射时把
+    // 空档压缩为 R 秒的显示带（全图约 1.5%，下限 10s、上限空档的 45%）——
+    // 长时间息屏等造成的空白段不再把有效数据挤成一条缝。点仍存原始时间，
+    // sx/命中/刻度三处经 xDisp/unX 转换，缩放平移在显示空间内自洽。
+    const GAP_MIN = 60
+    function computeGaps() {
+      state.gapMap = []
+      if (!state.gapSkip) return
+      const tfs = state.files.filter(f => f.xMode === 'time' && f.xs.length > 1)
+      if (!tfs.length) return
+      const ivs = []
+      // ① 文件内部空档：相邻样本间隔超阈（息屏/挂起）
+      for (const f of tfs) {
+        for (let i = 1; i < f.xs.length; i++) {
+          if (f.xs[i] - f.xs[i - 1] > GAP_MIN) ivs.push([f.xs[i - 1], f.xs[i]])
+        }
+      }
+      // ② 文件之间的空档（2026-09-19 截图确认的第二根因）：日志归档按会话切开，
+      //    会话之间的空洞不在任何文件的相邻行里——用各文件时段 [首,尾] 的间隙补
+      const spans = tfs.map(f => [f.xs[0], f.xs[f.xs.length - 1]]).sort((p, q) => p[0] - q[0])
+      let maxEnd = spans[0][1]
+      for (let i = 1; i < spans.length; i++) {
+        if (spans[i][0] - maxEnd > GAP_MIN) ivs.push([maxEnd, spans[i][0]])
+        if (spans[i][1] > maxEnd) maxEnd = spans[i][1]
+      }
+      if (!ivs.length) return
+      ivs.sort((p, q) => p[0] - q[0])
+      const merged = []
+      for (const iv of ivs) {
+        const last = merged[merged.length - 1]
+        if (last && iv[0] <= last[1]) {
+          if (iv[1] > last[1]) last[1] = iv[1]
+        } else merged.push(iv)
+      }
+      let gapSpan = 0
+      for (const m of merged) gapSpan += m[1] - m[0]
+      const R0 = Math.max(10, gapSpan * 0.015)
+      state.gapMap = merged.map(([a, b]) => {
+        const R = Math.min(R0, (b - a) * 0.45)
+        return { a, b, R, shrink: b - a - R, ratio: R / (b - a) }
+      })
+    }
+
+    /** 原始时间 → 显示时间（单调） */
+    function xDisp(t) {
+      const g = state.gapMap
+      if (!g || !g.length) return t
+      let d = 0
+      for (const it of g) {
+        if (t >= it.b) d += it.shrink
+        else if (t > it.a) d += (t - it.a) * (1 - it.ratio)
+        else break
+      }
+      return t - d
+    }
+
+    /** 显示时间 → 原始时间（xDisp 的逆：刻度标签、命中测试用） */
+    function unX(x) {
+      const g = state.gapMap
+      if (!g || !g.length) return x
+      let prev = 0
+      for (const it of g) {
+        const ds = it.a - prev
+        if (x <= ds) return x + prev
+        if (x <= ds + it.R) return it.a + (x - ds) / it.ratio
+        prev += it.shrink
+      }
+      return x + prev
+    }
+
+    function computeDomain() {
+      computeGaps()
+      const visible = state.series.filter(s => s.visible)
+      if (!visible.length) {
+        state.domain = null
+        state.view = null
+        return
+      }
+      let x0 = Infinity
+      let x1 = -Infinity
+      for (const s of visible) {
+        for (const p of s.pts) {
+          if (p.x < x0) x0 = p.x
+          if (p.x > x1) x1 = p.x
+        }
+      }
+      if (!Number.isFinite(x0)) {
+        state.domain = null
+        return
+      }
+      if (x0 === x1) {
+        x0 -= 1
+        x1 += 1
+      }
+      state.domain = { x0: xDisp(x0), x1: xDisp(x1) }
+      if (!state.view) state.view = { x0: state.domain.x0, x1: state.domain.x1 }
+      clampView()
+    }
+
+    function clampView() {
+      const d = state.domain
+      if (!d || !state.view) return
+      const span = d.x1 - d.x0
+      const minSpan = span / 4000
+      let s = state.view.x1 - state.view.x0
+      if (s < minSpan) {
+        const c = (state.view.x0 + state.view.x1) / 2
+        state.view.x0 = c - minSpan / 2
+        state.view.x1 = c + minSpan / 2
+        s = minSpan
+      }
+      if (s > span) {
+        state.view.x0 = d.x0
+        state.view.x1 = d.x1
+        return
+      }
+      if (state.view.x0 < d.x0) {
+        state.view.x0 = d.x0
+        state.view.x1 = d.x0 + s
+      }
+      if (state.view.x1 > d.x1) {
+        state.view.x1 = d.x1
+        state.view.x0 = d.x1 - s
+      }
+    }
+
+    const yRangeCache = { k: '', v: null }
+    function yRange() {
+      if (state.normalize) return [0, 1]
+      // 10 万行级扫描很贵，键含数据版本与视窗：悬停/高亮重画直接复用
+      const k = `${state.dataVer}|${state.view.x0}|${state.view.x1}`
+      if (yRangeCache.k === k && yRangeCache.v) return yRangeCache.v
+      let lo = Infinity
+      let hi = -Infinity
+      for (const s of state.series) {
+        if (!s.visible) continue
+        for (const p of s.pts) {
+          const xv = xDisp(p.x)
+          if (xv < state.view.x0 || xv > state.view.x1) continue
+          if (p.y < lo) lo = p.y
+          if (p.y > hi) hi = p.y
+        }
+      }
+      let v
+      if (!Number.isFinite(lo)) v = [0, 1]
+      else if (lo === hi) {
+        const pad = Math.abs(lo) * 0.05 || 1
+        v = [lo - pad, hi + pad]
+      } else {
+        const pad = (hi - lo) * 0.06
+        v = [lo - pad, hi + pad]
+      }
+      yRangeCache.k = k
+      yRangeCache.v = v
+      return v
+    }
+
+    // ---------- 绘制 ----------
+    const M = { l: 88, r: 16, t: 16, b: 30 }
+    const SVG_NS = 'http://www.w3.org/2000/svg'
+
+    function svgEl(tag, attrs) {
+      const el = document.createElementNS(SVG_NS, tag)
+      for (const k in attrs) el.setAttribute(k, attrs[k])
+      return el
+    }
+
+    /** 生成单条曲线的路径串：主实线 d + 短暂断裂虚线连接段 dd，结果存入 s._pc
+     * （键由调用方给定：数据版本 + 视窗 + y 轴状态） */
+    function buildSeriesPath(s, sampled, step, sx, sy, pk) {
+      // 短暂断裂（低于压缩阈值 GAP_MIN）：实线在此断开，用虚线段直接连接
+      // 两侧——既提示「这里缺数据」，又不把几秒的小空洞画成大豁口。判据是
+      // 相邻采样点的**时间差**（空档行不在文件里，行索引始终连续，行距看不出
+      // 断裂）；基准取本视图采样间隔的 4 倍中位数，抽稀步长放大 time diff 也
+      // 不会误判，缺测多到影响中位数时退回 10s 下限兜底
+      const dts = []
+      for (let i = 1; i < sampled.length; i++) dts.push(sampled[i].x - sampled[i - 1].x)
+      dts.sort((a, b) => a - b)
+      const med = dts.length ? dts[dts.length >> 1] : 1
+      const gapThresh = Math.max(med * 4, 10)
+      // 筛选生效时：不满足条件（被筛掉）的行所连的段降为半透明（app__dimseg），
+      // 段两端只要有一端被筛掉就算。路径缓存键 pk 已含筛选签名，筛选变化即重建。
+      // 短暂断裂的虚线连接优先于降透明（它表达「无数据」，语义更硬）
+      const dim = isFiltering()
+      const file = dim ? state.files.find(f => f.id === s.fileId) || null : null
+      const ok = p => !dim || (!!file && rowVisible(file, p.row, p.raw))
+      let d = ''
+      let dd = '' // 虚线连接段（短暂断裂）
+      let dm = '' // 半透明段（被筛掉）
+      let open = false
+      let dopen = false
+      let prev = null
+      let prevOk = true
+      for (const p of sampled) {
+        const yv = state.normalize ? normY(s, p.y) : p.y
+        if (!Number.isFinite(yv)) {
+          open = false
+          dopen = false
+          prev = null
+          continue
+        }
+        const px = sx(p.x).toFixed(2)
+        const py = sy(yv).toFixed(2)
+        const cur = { x: p.x, row: p.row, px, py, ok: ok(p) }
+        if (!prev) {
+          d += `M${px} ${py} `
+          open = true
+        } else if (p.x - prev.x > gapThresh) {
+          dd += `${dopen ? 'L' : 'M'}${prev.px} ${prev.py}L${px} ${py}`
+          dopen = false
+          d += `M${px} ${py} `
+          open = true
+        } else if (dim && (!prevOk || !cur.ok)) {
+          dm += `${dopen ? 'L' : 'M'}${prev.px} ${prev.py}L${px} ${py}`
+          dopen = true
+          open = false
+        } else {
+          d += `${open ? 'L' : 'M'}${px} ${py} `
+          open = true
+          dopen = false
+        }
+        prev = cur
+        prevOk = cur.ok
+      }
+      s._pc = { k: pk, d, dd, dm }
+    }
+
+    function draw() {
+      if (!chart) return
+      const w = chart.clientWidth || 900
+      const h = chart.clientHeight || 420
+      chart.setAttribute('viewBox', `0 0 ${w} ${h}`)
+      while (chart.firstChild) chart.removeChild(chart.firstChild)
+
+      const plotW = Math.max(10, w - M.l - M.r)
+      const plotH = Math.max(10, h - M.t - M.b)
+      const visible = state.series.filter(s => s.visible)
+
+      if (!state.domain || !visible.length) {
+        const t = svgEl('text', { x: w / 2, y: h / 2, 'text-anchor': 'middle' })
+        t.textContent = state.files.length ? '没有可显示的数值列' : '载入 CSV 后在此显示曲线'
+        chart.appendChild(t)
+        return
+      }
+
+      const { x0, x1 } = state.view
+      const [y0, y1] = yRange()
+      // v 是原始时间：断裂轴开启时先映射到显示空间再线性到像素
+      const sx = v => M.l + ((xDisp(v) - x0) / (x1 - x0)) * plotW
+      const sy = v => M.t + plotH - ((v - y0) / (y1 - y0)) * plotH
+
+      // 网格
+      for (let i = 0; i <= 5; i++) {
+        const v = y0 + ((y1 - y0) * i) / 5
+        const y = sy(v)
+        chart.appendChild(
+          svgEl('line', { class: 'app__grid', x1: M.l, y1: y, x2: M.l + plotW, y2: y })
+        )
+        const label = svgEl('text', { x: M.l - 8, y: y + 4, 'text-anchor': 'end' })
+        label.textContent = fmtNum(v)
+        chart.appendChild(label)
+      }
+      const xTicks = Math.min(8, Math.max(3, Math.floor(plotW / 120)))
+      const asClock = state.files.some(f => f.xMode === 'time')
+      for (let i = 0; i <= xTicks; i++) {
+        const v = x0 + ((x1 - x0) * i) / xTicks
+        const x = sx(v)
+        chart.appendChild(
+          svgEl('line', { class: 'app__grid', x1: x, y1: M.t, x2: x, y2: M.t + plotH })
+        )
+        const label = svgEl('text', { x: x, y: M.t + plotH + 18, 'text-anchor': 'middle' })
+        label.textContent = asClock ? fmtClock(unX(v)).slice(0, 8) : fmtNum(v)
+        chart.appendChild(label)
+      }
+      chart.appendChild(
+        svgEl('line', { class: 'app__axis', x1: M.l, y1: M.t, x2: M.l, y2: M.t + plotH })
+      )
+      chart.appendChild(
+        svgEl('line', {
+          class: 'app__axis',
+          x1: M.l,
+          y1: M.t + plotH,
+          x2: M.l + plotW,
+          y2: M.t + plotH
+        })
+      )
+
+      // 断裂带标记：压缩空档两侧画淡虚线，提示该处时间被跳过
+      for (const it of state.gapMap) {
+        const ga = sx(it.a)
+        const gb = sx(it.b)
+        if (gb < M.l || ga > M.l + plotW || gb - ga < 3) continue
+        for (const gx of [ga, gb]) {
+          chart.appendChild(
+            svgEl('line', { class: 'app__gapline', x1: gx, y1: M.t, x2: gx, y2: M.t + plotH })
+          )
+        }
+      }
+
+      // 曲线（抽稀 + 断点分段）。两级缓存（键含数据版本 + 视窗 + y 轴状态 + 筛选
+      // 签名）：悬停/高亮重画时 10 万行级的过滤、抽稀、路径串全部复用
+      const fk = isFiltering()
+        ? `${state.searchText}|${state.searchText2}|${state.searchText3}|${state.filterChg}|${state.filterScreen}`
+        : ''
+      for (const s of visible) {
+        const sk = `${state.dataVer}|${x0}|${x1}`
+        if (!s._sc || s._sc.k !== sk) {
+          const all = s.pts.filter(p => {
+            const xv = xDisp(p.x)
+            return xv >= x0 && xv <= x1
+          })
+          const step = Math.max(1, Math.ceil(all.length / MAX_POINTS))
+          const sampled = []
+          for (let i = 0; i < all.length; i += step) sampled.push(all[i])
+          if (sampled.length && sampled[sampled.length - 1] !== all[all.length - 1])
+            sampled.push(all[all.length - 1])
+          s._sc = { k: sk, sampled, step }
+        }
+        const { sampled, step } = s._sc
+
+        const pk = `${sk}|${y0}|${y1}|${state.normalize}|${fk}`
+        if (!s._pc || s._pc.k !== pk) {
+          buildSeriesPath(s, sampled, step, sx, sy, pk)
+        }
+        const { d, dd, dm } = s._pc
+        if (!d && !dd && !dm) continue
+        const path = svgEl('path', {
+          d,
+          fill: 'none',
+          'stroke-width': '1.4',
+          'stroke-linejoin': 'round'
+        })
+        path.style.stroke = `var(${s.color})`
+        chart.appendChild(path)
+        if (dd) {
+          const dpath = svgEl('path', {
+            d: dd,
+            fill: 'none',
+            'stroke-width': '1.4',
+            class: 'app__dashseg'
+          })
+          dpath.style.stroke = `var(${s.color})`
+          chart.appendChild(dpath)
+        }
+        // 被筛掉的部分：同色半透明
+        if (dm) {
+          const dmpath = svgEl('path', {
+            d: dm,
+            fill: 'none',
+            'stroke-width': '1.4',
+            class: 'app__dimseg'
+          })
+          dmpath.style.stroke = `var(${s.color})`
+          chart.appendChild(dmpath)
+        }
+      }
+
+      // 悬停准星
+      if (state.hover) {
+        const hx = sx(state.hover.x)
+        chart.appendChild(
+          svgEl('line', {
+            class: 'app__crosshair',
+            x1: hx,
+            y1: M.t,
+            x2: hx,
+            y2: M.t + plotH
+          })
+        )
+        for (const item of state.hover.items) {
+          const yv = state.normalize ? normY(item.series, item.p.y) : item.p.y
+          const dot = svgEl('circle', { cx: sx(item.p.x), cy: sy(yv), r: 3 })
+          dot.style.fill = `var(${item.series.color})`
+          chart.appendChild(dot)
+        }
+      }
+
+      // 高亮行的虚线标识（表格 ↔ 图表联动）：在该行时间处画竖虚线
+      // 高亮行的纵向虚线（表格 ↔ 图表联动）：直接用该文件该行的时间戳定位，
+      // 不经 series 点找——点只在对应曲线有有效值时存在（该行缺值就整条消失），
+      // 且此前误用了 series.points（实际字段是 pts）导致 draw 抛错、虚线从不出现
+      const hl = state.highlight
+      if (hl) {
+        const hf = state.files.find(f => f.id === hl.fileId)
+        const hx = hf ? sx(hf.xs[hl.row]) : NaN
+        if (Number.isFinite(hx) && hx >= M.l && hx <= w - M.r) {
+          chart.appendChild(
+            svgEl('line', { class: 'app__markline', x1: hx, y1: M.t, x2: hx, y2: M.t + plotH })
+          )
+        }
+      }
+    }
+
+    const normCache = new Map()
+    function normY(series, y) {
+      const key = `${series.key}:${state.view.x0}:${state.view.x1}:${state.dataVer}`
+      let range = normCache.get(key)
+      if (!range) {
+        let lo = Infinity
+        let hi = -Infinity
+        for (const p of series.pts) {
+          const xv = xDisp(p.x)
+          if (xv < state.view.x0 || xv > state.view.x1) continue
+          if (p.y < lo) lo = p.y
+          if (p.y > hi) hi = p.y
+        }
+        range = [lo, hi]
+        normCache.set(key, range)
+      }
+      const [lo, hi] = range
+      if (!Number.isFinite(lo) || hi === lo) return 0.5
+      return (y - lo) / (hi - lo)
+    }
+
+    /** 数值显示：一律完整数字 + 千分位，绝不用科学计数法
+     * （原始文件里可能是 µW 这类大数，1.8e+6 既难读也容易被当成错误值） */
+    function fmtNum(v) {
+      if (v == null || !Number.isFinite(v)) return '—'
+      const a = Math.abs(v)
+      const whole = Number.isInteger(v)
+      let s
+      if (a >= 1e6) s = v.toFixed(0)
+      else if (a >= 1000) s = whole ? v.toFixed(0) : v.toFixed(1)
+      else if (a >= 10) s = whole ? v.toFixed(0) : v.toFixed(1)
+      else if (a >= 1) s = v.toFixed(2)
+      else s = v.toFixed(3)
+      const parts = s.split('.')
+      const grouped = parts[0].replace(/\B(?=(\d{3})+(?!\d))/g, ',')
+      return parts.length > 1 ? grouped + '.' + parts[1] : grouped
+    }
+
+    // ---------- 悬停明细 ----------
+    function nearestWithin(series, x, tol) {
+      const pts = series.pts
+      if (!pts.length) return null
+      let lo = 0
+      let hi = pts.length - 1
+      while (lo < hi) {
+        const mid = (lo + hi) >> 1
+        if (pts[mid].x < x) lo = mid + 1
+        else hi = mid
+      }
+      let best = pts[lo]
+      if (lo > 0 && Math.abs(pts[lo - 1].x - x) < Math.abs(best.x - x)) best = pts[lo - 1]
+      return Math.abs(best.x - x) <= tol ? best : null
+    }
+
+    /** 命中测试：给定横坐标，返回各可见曲线上最近的采样点 */
+    function itemsAt(clientX) {
+      if (!chart || !state.domain || !state.view) return null
+      const rect = chart.getBoundingClientRect()
+      const px = ((clientX - rect.left) / rect.width) * (chart.clientWidth || rect.width)
+      const plotW = Math.max(10, (chart.clientWidth || 900) - M.l - M.r)
+      const t = (px - M.l) / plotW
+      if (t < 0 || t > 1) return null
+      const x = unX(state.view.x0 + t * (state.view.x1 - state.view.x0))
+      const tol = ((state.view.x1 - state.view.x0) / plotW) * 8
+      const items = []
+      for (const s of state.series) {
+        if (!s.visible) continue
+        const p = nearestWithin(s, x, tol)
+        if (p) items.push({ series: s, p })
+      }
+      return { px, rect, items }
+    }
+
+    function onMove(ev) {
+      if (!chart || !state.domain || !state.view) return
+      const hit = itemsAt(ev.clientX)
+      if (!hit || !hit.items.length) {
+        state.hover = null
+        tip.hidden = true
+        draw()
+        return
+      }
+      const px = hit.px
+      const rect = hit.rect
+      const items = hit.items
+      state.hover = { x: items[0].p.x, items }
+
+      while (tip.firstChild) tip.removeChild(tip.firstChild)
+      const head = document.createElement('div')
+      head.className = 'app__tip-head'
+      head.textContent =
+        fmtClock(items[0].p.x) + (items[0].p.raw ? ' · 第 ' + (items[0].p.row + 1) + ' 行' : '')
+      tip.appendChild(head)
+
+      for (const it of items) {
+        const f = state.files.find(x => x.id === it.series.fileId)
+        const row = document.createElement('div')
+        row.className = 'app__tip-row'
+        const key = document.createElement('span')
+        key.className = 'app__tip-key'
+        const dot = document.createElement('i')
+        dot.className = 'app__tip-dot'
+        dot.style.setProperty('--tip-signal', `var(${it.series.color})`)
+        key.appendChild(dot)
+        const label = document.createElement('span')
+        label.textContent =
+          state.files.length > 1 && f ? f.name + ' / ' + it.series.name : it.series.name
+        key.appendChild(label)
+        // 明细显示原始单元格文本（完整精度、不做舍入），缺值时退回格式化数值
+        const cell = it.p.raw ? it.p.raw[it.p.col] : null
+        const val = document.createElement('span')
+        val.textContent =
+          cell != null && String(cell).trim() !== '' ? String(cell) : fmtNum(it.p.y)
+        row.appendChild(key)
+        row.appendChild(val)
+        tip.appendChild(row)
+      }
+
+      tip.hidden = false
+      const wrapW = chart.clientWidth || 900
+      const left = Math.min(Math.max(px + 14, 8), wrapW - (tip.offsetWidth || 200) - 8)
+      tip.style.left = `${left}px`
+      tip.style.top = `${Math.max(
+        8,
+        ((ev.clientY - rect.top) / rect.height) * (chart.clientHeight || 420) - 10
+      )}px`
+      draw()
+    }
+
+    function escapeHtml(s) {
+      return String(s).replace(
+        /[&<>"]/g,
+        c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])
+      )
+    }
+
+    // ---------- 缩放 / 平移 ----------
+    let lastDragMoved = false
+    function zoomAt(frac, factor) {
+      if (!state.domain || !state.view) return
+      const { x0, x1 } = state.view
+      const span = x1 - x0
+      const anchor = x0 + frac * span
+      const next = span * factor
+      state.view.x0 = anchor - frac * next
+      state.view.x1 = anchor + (1 - frac) * next
+      clampView()
+      normCache.clear()
+      draw()
+    }
+
+    function resetView() {
+      if (!state.domain) return
+      state.view = { x0: state.domain.x0, x1: state.domain.x1 }
+      normCache.clear()
+      draw()
+    }
+
+    if (chart) {
+      chart.addEventListener(
+        'wheel',
+        ev => {
+          if (!state.view) return
+          ev.preventDefault()
+          const rect = chart.getBoundingClientRect()
+          const px = ((ev.clientX - rect.left) / rect.width) * (chart.clientWidth || rect.width)
+          const frac = Math.min(
+            1,
+            Math.max(0, (px - M.l) / Math.max(10, chart.clientWidth - M.l - M.r))
+          )
+          zoomAt(frac, ev.deltaY > 0 ? 1.2 : 1 / 1.2)
+        },
+        { passive: false }
+      )
+
+      let drag = null
+      chart.addEventListener('pointerdown', ev => {
+        if (!state.view) return
+        drag = { x: ev.clientX, x0: state.view.x0, x1: state.view.x1, moved: false }
+        try {
+          chart.setPointerCapture(ev.pointerId)
+        } catch (e) { }
+      })
+      chart.addEventListener('pointermove', ev => {
+        if (!chart) return
+        if (drag) {
+          if (Math.abs(ev.clientX - drag.x) > 4) drag.moved = true
+          const rect = chart.getBoundingClientRect()
+          const plotW = Math.max(10, (chart.clientWidth || 900) - M.l - M.r)
+          const dx = ((ev.clientX - drag.x) / rect.width) * (chart.clientWidth || 900)
+          const span = drag.x1 - drag.x0
+          const shift = (dx / plotW) * span
+          state.view.x0 = drag.x0 - shift
+          state.view.x1 = drag.x1 - shift
+          clampView()
+          normCache.clear()
+          draw()
+          tip.hidden = true
+          return
+        }
+        onMove(ev)
+      })
+      chart.addEventListener('pointerup', ev => {
+        lastDragMoved = !!(drag && drag.moved)
+        drag = null
+        try {
+          chart.releasePointerCapture(ev.pointerId)
+        } catch (e) { }
+      })
+      // 点击图表 → 表格跳到对应条目并高亮（拖动过就不算点击）；再次点击同一
+      // 强调位置则取消强调（与表格侧 toggleHighlight 行为一致）
+      chart.addEventListener('click', ev => {
+        if (lastDragMoved) {
+          lastDragMoved = false
+          return
+        }
+        if (!state.view) return
+        const hit = itemsAt(ev.clientX)
+        if (!hit || !hit.items.length) return
+        const it = hit.items[0]
+        toggleChartHighlight(it.series.fileId, it.p.row)
+      })
+      chart.addEventListener('pointerleave', () => {
+        state.hover = null
+        tip.hidden = true
+        draw()
+      })
+      chart.addEventListener('dblclick', resetView)
+    }
+
+    // [ranks] 排行榜：按包名聚合全部载入行，每行按 1 秒计
+    const RANK_DEFS = [
+      { title: '前台时长', note: '包名出现的样本数（1 样本 = 1 秒）', agg: 'count', fmt: 'dur' },
+      { title: '平均功耗', note: '仅放电样本', agg: 'mean', col: 'batt_power_w', need: 'dis', fmt: 'w' },
+      { title: '峰值功耗', note: '仅放电样本', agg: 'max', col: 'batt_power_w', need: 'dis', fmt: 'w' },
+      { title: '平均电流', note: '仅放电样本，取绝对值', agg: 'absmean', col: 'batt_current_ma', need: 'dis', fmt: 'a' },
+      { title: 'CPU 负载', note: 'psi_cpu_some 均值', agg: 'mean', col: 'psi_cpu_some', fmt: 'pct' },
+      { title: 'GPU 占用', note: 'gpu_busy_pct 均值', agg: 'mean', col: 'gpu_busy_pct', fmt: 'pct' },
+      { title: 'CPU 温度', note: '均值', agg: 'mean', col: 'cpu_temp', fmt: 'c' },
+      { title: '电池温度', note: '均值', agg: 'mean', col: 'batt_temp', fmt: 'c' },
+      { title: '唤醒次数', note: '累计', agg: 'sum', col: 'wakeups', fmt: 'int' },
+      { title: '亮屏占比', note: 'screen = 1 的样本比例', agg: 'ratio', col: 'screen_on', fmt: 'pct' }
+    ]
+
+    function fmtDur(sec) {
+      if (sec < 60) return sec.toFixed(0) + ' 秒'
+      return Math.floor(sec / 60) + ' 分 ' + Math.round(sec % 60) + ' 秒'
+    }
+
+    function fmtRank(def, v) {
+      if (def.fmt === 'dur') return fmtDur(v)
+      if (def.fmt === 'w') return fmtNum(v) + ' W'
+      if (def.fmt === 'a') return fmtNum(v) + ' A'
+      if (def.fmt === 'pct') return fmtNum(v) + '%'
+      if (def.fmt === 'c') return fmtNum(v) + ' ℃'
+      return fmtNum(v)
+    }
+
+    function computeRanks() {
+      const stats = RANK_DEFS.map(def => ({ def, byPkg: new Map() }))
+      for (const f of state.files) {
+        const idx = {}
+        f.headers.forEach((h, i) => { if (!(h in idx)) idx[h] = i })
+        const pkgI = 'package' in idx ? idx.package : -1
+        const chgI = 'charge' in idx ? idx.charge : -1
+        for (let r = 0; r < f.rows.length; r++) {
+          const row = f.rows[r]
+          const pkg = (pkgI >= 0 ? String(row[pkgI]).trim() : '') || '(无前台)'
+          const isDis = chgI < 0 || row[chgI] === 'discharging'
+          for (const st of stats) {
+            const d = st.def
+            if (d.need === 'dis' && !isDis) continue
+            let e = st.byPkg.get(pkg)
+            if (!e) {
+              e = { sum: 0, max: -Infinity, count: 0, ones: 0, rows: 0 }
+              st.byPkg.set(pkg, e)
+            }
+            e.rows++
+            if (d.agg === 'count') continue
+            if (d.agg === 'ratio') {
+              if (toNumber(row[idx[d.col]]) === 1) e.ones++
+              continue
+            }
+            const v = d.col in idx ? toNumber(row[idx[d.col]]) : null
+            if (v === null) continue
+            e.count++
+            e.sum += d.agg === 'absmean' ? Math.abs(v) : v
+            if (v > e.max) e.max = v
+          }
+        }
+      }
+      return stats.map(({ def, byPkg }) => {
+        const list = []
+        for (const [pkg, e] of byPkg) {
+          let v = null
+          if (def.agg === 'count') v = e.rows
+          else if (def.agg === 'ratio') v = e.rows ? (e.ones / e.rows) * 100 : null
+          else if (e.count) v = def.agg === 'max' ? e.max : e.sum / e.count
+          if (v != null) list.push({ pkg, v })
+        }
+        list.sort((a, b) => b.v - a.v)
+        return { def, list: list.slice(0, 8) }
+      })
+    }
+
+    function renderRanks() {
+      const panel = $('rankPanel')
+      const box = $('ranks')
+      panel.hidden = !state.files.length
+      while (box.firstChild) box.removeChild(box.firstChild)
+      if (!state.files.length) return
+      for (const { def, list } of computeRanks()) {
+        const card = document.createElement('div')
+        card.className = 'app__rank'
+        const title = document.createElement('p')
+        title.className = 'app__rank-title'
+        title.textContent = def.title
+        card.appendChild(title)
+        const note = document.createElement('p')
+        note.className = 'app__rank-note'
+        note.textContent = def.note
+        card.appendChild(note)
+        if (!list.length) {
+          const empty = document.createElement('p')
+          empty.className = 'app__rank-note'
+          empty.textContent = '无样本'
+          card.appendChild(empty)
+        }
+        for (let i = 0; i < list.length; i++) {
+          const row = document.createElement('div')
+          row.className = 'app__rank-item'
+          const no = document.createElement('span')
+          no.className = 'app__rank-no'
+          no.textContent = String(i + 1)
+          const name = document.createElement('span')
+          name.className = 'app__rank-name'
+          name.textContent = list[i].pkg
+          const val = document.createElement('span')
+          val.className = 'app__rank-val'
+          val.textContent = fmtRank(def, list[i].v)
+          row.appendChild(no)
+          row.appendChild(name)
+          row.appendChild(val)
+          card.appendChild(row)
+        }
+        box.appendChild(card)
+      }
+    }
+
+    // ---------- 文件列表与曲线开关 ----------
+    function tag(text, variant) {
+      const el = document.createElement('span')
+      el.className = 'app__badge' + (variant ? ' app__badge--' + variant : '')
+      el.textContent = text
+      return el
+    }
+
+    function renderLegend() {
+      const panel = $('legendPanel')
+      panel.hidden = !state.files.length
+      const box = $('files')
+      while (box.firstChild) box.removeChild(box.firstChild)
+
+      for (const f of state.files) {
+        const card = document.createElement('div')
+        card.className = 'app__file'
+
+        const head = document.createElement('div')
+        head.className = 'app__file-head'
+        const name = document.createElement('span')
+        name.className = 'app__file-name'
+        name.textContent = f.name
+        head.appendChild(name)
+
+        const stat = document.createElement('span')
+        stat.className = 'app__stat'
+        stat.textContent = f.rows.length
+          ? `${f.rows.length} 行 · ${f.headers.length} 列 · ${f.xMode === 'time' ? '时间轴' : '行号轴'
+          }`
+          : '无数据行'
+        head.appendChild(stat)
+        head.appendChild(
+          tag(
+            f.status === 'error' ? '无法解析' : f.status === 'warn' ? '存在警告' : '正常',
+            f.status === 'error' ? 'danger' : f.status === 'warn' ? 'warn' : 'ok'
+          )
+        )
+
+        const mine = state.series.filter(s => s.fileId === f.id)
+        if (mine.length) {
+          const allOn = mine.every(s => s.visible)
+          const toggleAll = document.createElement('button')
+          toggleAll.type = 'button'
+          toggleAll.className = 'app__btn'
+          toggleAll.textContent = allOn ? '全部隐藏' : '全部显示'
+          toggleAll.addEventListener('click', () => {
+            mine.forEach(s => (s.visible = !allOn))
+            rebuild()
+          })
+          head.appendChild(toggleAll)
+        }
+
+        const remove = document.createElement('button')
+        remove.type = 'button'
+        remove.className = 'app__btn'
+        remove.textContent = '移除文件'
+        remove.addEventListener('click', () => {
+          state.files = state.files.filter(x => x.id !== f.id)
+          state.series = state.series.filter(s => s.fileId !== f.id)
+          rebuild(true)
+        })
+        head.appendChild(remove)
+        card.appendChild(head)
+
+        if (f.message) {
+          const note = document.createElement('p')
+          note.className = 'app__note' + (f.status === 'error' ? ' app__note--danger' : '')
+          note.textContent = (f.status === 'error' ? '无法解析：' : '注意：') + f.message
+          card.appendChild(note)
+        }
+
+        if (mine.length) {
+          const list = document.createElement('div')
+          list.className = 'app__chips'
+          for (const s of mine) {
+            const chip = document.createElement('button')
+            chip.type = 'button'
+            chip.className = 'app__chip'
+            chip.setAttribute('aria-pressed', String(s.visible))
+            chip.style.setProperty('--chip-signal', `var(${s.color})`)
+            const mark = document.createElement('i')
+            mark.className = 'app__chip__mark'
+            chip.appendChild(mark)
+            const label = document.createElement('span')
+            label.textContent = s.name
+            chip.appendChild(label)
+            chip.addEventListener('click', () => {
+              s.visible = !s.visible
+              rebuild()
+            })
+            list.appendChild(chip)
+          }
+          card.appendChild(list)
+        }
+        box.appendChild(card)
+      }
+      renderAverages()
+    }
+
+    // ---------- 曲线平均值 ----------
+    /** 按曲线种类统计平均值：跨文件合并（不分文件），只算当前可见的曲线，
+     * 隐藏的曲线与同类隐藏文件的点都不计入 */
+    function renderAverages() {
+      const box = $('avgScroll')
+      box.hidden = !state.showAvg
+      const head = $('avgHead')
+      const body = $('avgBody')
+      head.innerHTML = ''
+      body.innerHTML = ''
+      if (!state.showAvg) return
+
+      const byName = new Map()
+      for (const s of state.series) {
+        if (!s.visible) continue
+        let e = byName.get(s.name)
+        if (!e) {
+          e = { color: s.color, sum: 0, count: 0, files: new Set() }
+          byName.set(s.name, e)
+        }
+        for (const p of s.pts) {
+          e.sum += p.y
+          e.count++
+        }
+        e.files.add(s.fileId)
+      }
+
+      if (!byName.size) {
+        const hr = document.createElement('tr')
+        const td = document.createElement('td')
+        td.colSpan = 4
+        td.textContent = '没有可见曲线'
+        hr.appendChild(td)
+        head.appendChild(hr)
+        return
+      }
+
+      const cols = ['曲线', '平均值', '文件', '采样点']
+      const hr = document.createElement('tr')
+      for (const c of cols) {
+        const th = document.createElement('th')
+        th.setAttribute('scope', 'col')
+        th.textContent = c
+        hr.appendChild(th)
+      }
+      head.appendChild(hr)
+
+      for (const [name, e] of byName) {
+        const tr = document.createElement('tr')
+
+        const nameTd = document.createElement('td')
+        const dot = document.createElement('i')
+        dot.className = 'app__tip-dot'
+        dot.style.setProperty('--tip-signal', `var(${e.color})`)
+        nameTd.appendChild(dot)
+        nameTd.appendChild(document.createTextNode(' ' + name))
+        tr.appendChild(nameTd)
+
+        const avgTd = document.createElement('td')
+        avgTd.className = 'is-num'
+        avgTd.textContent = e.count ? fmtNum(e.sum / e.count) : '—'
+        tr.appendChild(avgTd)
+
+        const fileTd = document.createElement('td')
+        fileTd.className = 'is-num'
+        fileTd.textContent = String(e.files.size)
+        tr.appendChild(fileTd)
+
+        const ptTd = document.createElement('td')
+        ptTd.className = 'is-num'
+        ptTd.textContent = fmtNum(e.count)
+        tr.appendChild(ptTd)
+
+        body.appendChild(tr)
+      }
+    }
+
+    // [table-header] 列名精简映射 + 悬停提示（「详细列名」开关切回原始列名）
+    const SHORT_NAMES = {
+      timestamp: 'ts', package: 'pkg', charge: 'chg', screen_on: 'screen',
+      batt_temp: 'batt℃', cpu_temp: 'cpu℃', thermal_cap_pct: 'cap', thermal_free_pct: 'free',
+      clg_active: 'clg', psi_cpu_some: 'cpu_some', psi_io_some: 'io_some',
+      psi_mem_some: 'mem_some', gpu_busy_pct: 'gpu', batt_voltage_v: 'batt_v',
+      batt_current_ma: 'batt_a', batt_power_w: 'batt_w', wakeups: 'wake',
+      migrations: 'mig', freq_trans: 'freq'
+    }
+    const HEADER_TIPS = {
+      timestamp: '采样时刻（设备本地时间）', type: '行类型，snap = 每秒快照',
+      mode: '该秒调度的模式', package: '前台应用包名', charge: '充放电状态',
+      screen_on: '亮屏状态：1 亮 0 灭', batt_temp: '电池温度（℃）', cpu_temp: 'CPU 温度（℃）',
+      thermal_cap_pct: '热保护压制上限（%），100 = 未压制', thermal_free_pct: '热保护豁免阈值（%）',
+      clg_active: 'CLG 调频器是否接管（1/0）', psi_cpu_some: 'CPU 压力：有任务被卡的时间占比',
+      psi_io_some: 'IO 压力：有任务被卡的时间占比', psi_mem_some: '内存压力：有任务被卡的时间占比',
+      gpu_busy_pct: 'GPU 占用率（%）', batt_voltage_v: '电池电压（V，单节域）',
+      batt_current_ma: '电池电流（A；放电为正、充电为负）', batt_power_w: '电池功率（W = |电流| × 电压）',
+      wakeups: '每秒 CPU 唤醒次数', migrations: '每秒跨核迁移次数',
+      freq_trans: '每秒调频次数（内核缺 tracepoint 时恒为 0）', fps: 'FAS 实测帧率，未启用为 -'
+    }
+    // charge 值精简（信息显示非表头；「详细列名」开时显示原文）
+    const CHG_SHORT = { charging: 'chg', discharging: 'dis', full: 'full', not_charging: 'nchg' }
+
+    // ---------- 表格 ----------
+    /** 表头单元格：精简名/全名 + 悬停提示（反查全名取提示） */
+    function headerMeta(c) {
+      const full = Object.keys(SHORT_NAMES).find(k => SHORT_NAMES[k] === c) || c
+      return {
+        label: state.shortNames ? SHORT_NAMES[full] || full : full,
+        tip:
+          HEADER_TIPS[full] ||
+          (c === '#' ? '行号（文件内序号）' : c === '文件' ? '数据来源文件' : '')
+      }
+    }
+
+    function tableColumns() {
+      const cols = []
+      if (state.files.length > 1 && state.showFileCol) cols.push('文件')
+      cols.push('#')
+      for (const f of state.files) for (const h of f.headers) if (!cols.includes(h)) cols.push(h)
+      return state.hiddenCols.size ? cols.filter(c => !state.hiddenCols.has(c)) : cols
+    }
+
+    /** 渲染 [from, to) 的行。10 万行场景下逐格 createElement 太慢——改成拼
+     * HTML 字符串后 insertAdjacentHTML 单次解析；data-* 行身份、隐藏列、
+     * charge 精简、数值列类名与旧实现逐项一致 */
+    function renderRows(cols, from, to) {
+      const colSet = new Set(cols)
+      const showFile = state.files.length > 1 && state.showFileCol
+      let html = ''
+      let cursor = 0
+      for (const f of state.files) {
+        if (!f.rows.length) continue
+        const numCls = f.headers.map((h, i) => (f.numeric[i] ? ' class="is-num"' : ''))
+        for (let r = 0; r < f.rows.length; r++) {
+          const global = cursor + r
+          if (global < from || global >= to) continue
+          const row = f.rows[r]
+          if (!rowVisible(f, r, row)) continue
+          // 行身份：图表点击定位到行、行点击反查都靠它
+          html += `<tr data-f="${f.id}" data-r="${r}" data-g="${global}">`
+          if (showFile) html += `<td>${escapeHtml(f.name)}</td>`
+          html += `<td>${r + 1}</td>`
+          f.headers.forEach((h, i) => {
+            // 隐藏列跳过单元格：只滤表头会出现表头与数据错列
+            if (!colSet.has(h)) return
+            const raw = row[i]
+            const text = state.shortNames && h === 'charge' ? CHG_SHORT[raw] || raw : raw
+            html += `<td${numCls[i]}>${escapeHtml(text)}</td>`
+          })
+          html += '</tr>'
+        }
+        cursor += f.rows.length
+      }
+      $('tbody').insertAdjacentHTML('beforeend', html)
+    }
+
+    /** 列显示菜单：列出全部列（含已隐藏），勾选集按列名记忆、跨文件切换保留 */
+    function renderColMenu() {
+      const panel = $('colPanel')
+      while (panel.firstChild) panel.removeChild(panel.firstChild)
+      const all = []
+      for (const f of state.files) for (const h of f.headers) if (!all.includes(h)) all.push(h)
+      // 文件名列也纳入菜单：它由 showFileCol 单独驱动，勾选映射到该开关
+      if (state.files.length > 1) {
+        const label = document.createElement('label')
+        const box = document.createElement('input')
+        box.type = 'checkbox'
+        box.checked = state.showFileCol
+        box.addEventListener('change', () => {
+          state.showFileCol = box.checked
+          repaintTable()
+        })
+        label.appendChild(box)
+        label.appendChild(document.createTextNode('文件列'))
+        label.title = '数据来源文件'
+        panel.appendChild(label)
+      }
+      for (const c of all) {
+        const label = document.createElement('label')
+        const box = document.createElement('input')
+        box.type = 'checkbox'
+        box.checked = !state.hiddenCols.has(c)
+        box.addEventListener('change', () => {
+          if (box.checked) state.hiddenCols.delete(c)
+          else state.hiddenCols.add(c)
+          repaintTable()
+        })
+        const m = headerMeta(c)
+        label.appendChild(box)
+        label.appendChild(document.createTextNode(m.label))
+        label.title = m.tip || m.label
+        panel.appendChild(label)
+      }
+      if (!panel.firstChild) {
+        const p = document.createElement('p')
+        p.className = 'app__rank-note'
+        p.textContent = '暂无列'
+        panel.appendChild(p)
+      }
+    }
+
+    /** 表头（含精简名/悬停提示/隐藏开关） */
+    function renderTableHead() {
+      const cols = tableColumns()
+      const thead = $('thead')
+      while (thead.firstChild) thead.removeChild(thead.firstChild)
+      const hr = document.createElement('tr')
+      for (const c of cols) {
+        const th = document.createElement('th')
+        th.setAttribute('scope', 'col')
+        const m = headerMeta(c)
+        th.textContent = m.label
+        if (m.tip) th.title = m.tip
+        hr.appendChild(th)
+      }
+      thead.appendChild(hr)
+      $('table').classList.toggle('app__table--nohead', !state.showHead)
+      return cols
+    }
+
+    /** 是否有任一筛选生效（三级搜索/电源状态/亮屏）——统计口径与匹配扫描的总开关 */
+    const isFiltering = () =>
+      !!(
+        state.searchText.trim() ||
+        state.searchText2.trim() ||
+        state.searchText3.trim() ||
+        state.filterChg !== 'all' ||
+        state.filterScreen !== 'all'
+      )
+
+    /** 行可见性：状态筛选 + 三级搜索（各自任意列原文子串，全部同时满足） */
+    function rowVisible(f, r, row) {
+      if (state.filterChg !== 'all') {
+        const i = f.headers.indexOf('charge')
+        if (i >= 0 && row[i] !== state.filterChg) return false
+      }
+      if (state.filterScreen !== 'all') {
+        const i = f.headers.indexOf('screen_on')
+        if (i >= 0 && row[i] !== state.filterScreen) return false
+      }
+      const queries = [state.searchText, state.searchText2, state.searchText3]
+        .map(s => s.trim().toLowerCase())
+        .filter(Boolean)
+      if (!queries.length) return true
+      return queries.every(q => row.some(v => String(v).toLowerCase().includes(q)))
+    }
+
+    /** 筛选生效时的匹配总数（全量扫描，搜索输入已防抖） */
+    function countMatches() {
+      let n = 0
+      for (const f of state.files)
+        for (let r = 0; r < f.rows.length; r++) if (rowVisible(f, r, f.rows[r])) n++
+      return n
+    }
+
+    /** 按 rowsShown 重画（开关切换用，不推进块） */
+    function repaintTable() {
+      const cols = renderTableHead()
+      const tbody = $('tbody')
+      while (tbody.firstChild) tbody.removeChild(tbody.firstChild)
+      // 窗口语义：只重画 [renderFrom, rowsShown)，前缀深处的行不物化（10 万行）
+      renderRows(cols, state.renderFrom, state.rowsShown)
+      extendScanForMatches(cols)
+      const total = state.files.reduce((n, f) => n + f.rows.length, 0)
+      const filtering = isFiltering()
+      // 匹配总数与显示无关（只随数据/筛选变），复用 renderTable 的缓存结果
+      $('tableStat').textContent = total
+        ? `已显示 ${tbody.children.length} / ${state.matchedTotal} 行 · ${cols.length} 列${filtering ? ' · 筛选中' : ''}`
+        : '暂无数据'
+      const moreBtn = $('more')
+      if (moreBtn) moreBtn.hidden = state.rowsShown >= total
+      paintHighlight()
+      updateScrollBar()
+    }
+
+    function renderTable(reset) {
+      const total = state.files.reduce((n, f) => n + f.rows.length, 0)
+      let from = 0
+      if (reset) {
+        $('tbody').innerHTML = ''
+        state.rowsShown = 0
+        state.renderFrom = 0
+      } else {
+        from = state.rowsShown
+      }
+      state.rowsShown = Math.min(total, state.rowsShown + ROW_CHUNK)
+      const cols = renderTableHead()
+      const tbody = $('tbody')
+      if (reset) {
+        while (tbody.firstChild) tbody.removeChild(tbody.firstChild)
+        renderRows(cols, 0, state.rowsShown)
+      } else {
+        // 追加式：深跳转（ensureRendered 连补多块）不清已渲染内容——10 万行时
+        // 每块都清空重画是 O(n²)，页面会冻死
+        renderRows(cols, from, state.rowsShown)
+      }
+      // 筛选生效时前缀/窗口里可能凑不出可见行（如日志开头全是亮屏、筛息屏，
+      // 「继续载入」又是隐藏的）——继续向后扫直到凑够一块可见行或扫完。
+      // 只物化匹配行，DOM 规模随匹配数而非扫描量增长
+      extendScanForMatches(cols)
+      // 匹配总数要全量扫描（10 万行级很贵）：只在重置或筛选/数据变化后算一次，
+      // 追加块复用结果
+      const filtering = isFiltering()
+      if (reset || state.matchedDirty) {
+        state.matchedTotal = filtering ? countMatches() : total
+        state.matchedDirty = false
+      }
+      $('tableStat').textContent = total
+        ? `已显示 ${tbody.children.length} / ${state.matchedTotal} 行 · ${cols.length} 列${filtering ? ' · 筛选中' : ''}`
+        : '暂无数据'
+      const moreBtn = $('more')
+      if (moreBtn) moreBtn.hidden = state.rowsShown >= total
+      // 只在重置（整段重画）后刷高亮：追加块不含高亮行的新内容，且深跳转时
+      // 每块都全量遍历 tbody 是 O(n²)；最终由 setHighlight 自己刷一次
+      if (reset) paintHighlight()
+      updateScrollBar()
+    }
+
+    /** 筛选生效时的可见行兜底：当前已渲染不足 minShown 行就继续向后扫块，
+     * 直到凑够或扫完（renderRows 只物化匹配行，DOM 随匹配数增长）。
+     * 未筛选时不动作——顺序分块加载的语义不变 */
+    function extendScanForMatches(cols, minShown = ROW_CHUNK) {
+      if (!isFiltering()) return
+      const tbody = $('tbody')
+      let guard = 0
+      while (
+        tbody.children.length < minShown &&
+        state.rowsShown < totalRows() &&
+        guard++ < 400
+      ) {
+        const from = state.rowsShown
+        state.rowsShown = Math.min(totalRows(), state.rowsShown + ROW_CHUNK)
+        renderRows(cols, from, state.rowsShown)
+      }
+    }
+
+    // ---------- 图表 ↔ 表格 联动高亮 ----------
+    function totalRows() {
+      return state.files.reduce((n, f) => n + f.rows.length, 0)
+    }
+
+    /** 把高亮刷到已渲染的行上（未渲染的行由 ensureRendered 补）。
+     * 无高亮时直接返回：10 万行级的 tbody 上遍历一次就要几十毫秒 */
+    function paintHighlight() {
+      const hl = state.highlight
+      if (!hl) return
+      const rows = $('tbody').querySelectorAll('tr')
+      rows.forEach(tr => {
+        const on = tr.dataset.f === hl.fileId && tr.dataset.r === String(hl.row)
+        tr.classList.toggle('is-active', on)
+        if (on) tr.setAttribute('aria-selected', 'true')
+        else tr.removeAttribute('aria-selected')
+      })
+    }
+
+    /** 目标行可能还没渲染（表格是分块追加的），先补齐再定位。
+     * 10 万行场景的关键：远距跳转**不逐块补齐**（把目标前几万行全部物化进
+     * DOM 会让页面冻结，且巨大 tbody 拖慢之后的一切操作）——直接把渲染窗口
+     * 切到目标附近（上 2000 行 + 下一块）；已渲染跨度超限同样切窗 */
+    function ensureRendered(global) {
+      if (
+        global - state.rowsShown > 4000 ||
+        global < state.renderFrom ||
+        state.rowsShown - state.renderFrom > 20000
+      ) {
+        renderWindowAround(global)
+        return
+      }
+      let guard = 0
+      while (global >= state.rowsShown && state.rowsShown < totalRows() && guard++ < 200) {
+        renderTable(false)
+      }
+    }
+
+    /** 把渲染窗口切到 global 附近：只物化 [global-2000, global+ROW_CHUNK)，
+     * 行号与 data-* 身份保持全量语义，匹配总数缓存不受影响 */
+    function renderWindowAround(global) {
+      const start = Math.max(0, global - 2000)
+      state.renderFrom = start
+      state.rowsShown = Math.min(totalRows(), global + ROW_CHUNK)
+      const cols = renderTableHead()
+      const tbody = $('tbody')
+      while (tbody.firstChild) tbody.removeChild(tbody.firstChild)
+      renderRows(cols, start, state.rowsShown)
+      // 窗口内可能凑不出匹配行（点击的是被筛掉的点）——同样向后兜底
+      extendScanForMatches(cols)
+      const filtering = isFiltering()
+      $('tableStat').textContent = totalRows()
+        ? `已显示 ${tbody.children.length} / ${state.matchedTotal} 行 · ${cols.length} 列${filtering ? ' · 筛选中' : ''}`
+        : '暂无数据'
+      updateScrollBar()
+    }
+
+    /** 设置高亮：页面**永不**滚动（2026-09-19 用户要求）；但原始数据的内联滚动
+     * 容器（#tableScroll）要自动把目标行滚到垂直居中——用 scrollTop 相对调整而非
+     * scrollIntoView，后者会连页面一起滚 */
+    function setHighlight(fileId, row, scroll) {
+      state.highlight = { fileId, row }
+      if (scroll) {
+        let cursor = 0
+        for (const f of state.files) {
+          if (f.id === fileId) break
+          cursor += f.rows.length
+        }
+        ensureRendered(cursor + row)
+      }
+      paintHighlight()
+      draw()
+      if (scroll) {
+        const box = $('tableScroll')
+        const target = $('tbody').querySelector(`tr[data-f="${fileId}"][data-r="${row}"]`)
+        if (box && target) {
+          const br = box.getBoundingClientRect()
+          const trr = target.getBoundingClientRect()
+          box.scrollTop += trr.top - br.top - box.clientHeight / 2 + trr.height / 2
+        }
+      }
+    }
+
+    /** 图表点击的强调切换：同一位置再点一次取消（对应表格侧的 toggleHighlight） */
+    function toggleChartHighlight(fileId, row) {
+      const hl = state.highlight
+      if (hl && hl.fileId === fileId && hl.row === row) {
+        state.highlight = null
+        paintHighlight()
+        draw()
+      } else {
+        setHighlight(fileId, row, true)
+      }
+    }
+
+    function toggleHighlight(fileId, row) {
+      const hl = state.highlight
+      if (hl && hl.fileId === fileId && hl.row === row) state.highlight = null
+      else state.highlight = { fileId, row }
+      paintHighlight()
+      draw()
+    }
+
+    // ---------- 列表滚动进度指示条 ----------
+    function updateScrollBar() {
+      const box = $('tableScroll')
+      const bar = $('scrollBar')
+      if (!box || !bar) return
+      const max = box.scrollHeight - box.clientHeight
+      const pct = max > 4 ? Math.min(100, Math.max(0, (box.scrollTop / max) * 100)) : 100
+      bar.style.setProperty('--ak-progress-value', pct.toFixed(1) + '%')
+      bar.setAttribute('aria-valuenow', String(Math.round(pct)))
+    }
+
+    // ---------- 组装 ----------
+    function rebuild(resetTable = true) {
+      state.dataVer++ // 数据或可见性变化：失效图表绘制缓存
+      state.matchedDirty = true
+      // 高亮的文件被移除时就地清空，避免留下一个永远匹配不到的状态
+      if (state.highlight && !state.files.some(f => f.id === state.highlight.fileId))
+        state.highlight = null
+      computeDomain()
+      if (state.fitY || !state.view) normCache.clear()
+      renderLegend()
+      renderRanks()
+      renderColMenu()
+      renderTable(resetTable)
+      const drawn = state.series.filter(s => s.visible).length
+      $('meta').textContent = state.files.length
+        ? `${state.files.length} 个文件 · ${drawn}/${state.series.length} 条曲线 · ${state.domain
+          ? fmtClock(unX(state.domain.x0)).slice(0, 8) +
+          ' → ' +
+          fmtClock(unX(state.domain.x1)).slice(0, 8)
+          : '无有效数据'
+        }`
+        : '等待载入 · 默认读取同目录 status.csv'
+      draw()
+    }
+
+    // ---------- 交互绑定 ----------
+    $('pick').addEventListener('click', () => $('fileInput').click())
+    $('fileInput').addEventListener('change', async ev => {
+      for (const file of ev.target.files) addFile(file.name, await file.text())
+      ev.target.value = ''
+    })
+    $('clear').addEventListener('click', clearAll)
+    $('reset').addEventListener('click', resetView)
+    $('zoomIn').addEventListener('click', () => zoomAt(0.5, 1 / 1.6))
+    $('zoomOut').addEventListener('click', () => zoomAt(0.5, 1.6))
+    $('fitY').addEventListener('click', ev => {
+      state.fitY = !state.fitY
+      ev.currentTarget.setAttribute('aria-pressed', String(state.fitY))
+      ev.currentTarget.classList.toggle('app__btn--on', state.fitY)
+      draw()
+    })
+    $('normalize').addEventListener('click', ev => {
+      state.normalize = !state.normalize
+      ev.currentTarget.setAttribute('aria-pressed', String(state.normalize))
+      ev.currentTarget.classList.toggle('app__btn--on', state.normalize)
+      normCache.clear()
+      draw()
+    })
+    $('avgToggle').addEventListener('click', ev => {
+      state.showAvg = !state.showAvg
+      ev.currentTarget.setAttribute('aria-pressed', String(state.showAvg))
+      ev.currentTarget.classList.toggle('app__btn--on', state.showAvg)
+      renderAverages()
+    })
+    // 断裂轴开关：视图作废重算（computeDomain 顶部会重建 gapMap）
+    $('gapToggle').addEventListener('click', ev => {
+      state.gapSkip = !state.gapSkip
+      ev.currentTarget.setAttribute('aria-pressed', String(state.gapSkip))
+      ev.currentTarget.classList.toggle('app__btn--on', state.gapSkip)
+      state.view = null
+      computeDomain()
+      normCache.clear()
+      draw()
+    })
+    const moreBtn = $('more')
+    if (moreBtn) moreBtn.addEventListener('click', () => renderTable(false))
+    // 表头 / 文件名列 / 详细列名：只重画，不推进载入块
+    $('headToggle').addEventListener('click', ev => {
+      state.showHead = !state.showHead
+      ev.currentTarget.setAttribute('aria-pressed', String(state.showHead))
+      ev.currentTarget.classList.toggle('app__btn--on', state.showHead)
+      repaintTable()
+    })
+    $('fileColToggle').addEventListener('click', ev => {
+      state.showFileCol = !state.showFileCol
+      ev.currentTarget.setAttribute('aria-pressed', String(state.showFileCol))
+      ev.currentTarget.classList.toggle('app__btn--on', state.showFileCol)
+      repaintTable()
+    })
+    $('nameToggle').addEventListener('click', ev => {
+      state.shortNames = !state.shortNames
+      ev.currentTarget.setAttribute('aria-pressed', String(state.shortNames))
+      ev.currentTarget.classList.toggle('app__btn--on', state.shortNames)
+      repaintTable()
+    })
+    // 搜索（防抖，三级共用一套逻辑）与筛选提交：表格重扫 + 图表重画
+    // （被筛掉的曲线段要降透明，必须 draw 才能反映到图上）
+    const commitFilter = () => {
+      renderTable(true)
+      draw()
+    }
+    const bindSearch = (id, key) => {
+      let timer = 0
+      $(id).addEventListener('input', ev => {
+        clearTimeout(timer)
+        timer = setTimeout(() => {
+          state[key] = ev.target.value
+          commitFilter()
+        }, 150)
+      })
+    }
+    bindSearch('tableSearch', 'searchText')
+    bindSearch('tableSearch2', 'searchText2')
+    bindSearch('tableSearch3', 'searchText3')
+    $('chgFilter').addEventListener('change', ev => {
+      state.filterChg = ev.target.value
+      commitFilter()
+    })
+    $('screenFilter').addEventListener('change', ev => {
+      state.filterScreen = ev.target.value
+      commitFilter()
+    })
+    // 列显示菜单开合；点面板外关闭
+    $('colMenuBtn').addEventListener('click', ev => {
+      const panel = $('colPanel')
+      const show = panel.hidden
+      panel.hidden = !show
+      ev.currentTarget.setAttribute('aria-expanded', String(show))
+    })
+    document.addEventListener('click', ev => {
+      const panel = $('colPanel')
+      const btn = $('colMenuBtn')
+      if (panel.hidden || !(ev.target instanceof Node)) return
+      if (panel.contains(ev.target) || btn.contains(ev.target)) return
+      panel.hidden = true
+      btn.setAttribute('aria-expanded', 'false')
+    })
+    // 点击表格条目：切换高亮（再点一次同一行则取消）
+    $('tbody').addEventListener('click', ev => {
+      const tr = ev.target && ev.target.closest ? ev.target.closest('tr') : null
+      if (!tr || !tr.dataset || !tr.dataset.f) return
+      toggleHighlight(tr.dataset.f, Number(tr.dataset.r))
+    })
+    $('tableScroll').addEventListener('scroll', updateScrollBar)
+
+    // 拖放
+    const drop = $('drop')
+    let dragDepth = 0
+    window.addEventListener('dragenter', ev => {
+      ev.preventDefault()
+      dragDepth++
+      drop.hidden = false
+    })
+    window.addEventListener('dragover', ev => ev.preventDefault())
+    window.addEventListener('dragleave', ev => {
+      ev.preventDefault()
+      dragDepth = Math.max(0, dragDepth - 1)
+      if (!dragDepth) drop.hidden = true
+    })
+    window.addEventListener('drop', async ev => {
+      ev.preventDefault()
+      dragDepth = 0
+      drop.hidden = true
+      const items = ev.dataTransfer && ev.dataTransfer.files
+      if (!items || !items.length) return
+      for (const file of items) addFile(file.name, await file.text())
+    })
+
+    window.addEventListener('resize', () => draw())
+
+    // 独立页面没有控制台时也要能看见错误：捕获一次显示在页面上（去重）
+    let errorShown = false
+    window.addEventListener('error', ev => {
+      if (errorShown) return
+      errorShown = true
+      const box = $('notice')
+      if (!box) return
+      const note = document.createElement('div')
+      note.className = 'app__note app__note--danger'
+      const title = document.createElement('p')
+      title.className = 'app__note-title'
+      title.textContent = '脚本错误'
+      const msg = document.createElement('p')
+      msg.className = 'app__note-msg'
+      msg.textContent =
+        (ev.message || '未知') + (ev.filename ? ' @ ' + ev.filename + ':' + ev.lineno : '')
+      note.appendChild(title)
+      note.appendChild(msg)
+      box.appendChild(note)
+    })
+
+    // ---------- 默认载入同目录 status.csv ----------
+    async function boot() {
+      try {
+        const res = await fetch('status.csv', { cache: 'no-store' })
+        if (!res.ok) throw new Error(`HTTP ${res.status}`)
+        addFile('status.csv', await res.text(), { auto: true })
+      } catch (e) {
+        // const box = $('notice')
+        // const note = document.createElement('div')
+        // note.className = 'app__note'
+        // const title = document.createElement('p')
+        // title.className = 'app__note-title'
+        // title.textContent = '未能自动载入 status.csv'
+        // const msg = document.createElement('p')
+        // msg.className = 'app__note-msg'
+        // msg.textContent =
+        //   location.protocol === 'file:'
+        //     ? 'file:// 下浏览器禁止读取本地文件。可直接把文件拖进本页，或点「载入 CSV」；要用自动载入就在该目录起一个静态服务：python -m http.server 8000，然后访问 http://localhost:8000/'
+        //     : String(e && e.message ? e.message : e)
+        // const code = document.createElement('p')
+        // code.className = 'app__note-msg'
+        // code.textContent = 'fetch status.csv'
+        // note.appendChild(title)
+        // note.appendChild(msg)
+        // note.appendChild(code)
+        // box.appendChild(note)
+        rebuild()
+      }
+    }
+    boot()
+  </script>
+</body>
+
+</html>
