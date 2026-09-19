@@ -87,7 +87,7 @@ describe('meta.yaml 校验（复刻守护进程口径）', () => {
     fas_enabled: true,
     scenemode_enabled: false,
     thread_bind: true,
-    power_avg: false
+    power_avg: true
   }
 
   it('合法文件无问题', () => {

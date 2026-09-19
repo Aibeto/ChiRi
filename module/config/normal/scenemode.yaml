@@ -12,8 +12,8 @@ scenemode:
     headroom_factor: 1.0
     headroom_ramp: 0.15
     perf_floor: 0.0
-    perf_ceil: 0.15
-    perf_init: 0.15
+    perf_ceil: 0.12
+    perf_init: 0.12
     up_jump_threshold: 0.50
     slow_up_scale: 0.02
     down_fast_threshold: 0.30

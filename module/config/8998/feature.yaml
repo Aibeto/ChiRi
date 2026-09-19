@@ -65,7 +65,7 @@ reduce:
     headroom_ramp: 0.12
     perf_floor: 0.05
     perf_ceil: 0.60
-    perf_init: 0.25
+    perf_init: 0.20
     up_jump_threshold: 0.35
     slow_up_scale: 0.02
     down_fast_threshold: 0.10
@@ -78,19 +78,19 @@ reduce:
 # [default]
 default:
   cpu_load_governor:
-    up_threshold: 0.72
+    up_threshold: 0.78
     down_threshold: 0.55
     smoothing_up: 0.75
     down_rate_limit_ticks: 1
     up_rate_limit_ticks: 1
-    headroom_factor: 1.20
+    headroom_factor: 1.05
     headroom_ramp: 0.12
-    perf_floor: 0.10
+    perf_floor: 0.05
     perf_ceil: 1.0
-    perf_init: 0.40
+    perf_init: 0.25
     up_jump_threshold: 0.30
     slow_up_scale: 0.03
-    down_fast_threshold: 0.20
+    down_fast_threshold: 0.25
     spike_jump_threshold: 0.40
     spike_decay: 0.25
     touch_boost_enabled: true
@@ -105,7 +105,7 @@ boost:
     smoothing_up: 0.95
     down_rate_limit_ticks: 5
     up_rate_limit_ticks: 1
-    headroom_factor: 1.40
+    headroom_factor: 1.25
     headroom_ramp: 0.12
     perf_floor: 0.40
     perf_ceil: 1.0

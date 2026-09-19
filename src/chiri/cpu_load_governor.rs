@@ -190,11 +190,10 @@ impl ClusterState {
     }
 }
 
-/// 触摸升频临时停用（2026-09-18 用户要求「暂时关闭触控升频功能」）：true = `on_touch`
-/// 直接返回（不设升频窗口、不唤醒 Worker、不打点），`on_touch` 与 Worker 消费侧的
-/// feature.yaml `touch_boost_enabled` 配置保持原样；改回 false 即恢复，各模式参数
-/// （ms/tiers）即刻生效。**临时措施**——确认要长期关闭时应改配置而不是留这个常量。
-const TOUCH_BOOST_SUSPENDED: bool = true;
+/// 触摸升频开关：false = `on_touch` 正常工作（升频窗口 + Worker 唤醒 + 打点），
+/// 各模式参数（ms/tiers）由 feature.yaml `touch_boost_enabled` 配置。
+/// 2026-09-18 曾按用户要求置 true 临时停用，2026-09-20 恢复启用。
+const TOUCH_BOOST_SUSPENDED: bool = false;
 
 // AtomicTouchState — 跨线程共享的触摸升频状态
 
@@ -957,7 +956,6 @@ impl CpuLoadGovernor {
     /// 触摸事件驱动入口：收到触摸按下事件时更新共享触摸升频状态，
     /// 并立即唤醒全部 Worker（广播空负载包，recv_timeout 即时返回触发 flush），
     /// 大核 Worker 在本次 flush 中读取共享状态并提升性能下限，无需等待下一个 160ms tick。
-    /// 2026-09-18 起被 [`TOUCH_BOOST_SUSPENDED`] 整体停用（用户要求「暂时关闭」）。
     pub fn on_touch(&mut self) {
         if TOUCH_BOOST_SUSPENDED || !self.active || !self.cfg.touch_boost_enabled {
             return;

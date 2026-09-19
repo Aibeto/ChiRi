@@ -1,0 +1,18 @@
+# sgame.yaml: [fas-rules]
+# FAS 配置：com.levelinfinite.sgameGlobal（王者荣耀）
+# MOBA 特征：帧率稳定优先、触控交互高频、团战瞬时负载尖峰。
+# 省电思路：锁目标档位（60/120，杜绝高刷满频撑频率）+ 沿用默认稳态衰减
+# 与容量加权分频，团战尖峰由 PID 升频响应；perf_ceil 不覆盖（保持默认 1.0，
+# 最高性能释放不受限制）。
+# 电池温度护栏与 endfield 一致：≥45℃ 压 perf 至 0.70（回落 42℃ 解除），
+# 兜底内核 thermal 只盯 SoC 不管电池的缺口。
+fas_rules:
+  fps_gears: [30.0, 60.0, 120.0]
+  fps_margin: 3.0
+  per_app_profiles:
+    com.levelinfinite.sgameGlobal:
+      target_fps: [60, 120]
+      fps_margin: 3.0
+  # 接管/切回后的起始性能 0.50（默认 0.45）：MOBA 进入对局节奏快，略抬高
+  perf_init: 0.50
+  core_temp_threshold: 45.0

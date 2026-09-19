@@ -9,7 +9,7 @@ scenemode_enabled: true
 thread_bind: true
 # 功耗口径（PowerAVG.chr，仅 ChiRi）：false = 参考值（旧值先乘 10，与新值 10:1 加权递推，偏历史，含息屏样本）；
 #                                   true  = 累计平均值（等权全史，仅亮屏放电样本）。两者都只在放电时取样，热重载即时生效。
-power_avg: false
+power_avg: true
 # 常驻状态通知（Android 通知栏，仅 ChiRi）：false = 不投递，并撤销已投递的通知。
 notify: false
 # 电池读数（仅 ChiRi）：优先 OPlus 私有节点（bcc_parms，随采样刷新）。
