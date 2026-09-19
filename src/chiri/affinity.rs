@@ -1236,10 +1236,12 @@ impl AffinityManager {
                                 }
                             } else if home >= 0 {
                                 self.unpin_core(tid, home, fg_pid, &pkg);
-                            } else if group_bind != GroupBind::None {
+                            } else if group_bind == GroupBind::Key {
                                 // 组掩码兜底恢复：boost 退出，或 default 压力
-                                // 解除/息屏（key_pressure 活跃时保持绑定；
-                                // Busy 绑定的空闲回落由下方采样块单独处理）
+                                // 解除/息屏（key_pressure 活跃时保持绑定）；
+                                // Busy 绑定的空闲回落由下方采样块单独处理，
+                                // 不在此处释放——否则小核压力随升核解除后
+                                // 下一轮即 restore，与采样块滞回形成乒乓
                                 if !key_pressure {
                                     self.restore_group_mask(tid, fg_pid, &pkg);
                                 }

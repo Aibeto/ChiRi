@@ -55,8 +55,8 @@ fn cal_git_code(sh: &Shell) -> Result<usize> {
     Ok(output.trim().parse::<usize>()?)
 }
 
-fn get_date() -> String {
-    chrono::Local::now().format("%Y%m%d-%H%M").to_string()
+fn get_time() -> String {
+    chrono::Local::now().format("%H%M").to_string()
 }
 
 /// 从 module/module.prop 读取 name 与 version，作为产物命名依据。
@@ -87,14 +87,15 @@ fn read_module_prop() -> Result<(String, String)> {
 fn build(sh: &Shell, no_pack: bool) -> Result<()> {
     let temp_dir = temp_dir();
 
-    // 产物命名以 module.prop 为准（name-version-提交数-日期）
+    // 产物命名以 module.prop 为准（name-version-提交数-时分）；日期已去掉，
+    // 同日多次构建仍可区分，跨天唯一性由版本号与 Git 提交数保证
     let (module_name, module_version) = read_module_prop()?;
     let base_name = format!(
         "{}-{}-{}-{}",
         module_name,
         module_version,
         cal_git_code(sh)?,
-        get_date()
+        get_time()
     );
 
     // 1. 清理并重建临时目录
