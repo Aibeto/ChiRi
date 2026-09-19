@@ -54,6 +54,16 @@ Thermal:
   free_above: 0.80
   hysteresis_c: 3
 
+# [sched]
+# 内核调度器参数微调（借鉴 LittleYouran CTS 的 Scheduler 段）：migration_cost 由
+# 内核默认 500000 降到 200000——调度器更愿意跨核均衡、避免单核积压（855 八核
+# 同构经验值）；nr_migrate 32→27 收敛单次均衡迁移量。写 /proc/sys/kernel/，白名单外忽略
+Sched:
+  enabled: true
+  params:
+    sched_migration_cost_ns: "200000"
+    sched_nr_migrate: "27"
+
 # [reduce]
 reduce:
   cpu_load_governor:

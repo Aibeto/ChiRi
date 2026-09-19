@@ -208,6 +208,10 @@ touch-detect-down = [Touch] 检测到触摸按下 (type={ $type } code={ $code }
 touch-event-received = [Touch] 收到触摸事件，触发大核升频并立即写频
 touch-boost-disable-node = [TouchBoost] 已写 { $path } = 0（屏蔽系统触摸升频）
 touch-boost-disable-applied = [TouchBoost] 已屏蔽 Android 自带触摸升频（cpu_boost），改由 ChiRi 触摸升频接管
+sched-tuning-applied = [Sched] 内核调度器参数已应用（{ $count } 项）
+sched-tuning-key-rejected = [Sched] 内核调度器参数被白名单拒绝: { $key }
+system-tweaks-restore = [Tweaks] DOWN 停摆：一次性系统调整已还原（{ $count } 个节点）
+system-tweaks-skipped-down = [Tweaks] DOWN 停摆期间跳过一次性系统调整下发
 
 # --- FAS ---
 fas-freq-mismatch = [FAS] P{ $pid }: 频率不匹配！预期 { $min }-{ $max }，实际 { $actual } -> 正在紧急重写
@@ -234,6 +238,9 @@ fas-policy-writer-invalid = [FAS] P{ $pid } 策略写入器无效 (max_valid: { 
 # --- FAS（白名单/调度集成）---
 main-fas-whitelist-exported = [Main] 已导出 { $count } 个 FAS 白名单条目到 fas_whitelist.yaml
 app-detect-fas-fallback = [AppDetect] 前台应用命中 FAS 白名单，进入 FAS 模式: { $pkg }
+app-detect-pkg-normalized = [AppDetect] 前台名含子进程后缀，已归一到主包名: { $pkg } -> { $base }
+rule-key-normalized = [Rules] 规则键含子进程后缀，已按主包名处理: { $key } -> { $base }
+rule-key-conflict = [Rules] 规则键归一后与已有主包名规则冲突，保留后者: { $key } -> { $base }
 app-detect-fas-rejected = [AppDetect] 非白名单应用 { $pkg } 映射到 FAS 模式 { $mode } 已拒绝，回退全局模式
 app-detect-fas-global-rejected = [AppDetect] 全局模式 { $mode } 为 FAS 模式，不适用于非白名单应用 { $pkg }，回退 default
 scheduler-fas-activate = [Scheduler] FAS 实例激活: { $pkg } (pid={ $pid })

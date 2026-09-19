@@ -108,7 +108,7 @@ WebUI 侧：
 
 - 配置项 `touch_boost_enabled/ms/tiers` 每模式独立，`enabled=false` 即关闭（normalize 会把 ms 置 0）。
 
-- 屏蔽系统触摸升频：`chiri/scheduler.rs::apply_disable_touch_boost` 写 0 到 `/sys/module/cpu_boost/parameters/` 的 `input_boost_enabled / sched_boost_on_input / input_boost_ms / boost_ms`（按存在性尝试，无节点静默跳过）；`start_scheduler_thread` 启动时即调用一次 `apply_system_tweaks()`。
+- 屏蔽系统触摸升频：`chiri/scheduler.rs::apply_disable_touch_boost` 写 0 到 `/sys/module/cpu_boost/parameters/` 的 `input_boost_enabled / sched_boost_on_input / input_boost_ms / boost_ms`（按存在性尝试，无节点静默跳过）；`start_scheduler_thread` 启动时即调用一次 `apply_system_tweaks()`。**DOWN 停摆期间这些调整一并不下、且要把已写的还原回系统**：它们的下发与还原统一由 `CpuScheduler` 负责——首次写节点前记原值快照（`[snapshot]`，重复下发不覆盖；IO `queue/scheduler` 当前值带方括号要剥壳），DOWN 进入时 `restore_system_tweaks()` 逐个写回、退出时补发；判定收口在 `apply_system_tweaks` 内部并用静态互斥闸 `tweaks_gate()` 与还原互斥（详见 `02-convention.md` 的 DOWN 小节）。新增一次性系统调整必须走 `snapshot_write` / `snapshot_nodes`，否则它在停摆期无从还原。
 
 ### 息屏省电与屏幕状态
 
@@ -204,4 +204,8 @@ WebUI 侧：
 - chiri scheduler_ipc 以 `TELEMETRY_LOG_INTERVAL=1s` 消费：写 `logs/status.csv`（logger.rs `status_log_snapshot`，1s 一行，功耗精度 1s）+ 20s 一条 debug 摘要 `telemetry-summary`。BpfStats 不刷新 CLG 看门狗心跳（探针失效不影响负载源判定）。
 
 - BCC 失效可见性（2026-09-11）：`bcc_parms` 下标 6/8（电压/电流）缺失或非整数时此前 `?` 静默回退标准节点，「BCC 从未生效、功耗列一直来自 10s 缓存节点」完全不可见（8550 实测 batt_current_ma 99% 在 ±5、74% 为 0）。现 warn 一次 `telemetry-bcc-unusable`（去重）后回退，便于从 daemon.log 确认功耗列口径。
+
+- Sched 内核参数微调（2026-09-20，借鉴 LittleYouran CTS 的 Scheduler 段）：feature.yaml 新增 `Sched` 段（enabled + params map），`scheduler.rs::apply_sched_params` 按 `SCHED_ALLOWED_PARAMS` 白名单写 `/proc/sys/kernel/<key>`（越界键 warn 跳过、空值跳过，随 apply_system_tweaks 热重载生效）。8550/8475/8998 默认开启 `sched_migration_cost_ns: 200000` / `sched_nr_migrate: 27`（骁龙 855 八核经验值：迁移更及时、单轮迁移量收敛）。i18n：`sched-tuning-applied` / `sched-tuning-key-rejected`。DOWN 停摆期间随其余一次性调整一并不下发（进入时按快照还原已写的节点），退出停摆补发。
+
+- **子进程名一律预处理为主包名（2026-09-20，借鉴 CTS 的 AppModeConfig::resolve，用户口径）**：`com.xx:push` 本质上是 `com.xx`（子进程与所属包在调度语义上就是同一个应用；厂商框架把 cmdline 首段写成 `pkg:proc` 同理），所以**归一到主包名再放进整个调度计算，下游走原本的算法与流程**，不做进程级粒度区分。归一在两侧各做一次、口径一致：① 前台名在**唯一入口** `app_detect::set_current_package` 归一（此后 `get_current_package()`、ModeChange/PackageSwitch 事件、devimp 分组、通知、亲和拿到的都是主包名）；② 规则键在 `deserialize_app_modes` 归一（冲突时保留后者并打 `rule-key-conflict`，不静默丢规则）。因此 `determine_mode` 里就是原本的 `app_modes.get(pkg)` 精确查表，**没有回退链**——回退链会让「规则键粒度」与「运行期粒度」两套语义并存。i18n：`app-detect-pkg-normalized`（debug）/ `rule-key-normalized` / `rule-key-conflict`。
 

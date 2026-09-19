@@ -38,5 +38,7 @@
 
 - **shell 命令读文件前必须守卫**：`wc -c < 缺失文件`（或任何 `< file`）的输入重定向错误由 shell 直接打到 stderr——命令上的 `2>/dev/null` 覆盖不到，真机 mksh 会把整条命令判为失败（实例：导出进度轮询把「产物尚未生成」误报成「查询导出进度失败」）。统一写法：`[ -f path ] && …` 守卫再读，变量给初值 0；WebUI 侧对「非零退出但输出可用」宽容处理。
 
+- **写 sysfs 但不属于任何 governor 的调用面必须自己接停摆语义（2026-09-20）**：DOWN 的释放清单只能回收「被某个对象持有快照」的接管（CLG/特调/FAS/fast_lock/affinity/core_ctl/scenemode），而 `CpuScheduler::apply_system_tweaks` 这类「一次性下发后就没人管」的系统调整（cpuidle governor、IO 调度器、`cpu_boost` 输入升频、内核 `Sched` 参数）不在任何快照链里 —— 曾被 `config_watcher` 在停摆期反复重放、启动时也先于 DOWN 判定下发，表现就是「开了 DOWN，调度仍在被改」。判定方式：新增任何 sysfs 写入前先问「它被谁的 release 收拾？」——答不上来就自己接 `crate::down::is_down()` 门控 + 快照/还原。另：跨线程的下发/还原要共用一把互斥闸并在闸内**复查**标志，只在外面判一次会留下竞争窗口。
+
 - **整文件覆盖（Write）前必须确认目标不是已跟踪文件**：本轮为嵌 WebUI 资产直接整文件重写了已有 `build.rs`，丢掉 eBPF 构建与 `assert_required_configs` 断言——cargo check 静默通过（ebpf 占位产物已存在、断言消失不会报错），靠 diff 审查才抓回。写整文件前先 `git status` 该路径 / 读原文件；向既有文件加功能一律局部 Edit。cargo/类型检查通过 ≠ 构建脚本语义完整。
 

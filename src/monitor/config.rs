@@ -31,7 +31,40 @@ where
         Null,
     }
     Ok(match MapOrNull::deserialize(deserializer)? {
-        MapOrNull::Map(m) => m,
+        // **预处理**：规则键允许写带子进程后缀的进程名（`com.xx:push`），加载时统一
+        // 归一到主包名（`com.xx`）——子进程本质上还是那个包，调度以包为单位，
+        // 归一后前台名（同样在 `set_current_package` 归一）与规则键口径一致，
+        // 查表就是原本的精确匹配。冲突（两个键归一到同一主包名）后者保留并告警，
+        // 避免静默丢规则。
+        MapOrNull::Map(m) => {
+            let mut out: HashMap<String, String> = HashMap::with_capacity(m.len());
+            for (k, v) in m {
+                match k.split_once(':') {
+                    Some((base, _suffix)) => {
+                        log::warn!(
+                            "{}",
+                            crate::i18n::t_with_args(
+                                "rule-key-normalized",
+                                &crate::fluent_args!("key" => k.as_str(), "base" => base)
+                            )
+                        );
+                        if out.insert(base.to_string(), v).is_some() {
+                            log::warn!(
+                                "{}",
+                                crate::i18n::t_with_args(
+                                    "rule-key-conflict",
+                                    &crate::fluent_args!("key" => k.as_str(), "base" => base)
+                                )
+                            );
+                        }
+                    }
+                    None => {
+                        out.insert(k, v);
+                    }
+                }
+            }
+            out
+        }
         MapOrNull::Null => HashMap::new(),
     })
 }

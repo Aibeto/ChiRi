@@ -209,6 +209,10 @@ touch-detect-down = [Touch] Touch down detected (type={ $type } code={ $code })
 touch-event-received = [Touch] Touch event received, boosting big cores and flushing immediately.
 touch-boost-disable-node = [TouchBoost] Wrote { $path } = 0 (disabled system touch boost)
 touch-boost-disable-applied = [TouchBoost] Android built-in touch boost (cpu_boost) disabled, now handled by ChiRi touch boost.
+sched-tuning-applied = [Sched] kernel scheduler knobs applied ({ $count } items)
+sched-tuning-key-rejected = [Sched] kernel scheduler knob rejected by whitelist: { $key }
+system-tweaks-restore = [Tweaks] DOWN halt: one-shot system tweaks restored ({ $count } nodes)
+system-tweaks-skipped-down = [Tweaks] one-shot system tweaks skipped during DOWN halt
 
 # --- FAS ---
 fas-freq-mismatch = [FAS] P{ $pid }: freq mismatch! expected { $min }-{ $max }, actual { $actual } -> emergency reapply
@@ -235,6 +239,9 @@ fas-policy-writer-invalid = [FAS] P{ $pid } policy writer invalid (max_valid: { 
 # --- FAS (whitelist / scheduler integration) ---
 main-fas-whitelist-exported = [Main] exported { $count } FAS whitelist entries to fas_whitelist.yaml
 app-detect-fas-fallback = [AppDetect] foreground app hit FAS whitelist, entering FAS mode: { $pkg }
+app-detect-pkg-normalized = [AppDetect] foreground name has a sub-process suffix, normalized to the base package: { $pkg } -> { $base }
+rule-key-normalized = [Rules] rule key has a sub-process suffix, treated as its base package: { $key } -> { $base }
+rule-key-conflict = [Rules] normalized rule key conflicts with an existing base-package rule; the latter wins: { $key } -> { $base }
 app-detect-fas-rejected = [AppDetect] non-whitelisted app { $pkg } mapped to FAS mode { $mode }, rejected, falling back to global mode
 app-detect-fas-global-rejected = [AppDetect] global mode { $mode } is a FAS mode and does not apply to non-whitelisted app { $pkg }, falling back to default
 scheduler-fas-activate = [Scheduler] FAS instance activated: { $pkg } (pid={ $pid })

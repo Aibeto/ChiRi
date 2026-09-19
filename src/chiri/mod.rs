@@ -565,8 +565,25 @@ pub fn start_scheduler_thread(
     // 热更新断链——现在调参保存后 100ms 内即按当前模式重载调度器配置。
     let config_dirty = Arc::new(AtomicBool::new(false));
 
-    // 启动时立即应用一次性系统调整（cpuidle / IO / 屏蔽系统自带触摸升频），
-    // 避免首次配置变更前这些调整处于未生效状态（config_watcher 仅在配置变化后重放）
+    // [down_watcher]
+    // DOWN 停摆状态监听：down.chr 一被写入/清空就切换停摆，与 meta.yaml、rhine.chr 同语义。
+    // 这里只维护「该不该停摆」这个事实；真正的释放/恢复在调度循环里做（governor 归它独占）。
+    // **必须排在所有会写 sysfs 的线程与首次下发之前**：下面的一次性系统调整、config/rhine
+    // 两条监听都要按它决定是否下发。down.chr 落盘持久化，「重启后仍停摆」的那次启动若
+    // 先下发再判定，就等于停摆期又把 tweak 写了一遍。
+    let down_root = root.clone();
+    crate::down::on_startup(&down_root);
+    thread::Builder::new()
+        .name("down_watcher".to_string())
+        .spawn(move || crate::down::watch_loop(down_root))?;
+
+    // 启动时立即应用一次性系统调整（cpuidle / IO / 屏蔽系统自带触摸升频 / 内核 sched 参数），
+    // 避免首次配置变更前这些调整处于未生效状态（config_watcher 仅在配置变化后重放）。
+    // **停摆启动期跳过**：DOWN 的语义是「调度不工作、一切交回系统」，这些节点里正有
+    // 一批是与调度直接相关的（cpu_boost 输入升频、cpuidle governor、sched_migration_cost 等），
+    // 下发等于停摆期还在替用户调度，采集到的基线也就不再是系统原状。
+    // 停摆判定在 `apply_system_tweaks` 内部（那里才是唯一下发入口，且带互斥闸），
+    // 这里不再重复判一次，避免两处口径漂移
     if let Err(e) =
         CpuScheduler::new(shared_config.clone(), sys_path_exist.clone()).apply_system_tweaks()
     {
@@ -669,6 +686,11 @@ pub fn start_scheduler_thread(
 
                         log::info!("{}", t("config-reloaded-success"));
 
+                        // 一次性系统调整的下发要过停摆判定：本线程独立于调度循环，
+                        // 拿不到那里的 `halted`，判定放在唯一的入口
+                        // `CpuScheduler::apply_system_tweaks` 里（读进程级原子标志 + 互斥闸）。
+                        // 停摆期仍照常重载配置（日志级别/语言要生效），只是不往系统里写；
+                        // 退出停摆时由调度循环补发一次。
                         let scheduler =
                             CpuScheduler::new(config_clone.clone(), sys_path_clone.clone());
                         if let Err(e) = scheduler.apply_system_tweaks() {
@@ -709,20 +731,13 @@ pub fn start_scheduler_thread(
             crate::rhine::watch_loop(rhine_root, config_path_for_rhine, rhine_initial)
         })?;
 
-    // [down_watcher]
-    // DOWN 停摆状态监听：down.chr 一被写入/清空就切换停摆，与 meta.yaml、rhine.chr 同语义。
-    // 这里只维护「该不该停摆」这个事实；真正的释放/恢复在调度循环里做（governor 归它独占）。
-    // 启动期先同步一次，调度线程据此决定首轮要不要停摆。
-    let down_root = root.clone();
-    crate::down::on_startup(&down_root);
-    thread::Builder::new()
-        .name("down_watcher".to_string())
-        .spawn(move || crate::down::watch_loop(down_root))?;
-
     // [ipc_main]
     let config_clone = shared_config.clone();
     let mode_clone = shared_mode_name.clone();
     let dirty_ipc = config_dirty.clone();
+    // sysfs 存在性缓存的另一份：停摆退出后由本线程补发一次性系统调整
+    // （ config_watcher 那条路径只在配置文件变化时才重放）
+    let tweaks_sys_path = sys_path_exist.clone();
 
     thread::Builder::new()
         .name("scheduler_ipc".to_string())
@@ -950,6 +965,11 @@ pub fn start_scheduler_thread(
                         governor_guard.release();
                         gpu_guard.release();
                         corectl_mgr.set_power_state(false, false);
+                        // 一次性系统调整（cpuidle / IO / cpu_boost 输入升频 / 内核 sched 参数）
+                        // 也是「调度干预」，一并按快照还原：它们不被任何 governor 持有，
+                        // release 清单碰不到，不还原就残留整段停摆期——记录到的基线
+                        // 是被 ChiRi 改过的系统，而不是系统自身。
+                        CpuScheduler::restore_system_tweaks();
                         *mode_clone.lock().unwrap() = crate::down::DOWN_MODE.to_string();
                         crate::logger::set_devimp_mode(crate::down::DOWN_MODE);
                         let _ = utils::try_write_file(
@@ -1034,6 +1054,20 @@ pub fn start_scheduler_thread(
                                 pid,
                                 &last_core_utils,
                                 scene_mode_active,
+                            );
+                        }
+                        // 停摆期进 DOWN 时还原过的一次性系统调整在这里补发回来
+                        // （快照已在进入时清空，本次下发会重新记一份用于下次还原）
+                        if let Err(e) =
+                            CpuScheduler::new(config_clone.clone(), tweaks_sys_path.clone())
+                                .apply_system_tweaks()
+                        {
+                            log::error!(
+                                "{}",
+                                t_with_args(
+                                    "config-apply-tweaks-failed",
+                                    &fluent_args!("error" => e.to_string())
+                                )
                             );
                         }
                         // 停摆期负载事件被丢弃、last_load_event 停在进入之前，不重置会让
@@ -1325,7 +1359,7 @@ pub fn start_scheduler_thread(
                     // exit_deadline 到期时返回 true，而进入 DOWN 的 deactivate_all()
                     // 已经把它清空——改这一段时别破坏这个不变量，否则停摆会被 FAS
                     // 的延迟退出重新接管调度
-                    if fas_mgr.tick() {
+                    if !halted && fas_mgr.tick() {
                         if let Some(mode) = pending_mode_after_fas.take() {
                             *mode_clone.lock().unwrap() = mode.clone();
                             crate::logger::set_devimp_mode(&mode);
@@ -1391,7 +1425,10 @@ pub fn start_scheduler_thread(
                     // FAS 息屏省电已完全移除（2026-09）：原「仅亮屏时执行」门控删除——
                     // FAS 息屏保持接管，兜底激活（失效自愈）全时段生效。app_detect 息屏期
                     // 不更新前台包名，此处比较的是缓存包名，稳态为 no-op。
-                    if mode_clone.lock().unwrap().clone() == "fas" && !crate::common::fas_enabled() {
+                    if !halted
+                        && mode_clone.lock().unwrap().clone() == "fas"
+                        && !crate::common::fas_enabled()
+                    {
                         // fas_enabled=false 热重载生效：立即注销全部 FAS 实例并按屏幕状态
                         // 恢复调度接管。fas_available 已为 false，determine_mode 不再产生
                         // fas 模式，包名/模式切换后自然收尾；无实例且 governor 已接管时本分支为 no-op。
@@ -1428,7 +1465,7 @@ pub fn start_scheduler_thread(
                                 cpu_governor.init_policies(&doze_cfg);
                             }
                         }
-                    } else if mode_clone.lock().unwrap().clone() == "fas" {
+                    } else if !halted && mode_clone.lock().unwrap().clone() == "fas" {
                         let cur_pkg = crate::monitor::app_detect::get_current_package();
                         if !cur_pkg.is_empty() {
                             if fas_mgr.is_active() {
@@ -1619,7 +1656,7 @@ pub fn start_scheduler_thread(
                 // 中直接应用触摸升频地板，不等待下一个 160ms 负载决策 tick。
                 // 窗口内的持续触摸会刷新截止时间（FastWriter 去重重复写频）。
                 while touch_rx.try_recv().is_ok() {
-                    if cpu_governor.is_active() {
+                    if !halted && cpu_governor.is_active() {
                         cpu_governor.on_touch();
                         log::debug!("{}", t("touch-event-received"));
                     }
@@ -1627,7 +1664,9 @@ pub fn start_scheduler_thread(
 
                 // 极速模式：每 5 秒重写一次硬件最高频，防止系统/厂商守护进程篡改；
                 // 返回距下次重写的剩余时间，纳入动态超时计算
-                let fast_next = fast_lock.tick();
+                // 停摆期不碰任何节点：tick 内部虽有 is_active 早退，这里显式断开，
+                // 免得将来给 FastLock 加的开关绕过这道防线
+                let fast_next = if halted { None } else { fast_lock.tick() };
 
                 // 动态超时：阻塞到「最近一个周期任务的 deadline」或事件到达（先到者打断）。
                 // 周期任务（telemetry 1s / thermal+亲和 2s / mode file 5s / fast 重写 5s）
@@ -2494,8 +2533,11 @@ pub fn start_scheduler_thread(
                 scenemode_sat_since = None;
                 last_core_utils.clear();
                 std::thread::sleep(SCHEDULER_IPC_RESTART_BACKOFF);
-                // 按当前模式重新接管（等价亮屏恢复语义；特调/fas 由后续事件重建）
-                {
+                // 按当前模式重新接管（等价亮屏恢复语义；特调/fas 由后续事件重建）。
+                // **停摆期间必须跳过**：这里重建的是 contingency/babel 分组、vector
+                // 锁频与 CLG 接管，没有 `mode` 之外的门控——靠「down 恰好没有 CLG 段」
+                // 才没出事，一旦模式停在 lab/vector 就会把刚释放的东西重新接回来
+                if !halted {
                     let current_mode = mode_clone
                         .lock()
                         .unwrap_or_else(|p| p.into_inner())

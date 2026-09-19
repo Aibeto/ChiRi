@@ -76,9 +76,27 @@ pub fn get_current_package() -> String {
     CURRENT_PACKAGE.lock().unwrap().clone()
 }
 
-// 在检测到新包名时更新它
+/// 在检测到新包名时更新它。
+/// **预处理**：`com.xx:push` 这类子进程名一律先归一到主包名（com.xx）——子进程与所属
+/// 包在调度语义上就是同一个应用（规则、白名单、亲和、统计都以包为单位，厂商框架改写
+/// cmdline 首段为 "pkg:proc" 也属同一情形）。归一发生在**唯一入口**，下游（规则匹配、
+/// FAS/特调白名单、亲和迁移、devimp 分组、通知）拿到的都已经是主包名，各自继续走原本
+/// 的算法与流程，不必再剥一次后缀。
 fn set_current_package(pkg: &str, pid: i32) {
-    *CURRENT_PACKAGE.lock().unwrap() = pkg.to_string();
+    let base = match pkg.split_once(':') {
+        Some((b, _suffix)) => {
+            debug!(
+                "{}",
+                t_with_args(
+                    "app-detect-pkg-normalized",
+                    &fluent_args!("pkg" => pkg, "base" => b)
+                )
+            );
+            b
+        }
+        None => pkg,
+    };
+    *CURRENT_PACKAGE.lock().unwrap() = base.to_string();
     CURRENT_PID.store(pid, Ordering::Relaxed);
 }
 
@@ -231,7 +249,10 @@ fn determine_mode(config: &RulesConfig, current_package: &str) -> String {
     // 优先级：用户自定义 app_modes > 特调白名单的优先回退模式 > 全局模式。
     // 门控：特调模式只允许白名单应用；非白名单包名映射到特调模式时回退全局模式并告警
     // （WebUI 侧在扫描完成后会同步清理这类非法条目）。
-    if let Some(mode) = config.app_modes.get(current_package) {
+    // 规则表匹配：前台名在 `set_current_package` 已归一为主包名，规则键也在加载时
+    // 做了同样的归一（见 monitor/config.rs），这里就是原本的精确查表，不做回退链。
+    let app_mode = config.app_modes.get(current_package);
+    if let Some(mode) = app_mode {
         if crate::common::is_special_mode(mode) || crate::common::is_fas_mode(mode) {
             // FAS 模式仅白名单驱动：app_modes 中手动映射的 "fas" 一律拒绝（防绕过白名单）
             if crate::common::is_fas_mode(mode) {

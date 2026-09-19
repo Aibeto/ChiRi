@@ -22,7 +22,7 @@
 |---|---|---|
 | `[overview]` `[tree]` `[stack]` `[cmds]` | [docs/agents/01-overview.md](docs/agents/01-overview.md) | 项目概述、目录结构、技术栈、常用命令 |
 | `[convention]` | [docs/agents/02-convention.md](docs/agents/02-convention.md) | 代码约定：架构事件流 / 日志 / 配置嵌入与热重载 / 实验室 / i18n / Rust 风格 / 版本发布 / WebUI |
-| `[chiri]` | [docs/agents/03-chiri.md](docs/agents/03-chiri.md) | ChiRi 调度子系统：特调 / FAS / CLG 语义 / Thermal / 触摸升频 / 息屏省电 / 极速 / 亲和迁移 / core_ctl / 遥测 |
+| `[chiri]` | [docs/agents/03-chiri.md](docs/agents/03-chiri.md) | ChiRi 调度子系统：特调 / FAS / CLG 语义 / Thermal / 触摸升频 / 息屏省电 / 极速 / 亲和迁移 / core_ctl / 内核 Sched 参数 / 遥测（DOWN 停摆的下发与还原见 `chiri/scheduler.rs` 与 02 的 DOWN 小节） |
 | `[hard]` `[lessons]` | [docs/agents/04-hard-lessons.md](docs/agents/04-hard-lessons.md) | 硬性约束、经验教训 |
 | `[maint]` | [docs/agents/05-maint.md](docs/agents/05-maint.md) | 本文档维护要求（每次会话结束前评估更新） |
 

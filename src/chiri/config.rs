@@ -1,6 +1,6 @@
 //! config.rs: [meta] [clg_config] [clg_normalize] [mode_io] [toggles] [ak_config] [thermal_config] [affinity_config] [corectl_config] [config_root] [config_impl]
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::fluent_args;
 use crate::i18n::t_with_args;
@@ -853,6 +853,22 @@ pub struct Config {
     /// core_ctl 核心在线接管（boost 模式保持大核常在线）
     #[serde(default, rename = "CoreCtl")]
     pub core_ctl: CoreCtlConfig,
+
+    /// 内核调度器参数微调（Sched 段，借鉴 LittleYouran CTS 的 Scheduler 段）：
+    /// 与模式无关的一次性系统设置，执行器按白名单写 /proc/sys/kernel/<key>
+    /// （白名单 chiri::scheduler::SCHED_ALLOWED_PARAMS，防任意内核参数写入）。
+    #[serde(default, rename = "Sched")]
+    pub sched: SchedTuning,
+}
+
+/// 内核调度器参数微调配置：`params` 的 key 为 /proc/sys/kernel/ 下的节点名，
+/// value 为写入值（空串跳过）；未列入白名单的 key 打 warn 后跳过。
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct SchedTuning {
+    /// 总开关：false 时不写任何节点
+    pub enabled: bool,
+    pub params: std::collections::HashMap<String, String>,
 }
 
 /// scenemode 延迟缺省值：5 分钟

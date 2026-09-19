@@ -17,7 +17,7 @@ src/                  # Rust 守护进程主代码
   monitor/            # 监控层：app_detect / fps_monitor / cpu_monitor / screen_detect / telemetry（两套调度共享）
   scheduler/          # 调度层 Yumi（即将废弃，作为 ChiRi 基础保留、勿动逻辑）：FAS 引擎、CLG 负载调速器
     fas/              # FAS 核心：PID 控制器、帧率档位、frame_pipeline
-  chiri/              # ChiRi 调度（发展主线；特定 SoC 触发；含 CLG、akmode 明日方舟特调、fas_manager FAS 帧感知调度、touch_detect 触摸升频、affinity 按核亲和/线程迁移、core_ctl 核心在线接管）
+  chiri/              # ChiRi 调度（发展主线；特定 SoC 触发；含 CLG、akmode 明日方舟特调、fas_manager FAS 帧感知调度、touch_detect 触摸升频、affinity 按核亲和/线程迁移、core_ctl 核心在线接管、scheduler.rs 一次性系统调整（cpuidle/IO/cpu_boost/内核 Sched 参数，含 DOWN 停摆的快照与还原））
   chiri/affinity_blacklist.yaml  # 线程亲和黑名单（编译期嵌入：系统关键进程默认名单 + re: 正则；含 com.example 示例；用户/WebUI 不可改）
   rhine.rs            # 实验室（ChiRi 专属）：rhine-init.yaml 解析、rhine.chr / rhine-back.chr 读写、启用与还原、运行时监听
   common.rs / fas_types.rs / i18n.rs / logger.rs

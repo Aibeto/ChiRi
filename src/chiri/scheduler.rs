@@ -1,9 +1,10 @@
-//! scheduler.rs: [tweaks] [cpu_idle] [io] [touch_boost]
+//! scheduler.rs: [tweaks] [snapshot] [sched] [cpu_idle] [io] [touch_boost]
 
 use super::config::Config;
 use anyhow::Result;
+use std::collections::HashMap;
 use std::fs;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 use crate::fluent_args;
 use crate::i18n::{t, t_with_args};
@@ -28,11 +29,155 @@ impl CpuScheduler {
         }
     }
 
-    /// 应用所有一次性的、与模式无关的系统调整
+    /// 应用所有一次性的、与模式无关的系统调整。
+    /// 停摆期一律跳过（含调用的竞争窗口）：本函数是唯一的入口，
+    /// 闸内的那次复查才是权威判定。
     pub fn apply_system_tweaks(&self) -> Result<()> {
+        let _gate = Self::tweaks_gate()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        if crate::down::is_down() {
+            log::info!("{}", t("system-tweaks-skipped-down"));
+            return Ok(());
+        }
         self.apply_cpu_idle_governor()?;
         self.apply_io_settings()?;
         self.apply_disable_touch_boost()?;
+        self.apply_sched_params()?;
+        Ok(())
+    }
+
+    // [snapshot]
+    /// 一次性系统调整的**原值快照**（节点路径 → 接管前内容）。
+    /// 与 governor 的 snapshot/restore 同语义：DOWN 停摆要把系统还原成「ChiRi 没改过」
+    /// 的样子，否则被关掉的 cpu_boost、改过的 cpuidle/IO/sched_* 在停摆期依旧生效，
+    /// 采集到的就不是「ChiRi 不工作时」的真实基线。**每次节点只记第一次的值**——
+    /// 配置热重载会重复下发，覆盖快照会把上一次 tweak 的值当成系统原值。
+    fn tweak_snapshot() -> &'static Mutex<HashMap<String, String>> {
+        static SNAP: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+        SNAP.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    /// 下发与还原的互斥闸：两个调用方在不同线程（`config_watcher` 与调度循环），
+    /// 「判完 is_down 就被另一线程切进/切出 DOWN」的窗口会让 tweak 写进停摆期、
+    /// 或让还原覆盖掉刚补发的下发。双方都在闸内**再看一次**停摆标志即闭合该窗口。
+    fn tweaks_gate() -> &'static Mutex<()> {
+        static GATE: OnceLock<Mutex<()>> = OnceLock::new();
+        GATE.get_or_init(|| Mutex::new(()))
+    }
+
+    /// 节点不存在/不可读时不记录（写也一定失败，没有可还原的东西）。
+    /// IO 调度器节点（`*/queue/scheduler`）读出来是候选列表、当前值带方括号，
+    /// 写回必须剥壳——原样写 "[mq-deadline] kyber" 是非法值。
+    fn snapshot_node(path: &str) {
+        let Ok(raw) = fs::read_to_string(path) else {
+            return;
+        };
+        let raw = raw.trim();
+        let value = match (raw.find('['), raw.find(']')) {
+            (Some(a), Some(b)) if b > a => raw[a + 1..b].trim().to_string(),
+            _ => raw.to_string(),
+        };
+        let mut snap = Self::tweak_snapshot()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        snap.entry(path.to_string()).or_insert(value);
+    }
+
+    /// `write_nodes` 批量写不读原值，写前先补齐快照。
+    fn snapshot_nodes(items: &[(String, String)]) {
+        for (path, _) in items {
+            Self::snapshot_node(path);
+        }
+    }
+
+    /// 单个节点：先快照再写（与 `utils::try_write_file` 同口径，节点缺失降 debug）。
+    fn snapshot_write(path: &str, value: &str) -> Result<()> {
+        Self::snapshot_node(path);
+        utils::try_write_file(path, value)
+    }
+
+    /// DOWN 停摆进入时调用：把所有被 ChiRi 改过的节点写回接管前的值并清空快照
+    /// （幂等；快照为空什么都不做）。清空后退出停摆的重新下发会再记一份新快照。
+    pub fn restore_system_tweaks() {
+        let _gate = Self::tweaks_gate()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let mut snap = Self::tweak_snapshot()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        if snap.is_empty() {
+            return;
+        }
+        let mut restored = 0usize;
+        for (path, value) in snap.drain() {
+            if utils::try_write_file(&path, &value).is_ok() {
+                restored += 1;
+            }
+        }
+        log::info!(
+            "{}",
+            t_with_args(
+                "system-tweaks-restore",
+                &fluent_args!("count" => restored.to_string())
+            )
+        );
+    }
+
+    // [sched]
+    /// 内核调度器参数写白名单：只允许写这些 /proc/sys/kernel 节点。
+    /// 借鉴 LittleYouran CTS 的 Scheduler 段（sched_energy_aware / 迁移成本等），
+    /// 白名单外（含用户篡改 feature.yaml 注入）一律拒绝并 warn。
+    const SCHED_ALLOWED_PARAMS: &'static [&'static str] = &[
+        "sched_migration_cost_ns",
+        "sched_nr_migrate",
+        "sched_latency_ns",
+        "sched_min_granularity_ns",
+        "sched_wakeup_granularity_ns",
+        "sched_energy_aware",
+        "sched_schedstats",
+    ];
+
+    /// 写入 Sched 段配置的内核调度器参数：节点写入去重不是本层职责
+    /// （FastWriter 面向高频路径，此处热重载频率低、直接写）。逐节点 debug、
+    /// 结束 info 汇总实际写入数；空值与越白名单键跳过。
+    fn apply_sched_params(&self) -> Result<()> {
+        let config = self.config.read().unwrap();
+        let sched = &config.sched;
+        if !sched.enabled {
+            return Ok(());
+        }
+        let mut applied = 0usize;
+        for (key, value) in &sched.params {
+            if !Self::SCHED_ALLOWED_PARAMS.contains(&key.as_str()) {
+                log::warn!(
+                    "{}",
+                    t_with_args(
+                        "sched-tuning-key-rejected",
+                        &fluent_args!("key" => key.as_str())
+                    )
+                );
+                continue;
+            }
+            if value.trim().is_empty() {
+                continue;
+            }
+            let path = format!("/proc/sys/kernel/{key}");
+            let _ = Self::snapshot_write(&path, value);
+            applied += 1;
+            log::debug!(
+                "SchedTuning: wrote {} = {}",
+                path,
+                value
+            );
+        }
+        log::info!(
+            "{}",
+            t_with_args(
+                "sched-tuning-applied",
+                &fluent_args!("count" => applied.to_string())
+            )
+        );
         Ok(())
     }
 
@@ -44,7 +189,7 @@ impl CpuScheduler {
         if config.function.cpu_idle_scaling_governor && !config.cpu_idle.current_governor.is_empty()
         {
             if self.sys_path_exist.cpuidle_governor_exist {
-                let _ = utils::try_write_file(
+                let _ = Self::snapshot_write(
                     "/sys/devices/system/cpu/cpuidle/current_governor",
                     &config.cpu_idle.current_governor,
                 );
@@ -102,6 +247,7 @@ impl CpuScheduler {
                 );
             }
         }
+        Self::snapshot_nodes(&items);
         let _ = utils::write_nodes(&items, "io-tuning");
 
         log::info!("{}", t("apply-io-settings-start"));
@@ -123,6 +269,7 @@ impl CpuScheduler {
         .iter()
         .map(|path| (path.to_string(), "0".to_string()))
         .collect();
+        Self::snapshot_nodes(&items);
         let written = utils::write_nodes(&items, "touch-boost-disable");
         for path in &written {
             log::debug!(
