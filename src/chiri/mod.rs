@@ -454,8 +454,12 @@ fn apply_affinity_and_corectl(
     // stardust 家族（scenemode）语义：停线程迁移与动态分组、全部 cpuset 恢复全核——
     // 压频只压 CLG 频率上限，不做任何核心/线程特化（原「prime 整簇下线 + 保留核
     // 独占」已废弃，core_ctl 回 Normal）。affinity.release 会把此前收窄的组按快照恢复。
+    // 本分支由 2s 周期块与场景事件反复进入：仅在持有接管时 release 一次，
+    // 避免息屏全程每 2s 重复回写后台组 uclamp.max 并刷「已释放接管」日志
     if scenemode_offline {
-        affinity.release();
+        if affinity.is_active() {
+            affinity.release();
+        }
         corectl.set_power_state(false, false);
         return;
     }

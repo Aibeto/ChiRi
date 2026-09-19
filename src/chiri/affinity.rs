@@ -722,7 +722,9 @@ impl AffinityManager {
         boost_uclamp_override: Option<bool>,
     ) {
         if !cfg.enabled {
-            self.release();
+            if self.is_active() {
+                self.release();
+            }
             return;
         }
         if !core_utils.is_empty() {
@@ -1933,6 +1935,13 @@ impl AffinityManager {
                 let _ = crate::utils::try_write_file(UCLAMP_MAX_PATH, &prev);
             }
         }
+    }
+
+    /// 是否持有接管（cpuset 收窄 / 线程迁移 / uclamp 任一已应用）。
+    /// release 前先查此标志，避免周期路径（如 scenemode 2s 块）对已释放的
+    /// 管理器重复调用 release——每次都会无条件回写后台组 uclamp.max 并打点。
+    pub fn is_active(&self) -> bool {
+        self.applied_kind != KIND_NONE || self.lab_static_mode.is_some()
     }
 
     pub fn release(&mut self) {
