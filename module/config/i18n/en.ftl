@@ -132,6 +132,8 @@ scheduler-down-exit = [Scheduler] DOWN halt lifted, scheduling resumes
 down-enabled = [Down] down.chr says down, scheduling halted
 down-disabled = [Down] down.chr cleared, scheduling back to normal
 down-watch-error = [Down] down.chr watch failed: { $error }
+down-boot-halted = [Down] Booting in halt mode: no takeover is enabled, telemetry and logs continue
+down-heartbeat = [Down] Halt still in effect: scheduling stays released, telemetry and logs continue (clear down.chr to resume)
 
 # --- Scheduler: Config Watcher ---
 config-reloading = [Config] Config file change detected, reloading...

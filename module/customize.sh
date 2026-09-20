@@ -1,5 +1,5 @@
 #!/system/bin/sh
-# customize.sh: [busybox] [i18n] [welcome] [hot-update-check] [volume-key] [oplus-detect] [config-keep] [mode-select] [hot-update-flow] [full-install]
+# customize.sh: [busybox] [i18n] [welcome] [hot-update-check] [volume-key] [battery-detect] [config-keep] [mode-select] [hot-update-flow] [full-install]
 #
 # ChiRi Scheduler Installation Script
 
@@ -51,10 +51,13 @@ MSG_KEEP_CONFIG_YES="Existing configuration kept"
 MSG_KEEP_CONFIG_NO="Replaced with the default configuration"
 MSG_OPLUS_ON="OPlus private node detected; enabled private-node readings in the new config"
 MSG_OPLUS_DUAL_ON="Second cell detected (index 11); enabled dual-cell voltage"
-MSG_OPLUS_NO_META="Could not locate this device's meta.yaml, so the OPlus switches were not auto-enabled (turn them on in the WebUI battery page)"
-MSG_OPLUS_NO_SED="sed is unavailable, so the OPlus switches were not auto-enabled (turn them on in the WebUI battery page)"
+MSG_OPLUS_NO_META="Could not locate this device's meta.yaml, so the battery switches and divisors were not auto-applied (set them in the WebUI battery page)"
+MSG_OPLUS_NO_SED="sed is unavailable, so the battery switches and divisors were not auto-applied (set them in the WebUI battery page)"
 MSG_OPLUS_CHECK="Checking for the OPlus private node (bcc_parms)..."
-MSG_OPLUS_SKIP="No OPlus private node on this device; leaving the switches as they are"
+MSG_OPLUS_SKIP="No OPlus private node on this device; falling back to the standard node"
+MSG_VOLT_CHECK="Reading the standard voltage node to calibrate the unit divisors..."
+MSG_VOLT_APPLY="Calibration divisors written (same value for voltage and current)"
+MSG_VOLT_FAIL="Standard voltage node unreadable or out of the 3-4.5 V range; divisors left as they are"
 
 if echo "$CURRENT_LOCALE" | $BUSYBOX grep -qi "zh"; then
   LANG_CODE="zh"
@@ -85,10 +88,14 @@ if echo "$CURRENT_LOCALE" | $BUSYBOX grep -qi "zh"; then
   MSG_KEEP_CONFIG_NO="已更换为默认配置"
   MSG_OPLUS_ON="检测到 OPlus 私有节点，已为新配置启用私有节点读取"
   MSG_OPLUS_DUAL_ON="检测到第二个电芯，已启用双电芯电压"
-  MSG_OPLUS_NO_META="未定位到当前机型的 meta.yaml，OPlus 开关未自动启用（可在 WebUI 电池读数页开启）"
-  MSG_OPLUS_NO_SED="检测为非 oplus 机型，继续安装"
+  MSG_OPLUS_NO_META="未定位到当前机型的 meta.yaml，电池读数开关与校准倍数未自动写入（可在 WebUI 电池读数页设置）"
+  MSG_OPLUS_NO_SED="sed 不可用，电池读数开关与校准倍数未自动写入（可在 WebUI 电池读数页设置）"
   MSG_OPLUS_CHECK="正在检查 OPlus 私有节点（bcc_parms）..."
-  MSG_OPLUS_SKIP="本机没有 OPlus 私有节点，开关保持原样"
+  MSG_OPLUS_SKIP="本机没有 OPlus 私有节点，回退标准节点读数"
+  MSG_VOLT_CHECK="正在读取标准节点电压，推算校准倍数..."
+  MSG_VOLT_APPLY="已写入校准倍数（电压与电流同值）"
+  MSG_VOLT_FAIL="标准节点电压读数不可用或不在 3~4.5V 量级，校准倍数保持原样，安装完成后请打开webui手动校准"
+
 fi
 
 # [welcome] 
@@ -199,26 +206,28 @@ detect_volume_key() {
     return 0
 }
 
-# [oplus-detect]
-# OPlus 私有节点存在就为新配置开好开关：`bcc_parms` 存在 → 顶层 `oplus_chg: false`
-# 改 true；字段数 ≥ 12（0 基下标 11 存在）→ `oplus_dual_cell: false` 改 true（双电芯）。
-# 只动**当前机型**那一份 meta.yaml：
-#   1) 优先按模块里的 active_config.chr（daemon 写的生效配置相对路径，如 8550/meta.yaml）；
-#   2) 退一步用 ro.soc.model 的数字部分（SM8550 → 8550）拼机型目录；
-#   3) 都拿不到就打印说明跳过，不去猜别的机型文件。
+# [battery-detect]
+# 按机器把电池读数那几个开关与校准倍数写进**当前机型**那一份 meta.yaml：
+#   1) 先定位文件——优先按模块里的 active_config.chr（daemon 写的生效配置相对路径，
+#      如 8550/meta.yaml）；退一步用 ro.soc.model 的数字部分（SM8550 → 8550）拼机型
+#      目录；都拿不到就打印说明跳过，不去猜别的机型文件；
+#   2) OPlus 私有节点 bcc_parms 读得到内容 → `oplus_chg: false` 改 true，并按第 12 个
+#      字段（0 基下标 11）判双电芯 → `oplus_dual_cell: false` 改 true；
+#   3) 读不到私有节点（回退标准节点）→ 按标准节点电压原始值的位数算校准倍数，
+#      写 `voltage_divisor` / `current_divisor`（两者同值）。
+# 改的是 $MODPATH（= modules_update 暂存）里那一份：完整安装由安装器落地、热更新由
+# 下面的 cp -r 覆盖到 live 目录——两条路拿到的都是这份结果（所以只改一次）。
 # 只在用户选择「不保留配置」时调用（见 [config-keep]）——保留时那份 meta.yaml 是用户
-# 自己的文件，安装器不该碰；开关可以随时在 WebUI 电池读数页改。
+# 自己的文件，安装器不该碰；这些项随时可以在 WebUI 电池读数页改。
 # 定义必须早于调用点（普通安装与热更新两条路都会用到）。
 OPLUS_BCC="/sys/class/oplus_chg/battery/bcc_parms"
+STD_VOLT="/sys/class/power_supply/battery/voltage_now"
 
-apply_oplus_defaults() {
-    # 无论走哪条分支都打印：只在成功时才打会让人分不清「没检测」和「检测了但没命中」
-    ui_print "$MSG_OPLUS_CHECK"
-    if [ ! -f "$OPLUS_BCC" ]; then
-        ui_print "$MSG_OPLUS_SKIP"
-        return 0
-    fi
-
+# 定位当前机型的 meta.yaml，结果放进全局 META_FILE（定位不到就留空）
+META_FILE=""
+SED_CMD=""
+locate_meta_file() {
+    META_FILE=""
     local rel=""
     local active="/data/adb/modules/chiri/active_config.chr"
     if [ -f "$active" ]; then
@@ -230,33 +239,103 @@ apply_oplus_defaults() {
             rel="$soc/meta.yaml"
         fi
     fi
-    if [ -z "$rel" ] || [ ! -f "$MODPATH/config/$rel" ]; then
+    if [ -n "$rel" ] && [ -f "$MODPATH/config/$rel" ]; then
+        META_FILE="$MODPATH/config/$rel"
+    fi
+}
+
+# 私有节点可用 → 开 oplus_chg / oplus_dual_cell；返回 1 表示「没有私有节点」，
+# 调用方接着走标准节点校准。
+apply_oplus_switches() {
+    local meta="$1"
+    local bcc=""
+    if [ -f "$OPLUS_BCC" ]; then
+        bcc=$(cat "$OPLUS_BCC" 2>/dev/null)
+    fi
+    if [ -z "$bcc" ]; then
+        ui_print "$MSG_OPLUS_SKIP"
+        return 1
+    fi
+
+    if grep -q "^oplus_chg: false" "$meta"; then
+        $SED_CMD -i "s/^oplus_chg: false/oplus_chg: true/" "$meta"
+        ui_print "$MSG_OPLUS_ON"
+    fi
+    # 双电芯 = 第 12 个字段（0 基下标 11）存在且为正数，与 daemon read_oplus_bcc 同口径。
+    # **不能只 `cut -d',' -f 12` 判非空**：字段不足 12 个时 cut 会把整行原样输出（无
+    # 分隔符的行默认透传），单电芯机型会被误判成双电芯——先数逗号确认字段数够。
+    local commas=$(printf '%s' "$bcc" | tr -cd ',')
+    local f12=""
+    if [ ${#commas} -ge 11 ]; then
+        f12=$(printf '%s' "$bcc" | cut -d ',' -f 12 | tr -d ' \t\r\n')
+    fi
+    case "$f12" in
+        ''|*[!0-9]*|0) ;;
+        *)
+            if grep -q "^oplus_dual_cell: false" "$meta"; then
+                $SED_CMD -i "s/^oplus_dual_cell: false/oplus_dual_cell: true/" "$meta"
+                ui_print "$MSG_OPLUS_DUAL_ON"
+            fi
+            ;;
+    esac
+    return 0
+}
+
+# 没有私有节点 → 走标准 power_supply 节点。电压原始值有几位就除以「1 后面跟 位数-1
+# 个 0」（4382 → 1000 = 4.382V；4382000 → 1000000 = 4.382V），电流套用同一个数——
+# 同一节点的电压/电流单位一致。首位必须是 3 或 4（电池 3~4.5V），否则不猜：量级填错
+# 会让功率整条曲线失真，宁可留默认值让用户在 WebUI 里改。
+apply_standard_divisor() {
+    local meta="$1"
+    ui_print "$MSG_VOLT_CHECK"
+    local raw=""
+    if [ -f "$STD_VOLT" ]; then
+        raw=$(cat "$STD_VOLT" 2>/dev/null)
+    fi
+    raw=$(printf '%s' "$raw" | tr -d ' \t\r\n-')
+    case "$raw" in
+        ''|*[!0-9]*) ui_print "$MSG_VOLT_FAIL"; return 0 ;;
+    esac
+    case "$raw" in
+        3*|4*) ;;
+        *) ui_print "$MSG_VOLT_FAIL"; return 0 ;;
+    esac
+
+    local len=${#raw}
+    local div="1"
+    local i=1
+    while [ "$i" -lt "$len" ]; do
+        div="${div}0"
+        i=$((i + 1))
+    done
+    $SED_CMD -i "s/^voltage_divisor: .*/voltage_divisor: $div/" "$meta"
+    $SED_CMD -i "s/^current_divisor: .*/current_divisor: $div/" "$meta"
+    ui_print "$MSG_VOLT_APPLY"
+    ui_print "voltage_now=$raw -> divisor=$div"
+}
+
+apply_battery_defaults() {
+    # 无论走哪条分支都打印：只在成功时才打会让人分不清「没检测」和「检测了但没命中」
+    ui_print "$MSG_OPLUS_CHECK"
+
+    locate_meta_file
+    if [ -z "$META_FILE" ]; then
         ui_print "$MSG_OPLUS_NO_META"
         return 0
     fi
 
-    local meta="$MODPATH/config/$rel"
-    local sed_cmd=""
     if [ -n "$BUSYBOX" ] && [ -x "$BUSYBOX" ]; then
-        sed_cmd="$BUSYBOX sed"
+        SED_CMD="$BUSYBOX sed"
     elif command -v sed >/dev/null 2>&1; then
-        sed_cmd="sed"
+        SED_CMD="sed"
     fi
-    if [ -z "$sed_cmd" ]; then
+    if [ -z "$SED_CMD" ]; then
         ui_print "$MSG_OPLUS_NO_SED"
         return 0
     fi
 
-    if grep -q "^oplus_chg: false" "$meta"; then
-        $sed_cmd -i "s/^oplus_chg: false/oplus_chg: true/" "$meta"
-        ui_print "$MSG_OPLUS_ON"
-    fi
-    # 第 12 个字段非空 = 这台机器报出了第二个电芯（索引 11）
-    if [ -n "$(cut -d ',' -f 12 "$OPLUS_BCC" 2>/dev/null)" ]; then
-        if grep -q "^oplus_dual_cell: false" "$meta"; then
-            $sed_cmd -i "s/^oplus_dual_cell: false/oplus_dual_cell: true/" "$meta"
-            ui_print "$MSG_OPLUS_DUAL_ON"
-        fi
+    if ! apply_oplus_switches "$META_FILE"; then
+        apply_standard_divisor "$META_FILE"
     fi
 }
 
@@ -289,8 +368,8 @@ ask_keep_config() {
     else
         ui_print "$MSG_KEEP_CONFIG_NO"
         CONFIG_KEPT=false
-        # 覆盖安装：按机型把 OPlus 私有节点开关开好（两条安装路径都经过这里）
-        apply_oplus_defaults
+        # 覆盖安装：按机型把电池读数开关与校准倍数写好（两条安装路径都经过这里）
+        apply_battery_defaults
     fi
     ui_print " "
 }
@@ -435,12 +514,21 @@ if [ "$HOT_UPDATE_AVAILABLE" = "true" ]; then
             ui_print "Run Action manually to start the old scheduler."
         fi
 
-        # 恢复用户配置文件
-        if [ -f "$MODDIR/config/meta.yaml.bak" ]; then
-            mv "$MODDIR/config/meta.yaml.bak" "$MODDIR/config/meta.yaml"
-        fi
-        if [ -f "$MODDIR/rules.yaml.bak" ]; then
-            mv "$MODDIR/rules.yaml.bak" "$MODDIR/rules.yaml"
+        # 恢复用户配置文件：只在「保留配置」那条路盖回去。
+        # 选了覆盖（CONFIG_KEPT=false）时不再还原——这两份备份盖回去会把新包里的
+        # meta.yaml 顶掉，本轮写入的电池校准倍数也就白写了；而 ChiRi 机型的生效配置
+        # 本来是 config/<soc>/meta.yaml、压根不在这条备份链里（新文件直接生效），
+        # 只有回退机型（生效配置就是根上那份 config/meta.yaml）才会被旧文件顶回，
+        # 行为不一致。备份本身仍留给上面的复制失败回滚。
+        if [ "$CONFIG_KEPT" != "false" ]; then
+            if [ -f "$MODDIR/config/meta.yaml.bak" ]; then
+                mv "$MODDIR/config/meta.yaml.bak" "$MODDIR/config/meta.yaml"
+            fi
+            if [ -f "$MODDIR/rules.yaml.bak" ]; then
+                mv "$MODDIR/rules.yaml.bak" "$MODDIR/rules.yaml"
+            fi
+        else
+            rm -f "$MODDIR/config/meta.yaml.bak" "$MODDIR/rules.yaml.bak"
         fi
 
         # 设置权限（注意二进制在 core/bin/chiri，模块根下并无 chiri 文件）
@@ -493,7 +581,7 @@ fi
 
 # [full-install] 
 # 完整安装流程（原逻辑）：模块文件由 Magisk 从暂存目录复制过来
-# （唯一例外是下面的 [oplus-detect]：覆盖安装时会按机型修 staged 的 meta.yaml）
+# （唯一例外是 [battery-detect]：覆盖安装时会按机型修 staged 的 meta.yaml）
 
-# 完整安装收尾：OPlus 私有节点的检测与开关修正已在 [config-keep] 里完成
+# 完整安装收尾：电池读数的开关与校准倍数已在 [config-keep] 里写好
 # （放在那儿是为了热更新路径也走得到——热更新以 abort 结束时不会回到文件末尾）

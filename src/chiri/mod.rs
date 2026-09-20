@@ -752,6 +752,10 @@ pub fn start_scheduler_thread(
             let mode_file_path = root.join("current_mode.chr");
             const MODE_FILE_REWRITE_INTERVAL: Duration = Duration::from_secs(5);
             let mut last_mode_file_write = Instant::now();
+            // 停摆期心跳间隔：停摆中本线程不打任何日志，按这个间隔落一条状态行
+            // （既是「停摆仍在生效」的证据，也是「采集与日志照常」的证据）
+            const DOWN_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(300);
+            let mut last_down_heartbeat = Instant::now();
             // [halt] 停摆状态机：进入/退出 DOWN 时做一次性的释放与恢复。
             // 放在调度循环里而不是监听线程里——这些 governor 对象归本线程独占。
             let mut halted = crate::down::is_down();
@@ -759,6 +763,11 @@ pub fn start_scheduler_thread(
             // mode 列都用它（rules 里的真实模式不受影响，退出停摆时恢复）
             if halted {
                 *mode_clone.lock().unwrap() = crate::down::DOWN_MODE.to_string();
+                // **开机就停摆必须显式打点**：down.rs 只在「运行期切换」时打日志，而
+                // 启动时 `halted` 初值就是 is_down()、状态机不会走「进入停摆」分支，
+                // 于是整份日志里没有任何停摆字样——与「调度线程根本没起来」完全同形，
+                // 只能靠推断（旁证是 tweaks 被跳过的那行），必须留痕
+                log::warn!("{}", t("down-boot-halted"));
             }
             // 启动时先写一次初始模式，避免开机后文件缺失/被清空时 WebUI 显示未知状态
             {
@@ -1091,6 +1100,15 @@ pub fn start_scheduler_thread(
                     // WebUI stopScheduler 将无法终止看门狗（旧看门狗残留会把
                     // daemon 再拉起，与重启实例形成双实例并行写两份日志）
                     crate::logger::ensure_watchdog_pid_file();
+                }
+
+                // 停摆期心跳（5 分钟一条）：停摆中调度动作全停，上面那些周期块也大多
+                // 被门控跳过，日志会长时间静默——没有这条就分不清「停摆生效中」和
+                // 「调度线程已死」。采集（status.csv/devimp/心跳文件）由各自的周期块
+                // 与独立线程维持，与本心跳无关。
+                if halted && last_down_heartbeat.elapsed() >= DOWN_HEARTBEAT_INTERVAL {
+                    last_down_heartbeat = Instant::now();
+                    log::info!("{}", t("down-heartbeat"));
                 }
 
                 // config.yaml 热重载联动：config_watcher 成功重载后置位。
