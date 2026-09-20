@@ -22,7 +22,7 @@
 use aya_ebpf::{
     helpers::{bpf_get_current_pid_tgid, bpf_ktime_get_ns},
     macros::{map, tracepoint, uprobe},
-    maps::{HashMap, PerCpuArray, RingBuf},
+    maps::{Array, HashMap, PerCpuArray, RingBuf},
     programs::{ProbeContext, TracePointContext},
 };
 
@@ -74,25 +74,28 @@ fn try_handle_frame(_ctx: ProbeContext) -> Result<u32, u32> {
 const OFF_PREV_PID: usize = 24;
 const OFF_NEXT_PID: usize = 56;
 
-/// 每个核心的上次切换时间戳
-#[map]
-static CORE_LAST_TIME: PerCpuArray<u64> = PerCpuArray::with_max_entries(1, 0);
+/// 每核心运行时状态：原先是五个独立 PerCpuArray（last_time / idle / busy /
+/// cur_tid / cur_tgid），合并后一次查找即可读写全部字段，把每次 sched_switch
+/// 的 map 查找从 5 次降到 1 次。
+/// 布局必须与用户态 `src/monitor/cpu_monitor.rs` 的同名结构逐字段一致：
+/// `#[repr(C)]`、u64 在前 u32 在后 → 32 字节、无 padding。两侧必须同批发布。
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct CoreState {
+    /// 上次切换时间戳 (ns)
+    pub last_time: u64,
+    /// 累计 Idle 时间 (ns)
+    pub idle: u64,
+    /// 累计 Busy 时间 (ns)
+    pub busy: u64,
+    /// 当前运行的 TID
+    pub cur_tid: u32,
+    /// 当前运行任务的 TGID
+    pub cur_tgid: u32,
+}
 
-/// 每个核心累计 Idle 时间 (ns)
 #[map]
-static CORE_IDLE_TIME: PerCpuArray<u64> = PerCpuArray::with_max_entries(1, 0);
-
-/// 每个核心累计 Busy 时间 (ns)
-#[map]
-static CORE_BUSY_TIME: PerCpuArray<u64> = PerCpuArray::with_max_entries(1, 0);
-
-/// 每个核心当前运行的 TID
-#[map]
-static CORE_CURRENT_TID: PerCpuArray<u32> = PerCpuArray::with_max_entries(1, 0);
-
-/// 每个核心当前运行任务的 TGID
-#[map]
-static CORE_CURRENT_TGID: PerCpuArray<u32> = PerCpuArray::with_max_entries(1, 0);
+static CORE_STATE: PerCpuArray<CoreState> = PerCpuArray::with_max_entries(1, 0);
 
 /// 线程级运行时间 (TID → ns)
 #[map]
@@ -101,6 +104,13 @@ static THREAD_RUN_TIME: HashMap<u32, u64> = HashMap::with_max_entries(32768, 0);
 /// TGID 级聚合运行时间 (TGID → ns)
 #[map]
 static TGID_RUN_TIME: HashMap<u32, u64> = HashMap::with_max_entries(1024, 0);
+
+/// 线程级记账开关（0 = 关，非 0 = 开）：由用户态写，置位条件与
+/// cpu_monitor 的 FAS_FG_UTIL_ENABLED 相同（ChiRi SoC 且 FAS 配置可用）。
+/// 关闭时 sched_switch 不再做 THREAD_RUN_TIME 的 hash 查找/插入——该 map
+/// 只被用户态「TGID 主路径失败」时的降级路径消费。
+#[map]
+static THREAD_ACCT: Array<u32> = Array::with_max_entries(1, 0);
 
 const ZERO_KEY: u32 = 0;
 const NS_10_SEC: u64 = 10_000_000_000;
@@ -162,45 +172,41 @@ fn try_handle_sched_switch(ctx: &TracePointContext) -> Result<u32, i64> {
     let pid_tgid = bpf_get_current_pid_tgid();
     let next_tgid = (pid_tgid >> 32) as u32;
 
+    // 单次查找拿到本核全部状态（原先是 5 个独立 PerCpuArray 各查一次）
+    let state_ptr = match CORE_STATE.get_ptr_mut(ZERO_KEY) {
+        Some(p) => p,
+        None => return Ok(0),
+    };
+    let state = unsafe { &mut *state_ptr };
+
     // ── 计算上一个任务的耗时并累加 ──
-    if let Some(last_ts_ptr) = CORE_LAST_TIME.get_ptr_mut(ZERO_KEY) {
-        let last_ts = unsafe { *last_ts_ptr };
-        let delta = now.saturating_sub(last_ts);
+    let last_ts = state.last_time;
+    let delta = now.saturating_sub(last_ts);
 
-        if delta > 0 && delta < NS_10_SEC {
-            if prev_tid == 0 {
-                // Idle 时间
-                if let Some(idle_ptr) = CORE_IDLE_TIME.get_ptr_mut(ZERO_KEY) {
-                    unsafe {
-                        *idle_ptr += delta;
-                    }
-                }
-            } else {
-                // Busy 时间
-                if let Some(busy_ptr) = CORE_BUSY_TIME.get_ptr_mut(ZERO_KEY) {
-                    unsafe {
-                        *busy_ptr += delta;
-                    }
-                }
+    if delta > 0 && delta < NS_10_SEC {
+        if prev_tid == 0 {
+            // Idle 时间
+            state.idle += delta;
+        } else {
+            // Busy 时间
+            state.busy += delta;
 
-                // 线程级累计
+            // 线程级累计：按用户态开关执行（见 THREAD_ACCT 说明）
+            if thread_acct_enabled() {
                 add_to_hash(&THREAD_RUN_TIME, prev_tid as u32, delta);
+            }
 
-                // TGID 级聚合累计：prev 任务的 TGID 从 CORE_CURRENT_TGID 读取
-                if let Some(prev_tgid_ptr) = CORE_CURRENT_TGID.get_ptr_mut(ZERO_KEY) {
-                    let prev_tgid = unsafe { *prev_tgid_ptr };
-                    if prev_tgid > 0 {
-                        add_to_hash(&TGID_RUN_TIME, prev_tgid, delta);
-                    }
-                }
+            // TGID 级聚合累计：prev 任务的 TGID 取本核当前记录
+            if state.cur_tgid > 0 {
+                add_to_hash(&TGID_RUN_TIME, state.cur_tgid, delta);
             }
         }
     }
 
     // ── 更新当前核心状态 ──
-    update_percpu(&CORE_LAST_TIME, &ZERO_KEY, &now);
-    update_percpu(&CORE_CURRENT_TID, &ZERO_KEY, &(next_tid as u32));
-    update_percpu(&CORE_CURRENT_TGID, &ZERO_KEY, &next_tgid);
+    state.last_time = now;
+    state.cur_tid = next_tid as u32;
+    state.cur_tgid = next_tgid;
 
     Ok(0)
 }
@@ -218,13 +224,10 @@ fn add_to_hash(map: &HashMap<u32, u64>, key: u32, delta: u64) {
     }
 }
 
-/// 更新 PerCpuArray 中 key 对应的值
-fn update_percpu<T: Copy>(map: &PerCpuArray<T>, key: &u32, val: &T) {
-    if let Some(ptr) = map.get_ptr_mut(*key) {
-        unsafe {
-            *ptr = *val;
-        }
-    }
+/// 线程级记账开关是否打开（THREAD_ACCT 由用户态写：非 0 = 记账）。
+/// 关闭时 sched_switch 跳过 THREAD_RUN_TIME 的 hash 查找/插入。
+fn thread_acct_enabled() -> bool {
+    THREAD_ACCT.get(ZERO_KEY).is_some_and(|v| *v != 0)
 }
 
 #[panic_handler]

@@ -2,7 +2,7 @@
 
 use crate::common::DaemonEvent;
 use crate::utils::get_ktime_ns;
-use aya::maps::{HashMap as BpfHashMap, PerCpuArray};
+use aya::maps::{Array, HashMap as BpfHashMap, PerCpuArray};
 use aya::util::online_cpus;
 use aya::{Ebpf, programs::TracePoint};
 use log::{debug, info, warn};
@@ -24,9 +24,30 @@ const SAMPLE_MS_TUNED: u64 = 40;
 /// start_cpu_loop 入口按「ChiRi 且 FAS 配置可用」动态置位，Yumi 设备恒为 false（行为零变化）。
 static FAS_FG_UTIL_ENABLED: AtomicBool = AtomicBool::new(false);
 
+// [core-state]
+/// 每核心运行时状态：与 `yumi-ebpf/src/main.rs` 的 `CoreState` **逐字段一致**。
+/// 原先是五个独立 PerCpuArray（last_time / idle / busy / cur_tid / cur_tgid），
+/// 合并后探针每次 sched_switch 的 map 查找从 5 次降到 1 次，用户态每采样读取
+/// 也从 5 次降到 1 次。`#[repr(C)]` + u64 在前 u32 在后 = 32 字节、无 padding。
+/// 两侧结构必须同批发布（布局不一致会读到错位数据）。
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct CoreState {
+    pub last_time: u64,
+    pub idle: u64,
+    pub busy: u64,
+    pub cur_tid: u32,
+    pub cur_tgid: u32,
+}
+
+// SAFETY: `CoreState` 是 `#[repr(C)]` 的纯 POD（全 u32/u64 字段、32 字节、
+// 无内部 padding、无 Drop），满足 aya::Pod「可安全按字节拷贝」的约束。
+unsafe impl aya::Pod for CoreState {}
+
 // [helpers]
 /// 读取 PerCpuArray 计数 map 的全核总和（key 0 的所有 cpu 槽位累加）。
 /// map 缺失（None，eBPF 产物与 daemon 版本偏差时）返回 0，保持计数可选语义。
+#[inline]
 fn percpu_total(map: Option<&PerCpuArray<&mut aya::maps::MapData, u64>>) -> u64 {
     let Some(map) = map else {
         return 0;
@@ -138,30 +159,15 @@ pub async fn start_cpu_loop(
 
     let bpf_ptr = bpf as *mut Ebpf;
 
-    let core_idle_map: PerCpuArray<_, u64> =
-        PerCpuArray::try_from(unsafe { &mut *bpf_ptr }.map_mut("CORE_IDLE_TIME").unwrap())?;
-    let core_busy_map: PerCpuArray<_, u64> =
-        PerCpuArray::try_from(unsafe { &mut *bpf_ptr }.map_mut("CORE_BUSY_TIME").unwrap())?;
-    let core_last_time_map: PerCpuArray<_, u64> =
-        PerCpuArray::try_from(unsafe { &mut *bpf_ptr }.map_mut("CORE_LAST_TIME").unwrap())?;
-    let core_current_tid_map: PerCpuArray<_, u32> = PerCpuArray::try_from(
-        unsafe { &mut *bpf_ptr }
-            .map_mut("CORE_CURRENT_TID")
-            .unwrap(),
-    )?;
+    // 逐核运行时状态（合并后的单 map，布局见 CoreState）
+    let core_state_map: PerCpuArray<_, CoreState> =
+        PerCpuArray::try_from(unsafe { &mut *bpf_ptr }.map_mut("CORE_STATE").unwrap())?;
     let thread_run_map: BpfHashMap<_, u32, u64> =
         BpfHashMap::try_from(unsafe { &mut *bpf_ptr }.map_mut("THREAD_RUN_TIME").unwrap())?;
 
     // TGID 级聚合运行时间 map
     let tgid_run_map: BpfHashMap<_, u32, u64> =
         BpfHashMap::try_from(unsafe { &mut *bpf_ptr }.map_mut("TGID_RUN_TIME").unwrap())?;
-
-    // 每核当前 TGID map (用于 pending delta 补偿)
-    let core_current_tgid_map: PerCpuArray<_, u32> = PerCpuArray::try_from(
-        unsafe { &mut *bpf_ptr }
-            .map_mut("CORE_CURRENT_TGID")
-            .unwrap(),
-    )?;
 
     // 扩展探针计数 map：可选语义——ELF 中缺失（产物与 daemon 版本偏差）时计数
     // 恒为 0 并 warn 一次，绝不 panic（与探针挂载失败的容忍路径语义一致）。
@@ -184,6 +190,26 @@ pub async fn start_cpu_loop(
     let wakeup_map = fetch_counter_map("WAKEUP_COUNT");
     let migrate_map = fetch_counter_map("MIGRATE_COUNT");
     let freq_trans_map = fetch_counter_map("FREQ_TRANS_COUNT");
+
+    // 线程级记账开关（K2）：与 FAS_FG_UTIL_ENABLED 同条件置位——该记账只被
+    // 「TGID 主路径失败」的降级路径消费，关闭时探针侧跳过 THREAD_RUN_TIME 的
+    // hash 查找/插入。旧产物无此 map 时仅告警：探针保持原行为（恒记账），
+    // 降级路径照常可用，两侧版本偏差不产生行为差异。
+    if FAS_FG_UTIL_ENABLED.load(Ordering::Relaxed) {
+        match unsafe { &mut *bpf_ptr }.map_mut("THREAD_ACCT") {
+            Some(m) => match Array::<&mut aya::maps::MapData, u32>::try_from(m) {
+                Ok(mut arr) => {
+                    if let Err(e) = arr.set(0, 1u32, 0) {
+                        warn!("THREAD_ACCT set failed: {e}");
+                    }
+                }
+                Err(e) => warn!("THREAD_ACCT type mismatch: {e}"),
+            },
+            None => warn!(
+                "THREAD_ACCT map missing in eBPF object; thread-level accounting stays enabled"
+            ),
+        }
+    }
 
     tokio::spawn(async move {
         let mut rx_pid = rx_pid;
@@ -247,11 +273,8 @@ pub async fn start_cpu_loop(
             }
 
             let zero_key: u32 = 0;
-            let per_cpu_idle_values = core_idle_map.get(&zero_key, 0);
-            let per_cpu_busy_values = core_busy_map.get(&zero_key, 0);
-            let per_cpu_last_time = core_last_time_map.get(&zero_key, 0);
-            let per_cpu_current_tid = core_current_tid_map.get(&zero_key, 0);
-            let per_cpu_current_tgid = core_current_tgid_map.get(&zero_key, 0);
+            // 五个逐核字段来自同一个 CoreState map：一次查找即可（原先 5 次）
+            let per_cpu_state = core_state_map.get(&zero_key, 0);
 
             let mut core_utils = vec![0.0_f32; max_cpu_id + 1];
 
@@ -263,30 +286,13 @@ pub async fn start_cpu_loop(
             for &cpu_id in &online_cpus_list {
                 let idx = cpu_id as usize;
 
-                let raw_idle = per_cpu_idle_values
+                // 单次取值：四字段来自同一个 CoreState（map 缺失或该核缺失时按 0
+                // 处理，与原先逐字段 unwrap_or(0) 的行为一致）
+                let (raw_idle, raw_busy, last_switch_time, current_tid) = per_cpu_state
                     .as_ref()
                     .ok()
                     .and_then(|v| v.get(idx))
-                    .copied()
-                    .unwrap_or(0);
-                let raw_busy = per_cpu_busy_values
-                    .as_ref()
-                    .ok()
-                    .and_then(|v| v.get(idx))
-                    .copied()
-                    .unwrap_or(0);
-                let last_switch_time = per_cpu_last_time
-                    .as_ref()
-                    .ok()
-                    .and_then(|v| v.get(idx))
-                    .copied()
-                    .unwrap_or(0);
-                let current_tid = per_cpu_current_tid
-                    .as_ref()
-                    .ok()
-                    .and_then(|v| v.get(idx))
-                    .copied()
-                    .unwrap_or(0);
+                    .map_or((0, 0, 0, 0), |s| (s.idle, s.busy, s.last_time, s.cur_tid));
 
                 let mut adj_idle = raw_idle;
                 let mut adj_busy = raw_busy;
@@ -349,8 +355,7 @@ pub async fn start_cpu_loop(
                     let tgid_util = compute_tgid_util(
                         fg_pid,
                         &tgid_run_map,
-                        &per_cpu_current_tgid,
-                        &per_cpu_last_time,
+                        &per_cpu_state,
                         &online_cpus_list,
                         now_ktime,
                         real_delta_ns,
@@ -374,8 +379,7 @@ pub async fn start_cpu_loop(
                         compute_thread_level_util(
                             fg_pid,
                             &thread_run_map,
-                            &core_current_tid_map,
-                            &per_cpu_last_time,
+                            &per_cpu_state,
                             &online_cpus_list,
                             now_ktime,
                             real_delta_ns,
@@ -542,8 +546,7 @@ fn proc_name(pid: u32) -> String {
 fn compute_tgid_util(
     fg_pid: u32,
     tgid_run_map: &BpfHashMap<&mut aya::maps::MapData, u32, u64>,
-    per_cpu_current_tgid: &Result<aya::maps::PerCpuValues<u32>, aya::maps::MapError>,
-    per_cpu_last_time: &Result<aya::maps::PerCpuValues<u64>, aya::maps::MapError>,
+    per_cpu_state: &Result<aya::maps::PerCpuValues<CoreState>, aya::maps::MapError>,
     online_cpus: &[u32],
     now_ktime: u64,
     real_delta_ns: u64,
@@ -560,19 +563,13 @@ fn compute_tgid_util(
     // 计算当前 pending delta：正在核心上运行但还没经过 sched_switch 的时间
     // 这是一个瞬时快照值，每轮独立计算，不累积到基线中
     let mut current_pending: u64 = 0;
-    if let Ok(per_cpu_tgids) = per_cpu_current_tgid.as_ref() {
+    if let Ok(states) = per_cpu_state.as_ref() {
         for &cpu_id in online_cpus {
             let idx = cpu_id as usize;
-            let current_tgid = per_cpu_tgids.get(idx).copied().unwrap_or(0);
+            let Some(s) = states.get(idx) else { continue };
 
-            if current_tgid == fg_pid {
-                let last_switch = per_cpu_last_time
-                    .as_ref()
-                    .ok()
-                    .and_then(|v| v.get(idx))
-                    .copied()
-                    .unwrap_or(0);
-                let pending = now_ktime.saturating_sub(last_switch);
+            if s.cur_tgid == fg_pid {
+                let pending = now_ktime.saturating_sub(s.last_time);
                 if pending < 1_000_000_000 {
                     current_pending += pending;
                 }
@@ -618,8 +615,7 @@ fn compute_tgid_util(
 fn compute_thread_level_util(
     fg_pid: u32,
     thread_run_map: &BpfHashMap<&mut aya::maps::MapData, u32, u64>,
-    core_current_tid_map: &PerCpuArray<&mut aya::maps::MapData, u32>,
-    per_cpu_last_time: &Result<aya::maps::PerCpuValues<u64>, aya::maps::MapError>,
+    per_cpu_state: &Result<aya::maps::PerCpuValues<CoreState>, aya::maps::MapError>,
     online_cpus: &[u32],
     now_ktime: u64,
     real_delta_ns: u64,
@@ -628,31 +624,18 @@ fn compute_thread_level_util(
     let tids = get_thread_tids(fg_pid);
     let mut max_util: f32 = 0.0;
     let mut current_thread_run = std::collections::HashMap::with_capacity(tids.len());
-    let zero_key: u32 = 0;
-
-    let per_cpu_current_tid = core_current_tid_map.get(&zero_key, 0);
-
     for &tid in &tids {
         let mut adj_thread_time = thread_run_map.get(&tid, 0).unwrap_or(0);
 
         // 如果该线程正在某个核心上跑，补上它的 Pending Delta
         for &cpu_id in online_cpus {
             let idx = cpu_id as usize;
-            let current_tid_on_core = per_cpu_current_tid
-                .as_ref()
-                .ok()
-                .and_then(|v| v.get(idx))
-                .copied()
-                .unwrap_or(0);
+            let Some(s) = per_cpu_state.as_ref().ok().and_then(|v| v.get(idx)) else {
+                continue;
+            };
 
-            if current_tid_on_core == tid {
-                let last_switch_time = per_cpu_last_time
-                    .as_ref()
-                    .ok()
-                    .and_then(|v| v.get(idx))
-                    .copied()
-                    .unwrap_or(0);
-                let pending_delta = now_ktime.saturating_sub(last_switch_time);
+            if s.cur_tid == tid {
+                let pending_delta = now_ktime.saturating_sub(s.last_time);
                 if pending_delta < 1_000_000_000 {
                     adj_thread_time += pending_delta;
                 }

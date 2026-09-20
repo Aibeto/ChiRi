@@ -38,7 +38,9 @@ pub enum DaemonEvent {
         foreground_max_util: f32,
     },
 
-    ConfigReload(RulesConfig),
+    /// 装箱：`RulesConfig` 是本枚举里最大的变体（HashMap + 多个 Vec/String），
+    /// 内联会让每次 `SystemLoadUpdate`（40ms 一次）发送都按整枚举尺寸搬内存
+    ConfigReload(Box<RulesConfig>),
 
     ScreenStateChange(bool),
 

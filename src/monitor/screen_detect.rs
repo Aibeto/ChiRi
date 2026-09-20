@@ -635,6 +635,10 @@ pub fn monitor_screen_state_uevent(
                                 }
                             }
                         }
+                    } else if event.subsystem == "cpu" {
+                        // CPU hotplug（cpuN/online 变更）：只置脏标记，下一轮 affinity
+                        // 立即刷新在线核位图（≤2s）。这里不做任何读/写，事件风暴也只是一次原子写
+                        crate::monitor::CPU_HOTPLUG_DIRTY.store(true, Ordering::Relaxed);
                     } else if event.subsystem == "backlight" && event.action == ActionType::Change {
                         thread::sleep(Duration::from_millis(100));
                         // 与 verify 自愈同口径（read_backlight_state）：bl_power==0 → 亮；

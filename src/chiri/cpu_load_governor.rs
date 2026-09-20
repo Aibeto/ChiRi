@@ -58,6 +58,7 @@ struct ClusterState {
 
 impl ClusterState {
     /// 把目标性能比映射到最近的可用频率档位（基于 cached_ratios 二分查找最近点）
+    #[inline]
     fn find_nearest_freq(&self, target_ratio: f32) -> u32 {
         let idx = self.cached_ratios.partition_point(|&r| r < target_ratio);
         if idx == 0 {
@@ -118,6 +119,7 @@ impl ClusterState {
     }
 
     /// 取该 cluster 受影响 CPU 中的最大利用率（利用率来源为 eBPF 各核心负载）
+    #[inline]
     fn max_util(&self, core_utils: &[f32]) -> f32 {
         self.affected_cpus
             .iter()
@@ -785,6 +787,9 @@ pub struct CpuLoadGovernor {
     thermal_free_above: Arc<AtomicU32>,
     /// 是否处于接管状态（至少一个 Worker 启动成功才为 true）
     active: bool,
+    /// 上一 tick 广播给 Worker 的负载缓冲。Worker 消费完即释放（不跨 tick 持有），
+    /// 引用计数归 1 时下一 tick 原地复用，省掉每 tick 一次 Vec 分配
+    load_buf: Option<Arc<Vec<f32>>>,
 }
 
 impl CpuLoadGovernor {
@@ -799,6 +804,7 @@ impl CpuLoadGovernor {
             thermal_cap: Arc::new(AtomicU32::new(1.0_f32.to_bits())),
             thermal_free_above: Arc::new(AtomicU32::new(0.80_f32.to_bits())),
             active: false,
+            load_buf: None,
         }
     }
 
@@ -947,10 +953,23 @@ impl CpuLoadGovernor {
         if !self.active {
             return;
         }
-        let shared = Arc::new(core_utils.to_vec());
+        // 复用上一 tick 的广播缓冲：take 出来试 `Arc::get_mut`，引用计数归 1
+        // （Worker 已消费完且通道无积压）时原地覆盖，省掉每 tick 一次 Vec 分配；
+        // 长度变化（CPU 热插拔）或仍有 Worker 持有时回退为新建——两种路径
+        // 下 Worker 收到的内容与长度都与原实现完全一致。
+        let mut shared = match self.load_buf.take() {
+            Some(arc) if arc.len() == core_utils.len() => arc,
+            _ => Arc::new(core_utils.to_vec()),
+        };
+        if let Some(v) = Arc::get_mut(&mut shared) {
+            v.copy_from_slice(core_utils);
+        } else {
+            shared = Arc::new(core_utils.to_vec());
+        }
         for w in &self.workers {
             w.send_load(Arc::clone(&shared));
         }
+        self.load_buf = Some(shared);
     }
 
     /// 触摸事件驱动入口：收到触摸按下事件时更新共享触摸升频状态，

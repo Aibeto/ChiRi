@@ -3,12 +3,13 @@
 use fluent::bundle::FluentBundle;
 use fluent::{FluentArgs, FluentResource};
 use intl_memoizer::concurrent::IntlLangMemoizer;
-use once_cell::sync::Lazy;
+use std::sync::LazyLock;
 use std::sync::RwLock;
 
 // [bundle]
 // 全局静态变量，存储当前的语言包
-static BUNDLE: Lazy<RwLock<FluentBundle<FluentResource, IntlLangMemoizer>>> = Lazy::new(|| {
+static BUNDLE: LazyLock<RwLock<FluentBundle<FluentResource, IntlLangMemoizer>>> =
+    LazyLock::new(|| {
     let bundle = FluentBundle::new_concurrent(vec!["en".parse().unwrap()]);
     RwLock::new(bundle)
 });

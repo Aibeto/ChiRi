@@ -249,13 +249,11 @@ impl FasController {
 
         // 跨厂商候选节点（高通 perfmgr / MTK mtk_fpsgo）：逐条尝试写，单点失败 debug、
         // 全部失败 warn（见 utils::write_nodes）——此前直接 write_to_file 把错误丢掉了
-        let perfmgr_items: Vec<(String, String)> = [
-            "/sys/module/perfmgr/parameters/perfmgr_enable",
-            "/sys/module/mtk_fpsgo/parameters/perfmgr_enable",
-        ]
-        .iter()
-        .map(|path| (path.to_string(), "0".to_string()))
-        .collect();
+        // 路径是字面量，直接用 `(&str, &str)` 切片，省掉逐个 `to_string()` 与 Vec 分配
+        let perfmgr_items: [(&str, &str); 2] = [
+            ("/sys/module/perfmgr/parameters/perfmgr_enable", "0"),
+            ("/sys/module/mtk_fpsgo/parameters/perfmgr_enable", "0"),
+        ];
         let _ = crate::utils::write_nodes(&perfmgr_items, "perfmgr-disable");
 
         // [修改项] 动态拉取 CPU policy 列表

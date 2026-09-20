@@ -7,7 +7,7 @@ use std::error::Error;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
 use std::sync::mpsc::SyncSender;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -61,10 +61,11 @@ fn get_system_ime_packages() -> HashSet<String> {
     imes
 }
 
-lazy_static::lazy_static! {
-    static ref CURRENT_PACKAGE: Arc<Mutex<String>> = Arc::new(Mutex::new("".to_string()));
-    static ref IME_BLOCKLIST: HashSet<String> = get_system_ime_packages();
-}
+// 包名用 Arc<str> 存放：读方可零分配取快照（current_package_arc），
+// 写入只在包名变化时发生一次分配
+static CURRENT_PACKAGE: LazyLock<Arc<Mutex<Arc<str>>>> =
+    LazyLock::new(|| Arc::new(Mutex::new(Arc::from(""))));
+static IME_BLOCKLIST: LazyLock<HashSet<String>> = LazyLock::new(get_system_ime_packages);
 
 pub fn get_current_pid() -> i32 {
     CURRENT_PID.load(Ordering::Relaxed)
@@ -73,6 +74,12 @@ pub fn get_current_pid() -> i32 {
 /// 当前前台包名（实时，含同模式切换——set_current_package 在包名变化即更新）。
 /// 供 scheduler_ipc 的 devimp snap 行等消费，避免各处自行维护过期副本。
 pub fn get_current_package() -> String {
+    CURRENT_PACKAGE.lock().unwrap().to_string()
+}
+
+/// 取当前前台包名的**零分配**快照：`Arc<str>` 克隆只做一次引用计数递增，
+/// 不复制字符串内容。供周期块（如 1s 的 FAS 巡检）代替 `get_current_package()`。
+pub fn current_package_arc() -> Arc<str> {
     CURRENT_PACKAGE.lock().unwrap().clone()
 }
 
@@ -96,7 +103,7 @@ fn set_current_package(pkg: &str, pid: i32) {
         }
         None => pkg,
     };
-    *CURRENT_PACKAGE.lock().unwrap() = base.to_string();
+    *CURRENT_PACKAGE.lock().unwrap() = Arc::from(base);
     CURRENT_PID.store(pid, Ordering::Relaxed);
 }
 
@@ -150,17 +157,28 @@ fn is_valid_user_app(pkg: &str, ignored_apps: &[String]) -> bool {
 }
 
 // 提取核心检测逻辑
+///
+/// 倒序扫描（Android 把最新前台放在 procs 末尾，命中即返回）；这里直接对
+/// `split_whitespace()` 反向迭代，不再先 `collect::<Vec<_>>()`，`/proc/<pid>/cmdline`
+/// 的路径也用同一缓冲复用——每轮省掉一次 Vec 与一次 String 分配。
+/// **刻意不做「内容未变则复用上轮结果」的短路**：cgroup procs 内容在应用冷启动期间
+/// 可能不变（pid 先入组、exec 后 cmdline 才可读），缓存会让这类前台切换被漏检。
 fn check_cgroup_path(path: &str, ignored_apps: &[String]) -> Option<(String, i32)> {
-    if let Ok(content) = utils::read_file_content(path) {
-        let pids: Vec<&str> = content.split_whitespace().collect();
-        for pid_str in pids.iter().rev() {
-            let cmdline_path = format!("/proc/{}/cmdline", pid_str);
-            if let Ok(cmdline) = utils::read_file_content(&cmdline_path) {
-                let pkg_name = cmdline.split('\0').next().unwrap_or("").trim();
-                if is_valid_user_app(pkg_name, ignored_apps) {
-                    let pid = pid_str.parse::<i32>().unwrap_or(0);
-                    return Some((pkg_name.to_string(), pid));
-                }
+    let Ok(content) = utils::read_file_content(path) else {
+        return None;
+    };
+    let mut cmdline_path = String::with_capacity(32);
+    for pid_str in content.split_whitespace().rev() {
+        cmdline_path.clear();
+        let _ = std::fmt::Write::write_fmt(
+            &mut cmdline_path,
+            format_args!("/proc/{pid_str}/cmdline"),
+        );
+        if let Ok(cmdline) = utils::read_file_content(&cmdline_path) {
+            let pkg_name = cmdline.split('\0').next().unwrap_or("").trim();
+            if is_valid_user_app(pkg_name, ignored_apps) {
+                let pid = pid_str.parse::<i32>().unwrap_or(0);
+                return Some((pkg_name.to_string(), pid));
             }
         }
     }
@@ -413,7 +431,7 @@ pub fn watch_config_file(
 
             *config_arc.lock().unwrap() = new_config.clone();
 
-            if let Err(e) = tx.send(DaemonEvent::ConfigReload(new_config)) {
+            if let Err(e) = tx.send(DaemonEvent::ConfigReload(Box::new(new_config))) {
                 warn!("[Config] Failed to send ConfigReload event: {}", e);
             }
 

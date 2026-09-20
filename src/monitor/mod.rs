@@ -39,6 +39,11 @@ fn spawn_guarded<F: FnOnce() + Send + 'static>(name: &'static str, f: F) -> std:
     Ok(())
 }
 
+/// CPU hotplug 事件标记：netlink uevent 收到 `cpu` 子系统事件（`cpuN/online` 变更）
+/// 时置位，消费方（affinity 的在线核位图）见到即立即刷新，不必等 8s 周期。
+/// **周期兜底保留**：机型不广播 cpu uevent 时，行为与改造前完全一致。
+pub static CPU_HOTPLUG_DIRTY: AtomicBool = AtomicBool::new(false);
+
 // [start]
 /// `ak_active` 为特调（akmode）激活共享标志：cpu_monitor 据此在常规与 40ms 采样间切换。
 /// `sample_ms_normal` 为常规采样间隔（由 main.rs 按 SoC 传入：ChiRi 160ms / Yumi 200ms）。

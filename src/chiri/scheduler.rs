@@ -85,9 +85,11 @@ impl CpuScheduler {
     }
 
     /// `write_nodes` 批量写不读原值，写前先补齐快照。
-    fn snapshot_nodes(items: &[(String, String)]) {
+    /// 与 `utils::write_nodes` 同口径泛型：`Vec<(String, String)>` 与 `&[(&str, &str)]`
+    /// 都能直接传（这里只取路径，值不参与快照）
+    fn snapshot_nodes<P: AsRef<str>, V>(items: &[(P, V)]) {
         for (path, _) in items {
-            Self::snapshot_node(path);
+            Self::snapshot_node(path.as_ref());
         }
     }
 
@@ -260,15 +262,13 @@ impl CpuScheduler {
     /// 候选节点逐条尝试写（不再预判存在性）：单点失败 debug、**全部**失败 warn
     /// （见 utils::write_nodes）——非 ChiRi 通用内核可能一个节点都没有。
     fn apply_disable_touch_boost(&self) -> Result<()> {
-        let items: Vec<(String, String)> = [
-            "/sys/module/cpu_boost/parameters/input_boost_enabled",
-            "/sys/module/cpu_boost/parameters/sched_boost_on_input",
-            "/sys/module/cpu_boost/parameters/input_boost_ms",
-            "/sys/module/cpu_boost/parameters/boost_ms",
-        ]
-        .iter()
-        .map(|path| (path.to_string(), "0".to_string()))
-        .collect();
+        // 路径是字面量，直接用 `(&str, &str)` 数组，省掉逐个 `to_string()` 与 Vec 分配
+        let items: [(&str, &str); 4] = [
+            ("/sys/module/cpu_boost/parameters/input_boost_enabled", "0"),
+            ("/sys/module/cpu_boost/parameters/sched_boost_on_input", "0"),
+            ("/sys/module/cpu_boost/parameters/input_boost_ms", "0"),
+            ("/sys/module/cpu_boost/parameters/boost_ms", "0"),
+        ];
         Self::snapshot_nodes(&items);
         let written = utils::write_nodes(&items, "touch-boost-disable");
         for path in &written {

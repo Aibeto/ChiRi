@@ -71,12 +71,19 @@ static NODE_FAIL_WARNED: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
 /// 返回成功写入的节点路径（空 = 全部失败；调用方需要「用了哪个候选」时可直接用）。
 /// **刻意不做存在性预判**：写入失败本身就是「该节点不可用」的权威证据，预判既会与
 /// 真实情况脱节，也会把本该留痕的失败吞掉。
-pub fn write_nodes(items: &[(String, String)], what: &'static str) -> Vec<String> {
+/// 路径/值都按 `AsRef<str>` 泛型接收：`Vec<(String, String)>`（路径运行时拼接，
+/// 必须持有 String）与 `&[(&str, &str)]`（路径是字面量，无需构造 String）都能直接传，
+/// 因此调用方不必为适配签名额外建一层中间 Vec。
+pub fn write_nodes<P: AsRef<str>, V: AsRef<str>>(
+    items: &[(P, V)],
+    what: &'static str,
+) -> Vec<String> {
     let mut written: Vec<String> = Vec::new();
     let mut last_err: Option<String> = None;
     for (path, value) in items {
-        match write_to_file(path, value) {
-            Ok(()) => written.push(path.clone()),
+        let path = path.as_ref();
+        match write_to_file(path, value.as_ref()) {
+            Ok(()) => written.push(path.to_string()),
             Err(e) => {
                 if is_node_missing(&e) {
                     log::debug!("[{what}] node missing, skipped: {path}");
@@ -90,7 +97,7 @@ pub fn write_nodes(items: &[(String, String)], what: &'static str) -> Vec<String
     if !written.is_empty() {
         clear_node_fail_warned(what);
     } else if let Some((first, _)) = items.first() {
-        warn_all_nodes_failed(what, items.len(), first, last_err.as_deref());
+        warn_all_nodes_failed(what, items.len(), first.as_ref(), last_err.as_deref());
     }
     written
 }

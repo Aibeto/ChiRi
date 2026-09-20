@@ -36,6 +36,7 @@ logd/
 .codebuddy/docs/
 .trae-html-share-packages/
 .workbuddy/docs
+.codebuddy/plans
 
 # reference
 AppOptR/

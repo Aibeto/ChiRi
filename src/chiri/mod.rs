@@ -1474,7 +1474,7 @@ pub fn start_scheduler_thread(
                     // FAS 息屏保持接管，兜底激活（失效自愈）全时段生效。app_detect 息屏期
                     // 不更新前台包名，此处比较的是缓存包名，稳态为 no-op。
                     if !halted
-                        && mode_clone.lock().unwrap().clone() == "fas"
+                        && mode_clone.lock().unwrap().as_str() == "fas"
                         && !crate::common::fas_enabled()
                     {
                         // fas_enabled=false 热重载生效：立即注销全部 FAS 实例并按屏幕状态
@@ -1513,8 +1513,10 @@ pub fn start_scheduler_thread(
                                 cpu_governor.init_policies(&doze_cfg);
                             }
                         }
-                    } else if !halted && mode_clone.lock().unwrap().clone() == "fas" {
-                        let cur_pkg = crate::monitor::app_detect::get_current_package();
+                    } else if !halted && mode_clone.lock().unwrap().as_str() == "fas" {
+                        // 取 Arc<str> 快照：只做引用计数递增，不再每次克隆 String
+                        let cur_pkg_arc = crate::monitor::app_detect::current_package_arc();
+                        let cur_pkg: &str = &cur_pkg_arc;
                         if !cur_pkg.is_empty() {
                             if fas_mgr.is_active() {
                                 if let Some(active) = fas_mgr.active_pkg().map(str::to_string) {
@@ -1531,7 +1533,7 @@ pub fn start_scheduler_thread(
                                             if !fas_mgr.activate(&cur_pkg, crate::monitor::app_detect::get_current_pid()) {
                                                 fas_mgr.deactivate_all();
                                                 fas_cooldown_until = Some(Instant::now() + FAS_COOLDOWN);
-                                                log::warn!("{}", t_with_args("scheduler-fas-init-failed", &fluent_args!("pkg" => cur_pkg.as_str())));
+                                                log::warn!("{}", t_with_args("scheduler-fas-init-failed", &fluent_args!("pkg" => cur_pkg)));
                                                 // CLG default 回退
                                                 let config_lock = config_clone.read().unwrap();
                                                 let clg_cfg = get_clg_cfg(&config_lock, "default");
@@ -1580,7 +1582,7 @@ pub fn start_scheduler_thread(
                                     if !fas_mgr.activate(&cur_pkg, crate::monitor::app_detect::get_current_pid()) {
                                         fas_mgr.deactivate_all();
                                         fas_cooldown_until = Some(Instant::now() + FAS_COOLDOWN);
-                                        log::warn!("{}", t_with_args("scheduler-fas-init-failed", &fluent_args!("pkg" => cur_pkg.as_str())));
+                                        log::warn!("{}", t_with_args("scheduler-fas-init-failed", &fluent_args!("pkg" => cur_pkg)));
                                         // CLG default 回退
                                         let config_lock = config_clone.read().unwrap();
                                         let clg_cfg = get_clg_cfg(&config_lock, "default");
@@ -1611,7 +1613,7 @@ pub fn start_scheduler_thread(
                     // fas 模式但实例未活跃（息屏已释放/冷却/初始化失败）时照常生效，
                     // 否则 CLG doze 期间将失去热保护
                     if !halted
-                        && !(mode_clone.lock().unwrap().clone() == "fas" && fas_mgr.is_active())
+                        && !(mode_clone.lock().unwrap().as_str() == "fas" && fas_mgr.is_active())
                     {
                         let (enabled, batt_soft, batt_hard, cpu_soft, cpu_hard, soft_cap, hard_cap, hyst, free_above) = {
                             let t = &config_clone.read().unwrap().thermal;

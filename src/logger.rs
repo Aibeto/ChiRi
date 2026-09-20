@@ -1,16 +1,11 @@
-//! logger.rs: [buffer] [level] [appender] [loglimit] [init] [status] [devimp_state] [devrow] [devimp_writer] [devimp_api] [archive]
+//! logger.rs: [level] [appender] [loglimit] [init] [status] [devimp_state] [devrow] [devimp_writer] [devimp_api] [archive]
 
 use crate::common;
 use crate::fluent_args;
 use crate::i18n::t_with_args;
 use anyhow::{Result, anyhow};
-use log::{LevelFilter, Record};
-use log4rs::Handle;
-use log4rs::append::Append;
-use log4rs::config::{Appender, Config, Root};
-use log4rs::encode::Encode;
-use log4rs::encode::pattern::PatternEncoder;
-use once_cell::sync::OnceCell;
+use log::{LevelFilter, Log, Metadata, Record};
+use std::sync::OnceLock;
 use std::collections::HashMap;
 use std::fs;
 use std::io::{Read as _, Write as _};
@@ -19,26 +14,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-/// 适配 `log4rs::encode::Write` 的内存写入器：`PatternEncoder` 编码时写入
-/// 该缓冲，`append` 再把字节落盘（`set_style` 走默认空实现，无需着色）。
-// [buffer]
-struct BufferWriter(Vec<u8>);
-
-impl std::io::Write for BufferWriter {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0.extend_from_slice(buf);
-        Ok(buf.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-impl log4rs::encode::Write for BufferWriter {}
-
 // [level]
-static LOG_HANDLE: OnceCell<Mutex<Handle>> = OnceCell::new();
-
 fn parse_level(level_str: &str) -> LevelFilter {
     match level_str.to_uppercase().as_str() {
         "OFF" => LevelFilter::Off,
@@ -60,26 +36,39 @@ const LOG_KEEP_BACKUPS: u32 = 3;
 
 /// 日志追加器：文件被删除也能自愈、且日志路径上绝不 panic。
 ///
-/// 背景：log4rs 的 `RollingFileAppender` 持有持久化 `Mutex<File>` 写句柄，
-/// 一旦 `daemon.log` 被外部删除（日志清理/误删），句柄指向的是已被 unlink 的
-/// inode，旧数据再也写不进去；且其写路径的 `lock().unwrap()` 在锁毒化或轮转失败
-/// 时会直接 panic，把守护进程整个打崩（表现为“进程未运行”）。
-///
-/// 本实现针对以上问题做了三点处理：
-///   1. **每次写入都按路径重新打开**（`create+append`），文件被删会自动重建，无需
-///      持有长期文件句柄，天然不受删除影响；
+/// 与「每条按路径重开」的旧实现相比的两点变化（2026-09-20）：
+///   1. **常驻句柄 + 低频巡检**：稳态每条日志只剩一次 write；尺寸以本会话记账为主，
+///      每写满 [`LOG_VERIFY_BYTES`] 用一次 `metadata` 校正，并顺带发现「文件被外部
+///      删除 / 已被轮转」——此时丢弃句柄，下次写入按路径重建（自愈语义保留；代价是
+///      外部删除后最多丢 `LOG_VERIFY_BYTES` 字节日志）；
 ///   2. **循环轮转全程无 panic**：所有重命名/删除都吞掉错误，杜绝 `unwrap`；
+///      轮转前先丢句柄，避免继续写已改名的 inode。
 ///   3. **锁毒化也不崩**：`Mutex` 上锁失败时剥除 poison 继续使用，日志线程不 panic。
-/// 单项编码失败仅丢弃该条日志，不影响进程存活。
+/// 写失败只丢弃当条日志（句柄置空、下条重建），不影响进程存活。
+/// 行格式化是纯函数（见 `format_line`），不再依赖任何日志框架的编码器。
 // [appender]
 #[derive(Debug)]
 struct SelfHealingAppender {
     path: PathBuf,
     max_bytes: u64,
     keep: u32,
-    encoder: Box<dyn Encode + Send>,
-    lock: Mutex<()>,
+    /// 常驻写状态（该 Mutex 同时充当原先的串行化锁）
+    state: Mutex<AppendState>,
 }
+
+/// 追加状态：常驻句柄 + 记账尺寸。
+#[derive(Debug)]
+struct AppendState {
+    /// 常驻 append 句柄；轮转或被外部删除后置 None，下次写入重建
+    file: Option<fs::File>,
+    /// 当前文件尺寸：以本进程记账为主，每 `LOG_VERIFY_BYTES` 用 metadata 校正一次
+    size: u64,
+    /// 距上次真实尺寸校验已写入的字节数
+    since_verify: u64,
+}
+
+/// 低频巡检间隔（字节）：外部删除 `daemon.log` 后最坏丢这么多日志（约 60 行）
+const LOG_VERIFY_BYTES: u64 = 8 * 1024;
 
 impl SelfHealingAppender {
     /// 备份名：`daemon.log` -> `daemon.1.log`（把扩展名前缀替换为 `.{n}.log`）
@@ -93,8 +82,34 @@ impl SelfHealingAppender {
         parent.join(format!("{stem}.{n}.log"))
     }
 
-    fn current_size(&self) -> u64 {
-        fs::metadata(&self.path).map(|m| m.len()).unwrap_or(0)
+    /// 低频巡检：用真实尺寸校正记账值；路径消失（被外部删除 / 已被轮转）则丢弃句柄。
+    fn append_verify(&self, st: &mut AppendState) {
+        match fs::metadata(&self.path) {
+            Ok(md) => st.size = md.len(),
+            Err(_) => {
+                st.file = None;
+                st.size = 0;
+            }
+        }
+        st.since_verify = 0;
+    }
+
+    /// 重建句柄：目录可能也被删，`create_dir_all` 只在这里做；打开后用一次
+    /// `metadata` 校正尺寸（覆盖「运行期新建 appender，但文件已有内容」的场景）。
+    fn append_open(&self, st: &mut AppendState) {
+        if let Some(parent) = self.path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        st.file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)
+            .ok();
+        if st.file.is_some() {
+            if let Ok(md) = fs::metadata(&self.path) {
+                st.size = md.len();
+            }
+        }
     }
 
     /// 无 panic 的循环轮转：`daemon.log -> daemon.1.log -> ... -> daemon.keep.log`，
@@ -110,52 +125,45 @@ impl SelfHealingAppender {
     }
 }
 
-impl Append for SelfHealingAppender {
-    fn append(&self, record: &Record) -> anyhow::Result<()> {
-        // 锁内完成编码与落盘；记账（note_write）必须在锁释放后调用——
-        // 它达到门限时会经 log::info! 打点再退出，若在持锁状态下重入
-        // append 将在同一把非重入 Mutex 上死锁（进程卡死，看门狗无存活
-        // 超时探测救不回）
-        let written = {
-            // 锁毒化也剥除继续用，避免日志线程被 panic 波及崩溃
-            let _guard = match self.lock.lock() {
+impl SelfHealingAppender {
+    /// 落盘一行（已格式化字节）。锁内 IO + 计数，`note_write` 必须在锁外调用——
+    /// 它达到门限时会经 `log::info!` 重入本函数，在持锁状态下重入会对同一把
+    /// 非重入 Mutex 死锁（进程卡死，看门狗无存活超时探测救不回）。
+    fn append_line(&self, line: &[u8]) {
+        let bytes = line.len() as u64;
+        {
+            let mut st = match self.state.lock() {
                 Ok(g) => g,
                 Err(poisoned) => poisoned.into_inner(),
             };
-
-            // 编码失败仅丢弃这条日志（写入内存缓冲，不直接碰文件）
-            let mut line = BufferWriter(Vec::new());
-            if self.encoder.encode(&mut line, record).is_err() {
-                return Ok(());
+            // 低频巡检：校正尺寸 / 发现被删
+            if st.since_verify >= LOG_VERIFY_BYTES {
+                self.append_verify(&mut st);
             }
-
-            // 保证日志目录存在（目录被删也能重建）
-            if let Some(parent) = self.path.parent() {
-                let _ = fs::create_dir_all(parent);
-            }
-
-            // 尺寸达到上限先轮转
-            if self.current_size() >= self.max_bytes {
+            // 尺寸达到上限：先丢句柄再轮转（否则会继续写已改名的 inode）
+            if st.size >= self.max_bytes {
+                st.file = None;
                 self.rotate();
+                st.size = 0;
             }
-
-            // 按路径追加：文件被删会自动重建，写失败仅吞掉不影响进程
-            if let Ok(mut f) = fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&self.path)
-            {
-                let _ = f.write_all(&line.0);
-                let _ = f.flush();
+            // 句柄缺失（首次 / 被删 / 轮转后）则重建
+            if st.file.is_none() {
+                self.append_open(&mut st);
             }
-            line.0.len() as u64
-        };
-        // 记账：写入即事件触发（无需遍历目录）
-        note_write(&LOGS_BYTES_WRITTEN, "logs/", written);
-        Ok(())
+            if let Some(f) = st.file.as_mut() {
+                if f.write_all(line).and_then(|_| f.flush()).is_ok() {
+                    st.size += bytes;
+                    st.since_verify += bytes;
+                } else {
+                    // 写失败（句柄失效 / 磁盘异常）：丢弃句柄，下一条重建
+                    st.file = None;
+                }
+            }
+        }
+        // 记账口径与原实现一致：按编码长度计（与写成功与否无关），它决定
+        // 「日志目录预算 / 16MB 打包门限」的触发点
+        note_write(&LOGS_BYTES_WRITTEN, "logs/", bytes);
     }
-
-    fn flush(&self) {}
 }
 
 // 日志打包门限（事件触发，零额外 syscall）：本会话写入 logs/ 与 devimp/ 的字节数
@@ -221,84 +229,101 @@ fn note_write(counter: &AtomicU64, dir: &str, bytes: u64) {
 }
 
 // [init]
-/// 行编码：格式与 `PatternEncoder`（`[{d(%Y-%m-%d %H:%M:%S)}] [{l}] [{M}] {m}{n}`，
-/// 本地时间）完全一致，只把模块路径里**重复的 crate 名前缀剥掉**——包名与子模块
-/// 同名（`src/chiri/`），`chiri::chiri::config` 的首个 `chiri` 属于包名，界面上白占
-/// 一列宽度（2026-09-18 用户要求去掉 `chiri::chiri` 这种情况）。委托 PatternEncoder
-/// 编码（时间/级别格式零改动），再裁剪行首第三个方括号段；非本 crate 的模块路径
-/// （依赖库日志，如 `log4rs::`）原样保留。
-#[derive(Debug)]
-struct LineEncoder {
-    inner: PatternEncoder,
+/// 行格式化：`[YYYY-MM-DD HH:MM:SS] [LEVEL] [module] message\n`。
+/// 与原 log4rs `PatternEncoder`（`[{d(%Y-%m-%d %H:%M:%S)}] [{l}] [{M}] {m}{n}`）的输出
+/// 逐字节一致（本地时间），只把模块路径里**重复的 crate 名前缀剥掉**——包名与子模块
+/// 同名（`src/chiri/`），`chiri::chiri::config` 的首个 `chiri` 属于包名，界面上白占一列
+/// 宽度（2026-09-18 用户要求去掉）。非本 crate 的模块路径（依赖库日志）原样保留。
+fn format_line(record: &Record) -> Vec<u8> {
+    let mut out = Vec::with_capacity(128);
+    out.push(b'[');
+    write_local_timestamp(&mut out);
+    out.extend_from_slice(b"] [");
+    out.extend_from_slice(record.level().as_str().as_bytes());
+    out.extend_from_slice(b"] [");
+    let module = record.module_path().unwrap_or("");
+    match module.strip_prefix(CRATE_PREFIX) {
+        Some(rest) => out.extend_from_slice(rest.as_bytes()),
+        None => out.extend_from_slice(module.as_bytes()),
+    }
+    out.extend_from_slice(b"] ");
+    let _ = std::io::Write::write_fmt(&mut out, *record.args());
+    out.push(b'\n');
+    out
 }
 
 /// crate 名：daemon.log 模块路径里冗余的前缀（crate 自身日志才有）
 const CRATE_PREFIX: &str = "chiri::";
 
-impl Encode for LineEncoder {
-    fn encode(
-        &self,
-        w: &mut dyn log4rs::encode::Write,
-        record: &log::Record,
-    ) -> anyhow::Result<()> {
-        let mut buf = BufferWriter(Vec::new());
-        self.inner.encode(&mut buf, record)?;
-        let line = String::from_utf8_lossy(&buf.0);
-        // 前缀形如 `[时间] [级别] [模块] 消息`：跳过前两对方括号，第三段是模块。
-        // 消息正文里出现 `[`/`]` 不影响——只裁剪前缀，其余字节原样透传。
-        let mut cursor = 0usize;
-        let mut module_at = None;
-        for _ in 0..3 {
-            let Some(open) = line[cursor..].find('[').map(|i| cursor + i) else {
-                break;
-            };
-            let Some(close) = line[open..].find(']').map(|i| open + i) else {
-                break;
-            };
-            cursor = close + 1;
-            module_at = Some(open + 1);
-        }
-        match module_at {
-            Some(at) if line[at..].starts_with(CRATE_PREFIX) => {
-                std::io::Write::write_all(w, line[..at].as_bytes())?;
-                std::io::Write::write_all(w, line[at + CRATE_PREFIX.len()..].as_bytes())?;
-            }
-            _ => std::io::Write::write_all(w, line.as_bytes())?,
-        }
-        Ok(())
+/// 写入 `[YYYY-MM-DD HH:MM:SS]`（设备本地时间）。任一步失败都退化为 epoch 时间，
+/// 绝不在日志路径上 panic。
+fn write_local_timestamp(out: &mut Vec<u8>) {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as libc::time_t)
+        .unwrap_or(0);
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    if unsafe { libc::localtime_r(&secs, &mut tm) }.is_null() {
+        out.extend_from_slice(b"1970-01-01 00:00:00");
+        return;
+    }
+    let mut buf = [0u8; 20];
+    let n = unsafe {
+        libc::strftime(
+            buf.as_mut_ptr().cast(),
+            buf.len(),
+            c"%Y-%m-%d %H:%M:%S".as_ptr(),
+            &tm,
+        )
+    };
+    out.extend_from_slice(&buf[..n.min(buf.len())]);
+}
+
+/// 构造追加器（原为 log4rs `Config`）：路径 / 上限 / 备份数 + 空状态。
+fn make_appender() -> SelfHealingAppender {
+    SelfHealingAppender {
+        path: common::get_module_root().join(LOG_REL_PATH),
+        max_bytes: LOG_MAX_BYTES,
+        keep: LOG_KEEP_BACKUPS,
+        state: Mutex::new(AppendState {
+            file: None,
+            size: 0,
+            since_verify: 0,
+        }),
     }
 }
 
-fn build_config(level: LevelFilter) -> Result<Config> {
-    let root = common::get_module_root();
-    let log_path = root.join(LOG_REL_PATH);
+/// 自写 `log::Log` 实现（原为 log4rs + 自定义 appender）：只保留本项目实际使用的
+/// 两点能力——按行格式化落盘、运行时可调等级，于是不再需要 log4rs 及其
+/// chrono / serde / parking_lot 等传递依赖。
+struct ChiriLogger {
+    appender: SelfHealingAppender,
+}
 
-    let appender = SelfHealingAppender {
-        path: log_path.clone(),
-        max_bytes: LOG_MAX_BYTES,
-        keep: LOG_KEEP_BACKUPS,
-        encoder: Box::new(LineEncoder {
-            inner: PatternEncoder::new("[{d(%Y-%m-%d %H:%M:%S)}] [{l}] [{M}] {m}{n}"),
-        }),
-        lock: Mutex::new(()),
-    };
+impl Log for ChiriLogger {
+    fn enabled(&self, metadata: &Metadata) -> bool {
+        metadata.level() <= log::max_level()
+    }
 
-    let config = Config::builder()
-        .appender(Appender::builder().build("logfile", Box::new(appender)))
-        .build(Root::builder().appender("logfile").build(level))?;
+    fn log(&self, record: &Record) {
+        if !self.enabled(record.metadata()) {
+            return;
+        }
+        self.appender.append_line(&format_line(record));
+    }
 
-    Ok(config)
+    fn flush(&self) {}
 }
 
 /// 初始化日志系统，启动时调用一次
 pub fn init(level_str: &str) -> Result<()> {
     let level = parse_level(level_str);
-    let config = build_config(level)?;
-    let handle = log4rs::init_config(config)?;
     LOG_LEVEL.store(level as u8, Ordering::Release);
-    LOG_HANDLE
-        .set(Mutex::new(handle))
-        .map_err(|_| anyhow!("Logger already initialized"))?;
+    log::set_boxed_logger(Box::new(ChiriLogger {
+        appender: make_appender(),
+    }))
+    .map_err(|e| anyhow!("Logger already initialized: {e}"))?;
+    log::set_max_level(level);
     Ok(())
 }
 
@@ -309,36 +334,28 @@ static LOG_LEVEL: AtomicU8 = AtomicU8::new(LevelFilter::Info as u8);
 pub fn update_level(level_str: &str) {
     let level = parse_level(level_str);
     let prev = LOG_LEVEL.swap(level as u8, Ordering::AcqRel);
-    if let Some(mutex) = LOG_HANDLE.get() {
-        if let Ok(handle) = mutex.lock() {
-            match build_config(level) {
-                Ok(cfg) => {
-                    handle.set_config(cfg);
-                    // 等级变化走 info：热重载后必须能在默认 INFO 级别下直接确认
-                    // 「新等级是否已生效」——此前只有 debug 打点，用户在 INFO 下
-                    // 改完配置看不到任何回执，只能凭副作用猜是否生效。
-                    // 未变化则仅 debug，避免每次重载刷一行。
-                    if prev != level as u8 {
-                        log::info!(
-                            "{}",
-                            t_with_args(
-                                "log-level-updated",
-                                &fluent_args!("level" => level.to_string())
-                            )
-                        );
-                    } else {
-                        log::debug!(
-                            "{}",
-                            t_with_args(
-                                "log-level-updated",
-                                &fluent_args!("level" => level.to_string())
-                            )
-                        );
-                    }
-                }
-                Err(e) => eprintln!("Failed to rebuild logger config: {}", e),
-            }
-        }
+    log::set_max_level(level);
+    // 等级变化走 info：热重载后必须能在默认 INFO 级别下直接确认「新等级是否已生效」——
+    // 此前只有 debug 打点，用户在 INFO 下改完配置看不到任何回执，只能凭副作用猜是否生效。
+    // 未变化则仅 debug，避免每次重载刷一行。
+    // 注：框架按新 level 过滤，上调等级时这条 info 可能被自身过滤——与原先
+    // `set_config` 后立即打点的行为一致。
+    if prev != level as u8 {
+        log::info!(
+            "{}",
+            t_with_args(
+                "log-level-updated",
+                &fluent_args!("level" => level.to_string())
+            )
+        );
+    } else {
+        log::debug!(
+            "{}",
+            t_with_args(
+                "log-level-updated",
+                &fluent_args!("level" => level.to_string())
+            )
+        );
     }
 }
 
@@ -790,7 +807,7 @@ const DEVIMP_TICK_HEARTBEAT: Duration = Duration::from_secs(2);
 /// 防抖进度），util/over/under 等每 tick 抖动的观测值不参与——稳态不写，
 /// 防抖与升降过渡期逐 tick 记录。写入量：CLG ~6 行/s、akmode 25 行/s/组
 /// → 稳态每组 0.5 行/s
-static DEVIMP_TICK_STATE: OnceCell<Mutex<HashMap<String, (String, Instant)>>> = OnceCell::new();
+static DEVIMP_TICK_STATE: OnceLock<Mutex<HashMap<String, (String, Instant)>>> = OnceLock::new();
 
 fn devimp_tick_state() -> &'static Mutex<HashMap<String, (String, Instant)>> {
     DEVIMP_TICK_STATE.get_or_init(|| Mutex::new(HashMap::new()))
@@ -1548,8 +1565,8 @@ fn now_epoch_secs() -> i64 {
 
 /// 解析 daemon.log 行首的 `[YYYY-MM-DD HH:MM:SS]` → epoch 秒。
 ///
-/// **时区口径**：log4rs 1.4 的 `{d(...)}` 走 chrono，默认**设备本地时间**
-/// （仅显式传第二个参数 `utc` 才是 UTC），本项目的 pattern 未指定 → 本地时间。
+/// **时区口径**：daemon.log 的时间戳由 `write_local_timestamp` 用 `libc::localtime_r`
+/// 生成，即**设备本地时间**（与原 log4rs `{d(...)}` 走 chrono 本地时区的口径一致）。
 /// 因此这里必须用 `mktime`（按本地时区解释）而不是 `timegm`（按 UTC 解释），
 /// 否则解析结果会偏一个时区（东八区即 -8h），30s 判定彻底失效。
 /// `tm_isdst = -1`：交给 libc 按当前 DST 规则判定，避免夏令时切换期差一小时。

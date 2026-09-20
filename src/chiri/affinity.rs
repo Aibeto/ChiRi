@@ -518,11 +518,23 @@ fn sample_one_tid(tid: i32) -> Option<ThreadSample> {
     let text = std::fs::read_to_string(format!("/proc/{tid}/stat")).ok()?;
     let close = text.rfind(')')?;
     let rest = &text[close + 1..];
-    let tokens: Vec<&str> = rest.split_whitespace().collect();
-    if tokens.len() < 37 {
+    // 单次遍历同时取 utime / stime（`)` 之后的第 11 / 12 个字段，0 基）与字段总数：
+    // 原先 collect 成 Vec<&str> 只为取这两个下标，每个 tid 白付一次 Vec 分配与整段收集
+    let mut utime: Option<u64> = None;
+    let mut stime: Option<u64> = None;
+    let mut count = 0usize;
+    for (i, tok) in rest.split_whitespace().enumerate() {
+        match i {
+            11 => utime = tok.parse().ok(),
+            12 => stime = tok.parse().ok(),
+            _ => {}
+        }
+        count = i + 1;
+    }
+    if count < 37 {
         return None;
     }
-    let ticks: u64 = tokens[11].parse().unwrap_or(0) + tokens[12].parse::<u64>().unwrap_or(0);
+    let ticks: u64 = utime.unwrap_or(0) + stime.unwrap_or(0);
     Some(ThreadSample {
         comm: text[1..close].to_string(),
         ticks,
@@ -546,8 +558,10 @@ struct ThreadState {
     home: i16,
     /// 已 promote（后台，含 cpuset 组迁移）
     promoted: bool,
-    /// 来源 cpuset 组（demote/清理迁回）
-    orig_group: String,
+    /// 来源 cpuset 组（demote/清理迁回）。
+    /// 取值只来自 BACKGROUND_GROUPS / GROUP_FOREGROUND 常量，故存 `'static` 借用，
+    /// 免去每个后台线程建档时的 String 分配
+    orig_group: &'static str,
     /// 是否迁移过 cpuset 组
     moved_group: bool,
     /// 最近一次忙采样时刻
@@ -969,11 +983,11 @@ impl AffinityManager {
     /// 清理线程：迁回原组 + 恢复全核 + 移除状态
     fn cleanup_thread(&mut self, tid: i32) {
         let (moved, orig, home, pid) = match self.threads.get(&tid) {
-            Some(st) => (st.moved_group, st.orig_group.clone(), st.home, st.pid),
+            Some(st) => (st.moved_group, st.orig_group, st.home, st.pid),
             None => return,
         };
         if moved && !orig.is_empty() {
-            let _ = self.move_tid_group(tid, &orig);
+            let _ = self.move_tid_group(tid, orig);
         }
         if home >= 0 {
             self.unpin_core(tid, home, pid, "-");
@@ -1001,8 +1015,14 @@ impl AffinityManager {
         let mut perf_pool: Vec<usize> = ranges.big.clone().collect();
         perf_pool.extend(ranges.prime.clone());
 
-        // 在线核位图低频刷新
-        if t % ONLINE_EVERY_ROUNDS == 0 || self.online.len() != max_cpu {
+        // 在线核位图刷新：周期兜底 + CPU hotplug uevent 到达时立即刷新
+        // （`cpuN/online` 变更由 netlink uevent 置脏标记；机型不广播 cpu uevent 时
+        // 周期兜底仍然生效，行为与改造前一致）
+        if t % ONLINE_EVERY_ROUNDS == 0
+            || self.online.len() != max_cpu
+            || crate::monitor::CPU_HOTPLUG_DIRTY
+                .swap(false, std::sync::atomic::Ordering::Relaxed)
+        {
             self.online = online_bitmap(max_cpu);
         }
 
@@ -1077,7 +1097,7 @@ impl AffinityManager {
                                 is_key: false,
                                 home: -1,
                                 promoted: false,
-                                orig_group: GROUP_FOREGROUND.to_string(),
+                                orig_group: GROUP_FOREGROUND,
                                 moved_group: false,
                                 last_busy: None,
                                 low_streak: 0,
@@ -1138,8 +1158,9 @@ impl AffinityManager {
                                     if group_bind == GroupBind::None
                                         && !self.sys.cpuset_top_app_exist
                                     {
-                                        let perf = perf_pool.clone();
-                                        if set_tid_affinity(tid, &perf) {
+                                        // set_tid_affinity 形参是切片，直接借用 perf_pool，
+                                        // 不再为每次调用复制一份 Vec
+                                        if set_tid_affinity(tid, &perf_pool) {
                                             if let Some(st) = self.threads.get_mut(&tid) {
                                                 st.group_bind = GroupBind::Key;
                                             }
@@ -1250,8 +1271,8 @@ impl AffinityManager {
                                 // 到 big∪prime（与 boost 的 fg_group 同款机制、
                                 // 不同触发条件）。不钉单核、不占钉核计数，
                                 // EAS 在性能核组内继续自调度省电摆放
-                                let perf = perf_pool.clone();
-                                if set_tid_affinity(tid, &perf) {
+                                // （形参是切片，直接借用，不再每次复制 Vec）
+                                if set_tid_affinity(tid, &perf_pool) {
                                     if let Some(st) = self.threads.get_mut(&tid) {
                                         st.group_bind = GroupBind::Key;
                                     }
@@ -1399,7 +1420,9 @@ impl AffinityManager {
 
             // 候选刷新（低频）+ 分片深扫
             if t % BG_LIST_EVERY_ROUNDS == 0 || self.bg_cursor == 0 {
-                let mut bg: Vec<(i32, String)> = Vec::new();
+                // group 直接借用 BACKGROUND_GROUPS 的常量字面量（'static），
+                // 不再为每个后台 tid 复制一份 String
+                let mut bg: Vec<(i32, &'static str)> = Vec::new();
                 for group in BACKGROUND_GROUPS {
                     let exist = match group {
                         "background" => self.sys.cpuset_background_exist,
@@ -1409,7 +1432,7 @@ impl AffinityManager {
                     if exist {
                         for tid in read_cpuset_tasks(group) {
                             if tid as u32 != self.self_pid {
-                                bg.push((tid, group.to_string()));
+                                bg.push((tid, group));
                             }
                         }
                     }
@@ -1469,7 +1492,7 @@ impl AffinityManager {
                                         is_key: false,
                                         home: -1,
                                         promoted: false,
-                                        orig_group: group.clone(),
+                                        orig_group: *group,
                                         moved_group: false,
                                         last_busy: None,
                                         low_streak: 0,
@@ -1658,8 +1681,8 @@ impl AffinityManager {
             };
             if sustained && !bound {
                 // 抬到性能核组（不钉单核，组内交给 EAS 自调度）
-                let perf = perf_pool.to_vec();
-                if set_tid_affinity(tid, &perf) {
+                // perf_pool 本就是切片参数，直接传递（原 to_vec 是多余复制）
+                if set_tid_affinity(tid, perf_pool) {
                     if let Some(st) = self.threads.get_mut(&tid) {
                         st.group_bind = GroupBind::Busy;
                     }
@@ -1697,11 +1720,11 @@ impl AffinityManager {
     /// demote：迁回原 cpuset 组 + 恢复全核
     fn demote(&mut self, tid: i32) {
         let (moved, orig, home) = match self.threads.get(&tid) {
-            Some(st) => (st.moved_group, st.orig_group.clone(), st.home),
+            Some(st) => (st.moved_group, st.orig_group, st.home),
             None => return,
         };
         if moved && !orig.is_empty() {
-            let _ = self.move_tid_group(tid, &orig);
+            let _ = self.move_tid_group(tid, orig);
             if let Some(st) = self.threads.get_mut(&tid) {
                 st.moved_group = false;
             }
