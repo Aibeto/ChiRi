@@ -37,7 +37,7 @@ fn main() -> Result<()> {
     //    - setsid()：自成新会话、脱离原进程组（已是会话首进程时 EPERM，
     //      忽略——说明上层 shell 已 setsid 成功）；
     //    - stdio 重定向到 /dev/null：su 会话的管道在管理器死后断裂，重定向
-    //      后 daemon 与派生方再无任何 fd 关联（日志全走 log4rs/devimp 落盘，
+    //      后 daemon 与派生方再无任何 fd 关联（日志全走 daemon.log/devimp 落盘，
     //      panic 由全局钩子写 daemon.log，不依赖 stderr）。
     #[cfg(unix)]
     unsafe {

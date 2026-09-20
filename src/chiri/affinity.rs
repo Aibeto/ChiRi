@@ -1018,11 +1018,10 @@ impl AffinityManager {
         // 在线核位图刷新：周期兜底 + CPU hotplug uevent 到达时立即刷新
         // （`cpuN/online` 变更由 netlink uevent 置脏标记；机型不广播 cpu uevent 时
         // 周期兜底仍然生效，行为与改造前一致）
-        if t % ONLINE_EVERY_ROUNDS == 0
-            || self.online.len() != max_cpu
-            || crate::monitor::CPU_HOTPLUG_DIRTY
-                .swap(false, std::sync::atomic::Ordering::Relaxed)
-        {
+        // 每轮都消费脏标记（放在条件外，避免 `||` 短路把标记留到下一轮多刷一次）
+        let hotplug_dirty =
+            crate::monitor::CPU_HOTPLUG_DIRTY.swap(false, std::sync::atomic::Ordering::Relaxed);
+        if t % ONLINE_EVERY_ROUNDS == 0 || self.online.len() != max_cpu || hotplug_dirty {
             self.online = online_bitmap(max_cpu);
         }
 

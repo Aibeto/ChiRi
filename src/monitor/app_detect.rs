@@ -156,9 +156,7 @@ fn is_valid_user_app(pkg: &str, ignored_apps: &[String]) -> bool {
     }
 }
 
-// 提取核心检测逻辑
-///
-/// 倒序扫描（Android 把最新前台放在 procs 末尾，命中即返回）；这里直接对
+/// 提取核心检测逻辑：倒序扫描（Android 把最新前台放在 procs 末尾，命中即返回）；这里直接对
 /// `split_whitespace()` 反向迭代，不再先 `collect::<Vec<_>>()`，`/proc/<pid>/cmdline`
 /// 的路径也用同一缓冲复用——每轮省掉一次 Vec 与一次 String 分配。
 /// **刻意不做「内容未变则复用上轮结果」的短路**：cgroup procs 内容在应用冷启动期间
