@@ -148,6 +148,7 @@ governor-restored = [Governor] P{ $pid } 调速器 performance -> { $to }
 governor-switch-failed = [Governor] policy { $pid } 切换调速器失败
 governor-restore-failed = [Governor] policy { $pid } 恢复调速器 { $governor } 失败
 governor-residue-cleanup = [Governor] 检测到残留 performance 调速器（上次可能异常退出），已恢复 schedutil
+governor-residue-down = [Governor] 停摆期检测到 policy{ $pid } 仍是 performance：不代为清理（要记录系统原状）；若确认是上次异常退出的残留，请先关闭停摆再重启一次调度
 
 # --- GPU 频率锁（contingency） ---
 gpu-locked = [GPU] 已锁最高频 { $khz } kHz（{ $nodes } 个节点）

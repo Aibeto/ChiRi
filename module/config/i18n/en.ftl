@@ -149,6 +149,7 @@ governor-restored = [Governor] P{ $pid } governor performance -> { $to }
 governor-switch-failed = [Governor] failed to switch governor on policy { $pid }
 governor-restore-failed = [Governor] failed to restore governor { $governor } on policy { $pid }
 governor-residue-cleanup = [Governor] leftover performance governor detected (abnormal exit?), restored to schedutil
+governor-residue-down = [Governor] policy{ $pid } still on performance during halt: not cleaning it up (recording the stock state); if it is a residue from an abnormal exit, disable halt and restart the scheduler once
 
 # --- GPU frequency lock (contingency) ---
 gpu-locked = [GPU] locked to max frequency { $khz } kHz ({ $nodes } nodes)

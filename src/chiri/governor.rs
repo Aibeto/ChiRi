@@ -148,10 +148,9 @@ impl GovernorGuard {
     }
 
     // [residue]
-    /// 启动残留清理：SIGKILL 等异常退出会把 `performance` 留在节点上（收尾 release 不会
-    /// 执行）。`performance` 不是任何厂商的默认调速器，启动时见到它必然是残留，一律
-    /// 写回 schedutil。正常值（schedutil / walt / pelt 等）不动。
-    pub fn cleanup_residue() {
+    /// 逐个 policy 体检：只回调「当前是 performance」的那些（pid, 节点路径）。
+    /// 读不到的 policy 直接跳过（与接管口径一致）。
+    fn each_residue_policy(f: &mut dyn FnMut(i32, &str)) {
         for policy in crate::chiri::get_cpu_policies() {
             let path = format!(
                 "/sys/devices/system/cpu/cpufreq/policy{}/scaling_governor",
@@ -160,15 +159,44 @@ impl GovernorGuard {
             let Ok(cur) = fs::read_to_string(&path) else {
                 continue;
             };
-            if cur.trim() == "performance" && write_governor(&path, FALLBACK_GOVERNOR) {
+            if cur.trim() == "performance" {
+                f(policy.id, &path);
+            }
+        }
+    }
+
+    /// 启动残留清理：SIGKILL 等异常退出会把 `performance` 留在节点上（收尾 release 不会
+    /// 执行）。`performance` 不是任何厂商的默认调速器，启动时见到它必然是残留，一律
+    /// 写回 schedutil。正常值（schedutil / walt / pelt 等）不动。
+    pub fn cleanup_residue() {
+        Self::each_residue_policy(&mut |pid, path| {
+            if write_governor(path, FALLBACK_GOVERNOR) {
                 warn!(
                     "{}",
                     t_with_args(
                         "governor-residue-cleanup",
-                        &fluent_args!("pid" => policy.id.to_string())
+                        &fluent_args!("pid" => pid.to_string())
                     )
                 );
             }
-        }
+        });
+    }
+
+    /// 停摆期的同款体检：**只报不写**。
+    /// 这是「写 sysfs」的动作，而停摆的语义是把系统交回原状——残留到底是上一轮 ChiRi
+    /// 留下的、还是系统/厂商自己的默认，进程无从区分（重启后节点就是内核/厂商给的
+    /// 默认值，此时若仍是 performance，那就是系统自己的选择）。写了就把基线改成
+    /// 「ChiRi 认为系统该有的样子」，等于停摆期还在替用户调度——上一次修的就是这类洞，
+    /// 这里不能再开一个。只留日志让用户自己判断。
+    pub fn report_residue() {
+        Self::each_residue_policy(&mut |pid, _path| {
+            warn!(
+                "{}",
+                t_with_args(
+                    "governor-residue-down",
+                    &fluent_args!("pid" => pid.to_string())
+                )
+            );
+        });
     }
 }

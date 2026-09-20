@@ -881,11 +881,21 @@ pub fn start_scheduler_thread(
             {
                 // 强制上线全部核心：上次运行可能在 scenemode 中途被杀，残留的
                 // 离线核会让 cpufreq policy 目录消失，下方 CLG/fast_lock 初始化
-                // 枚举不到对应集群（该簇永久失去 worker）。必须先于任何接管
-                corectl_mgr.force_online_all();
+                // 枚举不到对应集群（该簇永久失去 worker）。必须先于任何接管。
+                // **停摆期不做**：它写 `cpuN/online`，是最直接的调度干预；停摆时下面
+                // 的 CLG/fast_lock 初始化本来就不执行，这一步在停摆期没有存在理由
+                if !halted {
+                    corectl_mgr.force_online_all();
+                }
                 // 调速器残留清理：SIGKILL 等异常退出会把 performance 留在节点上
-                // （FAS/contingency 的收尾 release 不会执行），启动时一律恢复 schedutil
-                crate::chiri::governor::GovernorGuard::cleanup_residue();
+                // （FAS/contingency 的收尾 release 不会执行），启动时一律恢复 schedutil。
+                // **停摆期改成只报不写**——理由见 `GovernorGuard::report_residue`：
+                // 停摆要记录的是系统原状，而「残留还是厂商默认」进程无从区分
+                if halted {
+                    crate::chiri::governor::GovernorGuard::report_residue();
+                } else {
+                    crate::chiri::governor::GovernorGuard::cleanup_residue();
+                }
                 let current_mode = mode_clone.lock().unwrap().clone();
                 if current_mode == "vector" {
                     fast_lock.init();
