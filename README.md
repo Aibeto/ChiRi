@@ -102,13 +102,18 @@ ChiRi CLG 调度核心，使用白名单适配soc
 - **QQ群** - 1091201364
 - **GitHub Issues** - [项目问题和建议](https://github.com/Aibeto/ChiRi/issues)
 
-## 开发源代码许可
+## 开放源代码许可
 
 | Project | License  | Repository                                 |
 | :------ | :------- | :----------------------------------------- |
 | yumi    | GPL v3.0 | [GitHub](https://github.com/imacte/yumi)   |
 | AppOptR | GPL v3.0 | [Gitee](https://gitee.com/sutoliu/AppOptR) |
-| ChiRi   | GPL v3.0 | [GitHub](https://github.com/Aibeto/ChiRi)  |
+
+## 参考与鸣谢
+
+| Project            | License  | Repository                                                   |
+| :----------------- | :------- | :----------------------------------------------------------- |
+| LittleYouran_CTS_3 | GPL v3.0 | [GitHub](https://github.com/LittleYouran/LittleYouran_CTS_3) |
 
 ---
 

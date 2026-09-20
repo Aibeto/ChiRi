@@ -6,6 +6,9 @@ use crate::chiri::config::SpecialTunedConfig;
 use crate::utils::FastWriter;
 use log::{debug, info, warn};
 use std::fs;
+
+/// 跨核迁移成本（ns，全局节点）：稳态场景（视频）接管期间调高、退出时恢复
+const MIGRATION_COST_PATH: &str = "/proc/sys/kernel/sched_migration_cost_ns";
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
@@ -79,6 +82,9 @@ pub struct TunedGovernor {
     clusters: Vec<ClusterState>,
     /// 各 policy 的 governor/min/max 快照，release 时恢复
     restore: Vec<PolicyRestore>,
+    /// 接管前 `sched_migration_cost_ns` 的原值（全局节点，只快照一次）：
+    /// 仅当配置了 `migration_cost_ns` 且写成功时才非 None，release 时写回
+    migration_cost_restore: Option<String>,
     active: bool,
     /// 调试日志计数，每 25 tick 打一次摘要
     log_counter: u32,
@@ -92,6 +98,7 @@ impl TunedGovernor {
             ak_active,
             clusters: Vec::new(),
             restore: Vec::new(),
+            migration_cost_restore: None,
             active: false,
             log_counter: 0,
         }
@@ -225,6 +232,9 @@ impl TunedGovernor {
             });
         }
 
+        // 稳态负载下按需调高迁移成本（可选：未配置则该节点完全不动）
+        self.apply_migration_cost();
+
         self.active = !self.clusters.is_empty();
         if self.active {
             info!(
@@ -257,6 +267,7 @@ impl TunedGovernor {
         self.active = false;
         // 恢复原 governor/min/max（快照读取失败的字段跳过）
         self.restore.retain(|r| !Self::restore_policy(r));
+        self.restore_migration_cost();
         self.clusters.clear();
         // 特调退出通知 Monitor 层恢复常规采样
         self.ak_active.store(false, Ordering::Relaxed);
@@ -296,6 +307,29 @@ impl TunedGovernor {
             }
         }
         all_ok
+    }
+
+    /// 接管期间按需调高 `sched_migration_cost_ns`：稳态负载（视频播放）下该值偏小
+    /// 会让调度器频繁跨核搬迁（8550 实测 ≈557 次/s），调高可省下搬迁开销与 cache
+    /// 失效。原值进 `migration_cost_restore`，release 时写回；写失败就当没配——
+    /// 这是锦上添花项，不该影响接管本身。
+    fn apply_migration_cost(&mut self) {
+        let Some(want) = self.cfg.migration_cost_ns.filter(|v| *v > 0) else {
+            return;
+        };
+        let orig = fs::read_to_string(MIGRATION_COST_PATH)
+            .ok()
+            .map(|s| s.trim().to_string());
+        if crate::utils::try_write_file(MIGRATION_COST_PATH, &want.to_string()).is_ok() {
+            self.migration_cost_restore = orig;
+        }
+    }
+
+    /// 恢复接管前的 `sched_migration_cost_ns`（只对曾经写成功的那次生效）
+    fn restore_migration_cost(&mut self) {
+        if let Some(orig) = self.migration_cost_restore.take() {
+            let _ = crate::utils::try_write_file(MIGRATION_COST_PATH, &orig);
+        }
     }
 
     /// 热重载：tuned_profiles.yaml 参数变化后更新控制参数（max 动态状态保持不变）。
@@ -343,6 +377,9 @@ impl TunedGovernor {
             } else {
                 &ranges.prime
             };
+            // 该核心组的有效参数（per_cluster 覆盖后的最终值）：三簇负载形态不同
+            // （视频实测 little 过载 / big 合理 / prime 空转），必须按组取
+            let p = cfg.for_cluster(c.core_name);
             let group_util = range
                 .clone()
                 .filter_map(|cpu| core_utils.get(cpu).copied())
@@ -355,17 +392,18 @@ impl TunedGovernor {
             // 时间常数（α=0.35）≈ 采样间隔 × (1-α)/α：实机 40ms tick ≈ 75ms
             // （跟得上真实负载、滤掉单 tick 尖峰）；日志回放是 160ms 采样
             // （≈300ms）——回放给出的收紧幅度因此偏乐观，实机效果待日志验证。
-            let util = if cfg.util_smoothing >= 0.999 || c.ema_util < 0.0 {
+            let util = if p.util_smoothing >= 0.999 || c.ema_util < 0.0 {
                 group_util
             } else {
-                cfg.util_smoothing * group_util + (1.0 - cfg.util_smoothing) * c.ema_util
+                p.util_smoothing * group_util + (1.0 - p.util_smoothing) * c.ema_util
             };
             c.ema_util = util;
 
             let hw_max = *c.available_freqs.last().unwrap_or(&0);
-            let target_ratio = (util * cfg.headroom).clamp(cfg.perf_floor, 1.0);
+            // perf_ceil 是天花板（默认 1.0 = 与加该字段前完全一致）
+            let target_ratio = (util * p.headroom).clamp(p.perf_floor, p.perf_ceil);
             let target_max = Self::freq_for_ratio(&c.available_freqs, target_ratio);
-            let hyst_freq = (hw_max as f32 * cfg.hysteresis) as u32;
+            let hyst_freq = (hw_max as f32 * p.hysteresis) as u32;
 
             let decision;
             if target_max > c.current_max + hyst_freq {
@@ -398,7 +436,7 @@ impl TunedGovernor {
                     }
                     Some(since) => {
                         c.down_target = target_max;
-                        if now.duration_since(since).as_millis() as u64 >= cfg.down_hold_ms {
+                        if now.duration_since(since).as_millis() as u64 >= p.down_hold_ms {
                             // 写成功才前移状态并结束等待：失败保留计时起点，
                             // 下一 tick（elapsed 仍满）立即重试
                             if c.max_writer.write_value_force(target_max) {

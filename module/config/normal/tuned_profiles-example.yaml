@@ -61,18 +61,38 @@ akmode:
 # special_tuned.yaml 的模式列表里注册的模式名，与本节键同名即自动生效；
 # 未注册的模式回退上面的 akmode 段。机制完全共用，差异只在参数倾向。
 # 示例两款（2026-09-17）：
-#   playback：视频播放稳态（在用）——headroom 1.05 贴负载，util_smoothing 0.35
-#             滤噪声尖峰（平滑是唯一能把上限压到 CLG 以下的路径）；
+#   playback：视频播放稳态（在用）——headroom 0.95 收紧（省电方向，<1.0 即收紧），
+#             util_smoothing 0.25 滤噪声尖峰（平滑是唯一能把上限压到 CLG 以下的路径）；
+#             per_cluster 给 little/prime 单独收紧 + 压天花板（三簇形态不同，别一刀切）；
+#             migration_cost_ns 调高以减少稳态场景的无谓跨核搬迁。
 #   daily：日常轻载交互（已从白名单移除，保留作参数组示例）——floor 0.10
 #             保底、平滑 0.5 保跟手。
+#
+# 字段补充（都是可选，不写即回退）：
+#   perf_ceil      目标比例的**天花板**（0.1~1.0，默认 1.0 = 不设限）。CLG 有同名参数，
+#                  tuned 原本只有 floor——缺它无法单独压某个核心组的频率上限。
+#   per_cluster    按核心组覆盖（键 little / big / prime），字段同模式级且全部可选：
+#                  headroom / perf_floor / perf_ceil / hysteresis / down_hold_ms /
+#                  util_smoothing。未列出的组与字段回退模式级——不配置即与旧行为一致。
+#   migration_cost_ns  接管期间写 /proc/sys/kernel/sched_migration_cost_ns（None = 不动），
+#                  退出按快照恢复。稳态负载调高可省搬迁开销；响应型负载别设。
 tuned_profiles:
   playback:
-    headroom: 1.05
+    headroom: 0.95
     perf_floor: 0.0
+    perf_ceil: 1.0
     hysteresis: 0.04
     down_hold_ms: 100
-    util_smoothing: 0.35
+    util_smoothing: 0.25
     boost_affinity: false
+    per_cluster:
+      little:
+        headroom: 0.90
+        perf_ceil: 0.65
+      prime:
+        headroom: 0.80
+        perf_ceil: 0.50
+    migration_cost_ns: 400000
   daily:
     headroom: 1.0
     perf_floor: 0.10

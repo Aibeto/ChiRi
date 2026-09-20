@@ -1,6 +1,7 @@
 //! config.rs: [meta] [clg_config] [clg_normalize] [mode_io] [toggles] [ak_config] [thermal_config] [affinity_config] [corectl_config] [config_root] [config_impl]
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 use crate::fluent_args;
 use crate::i18n::t_with_args;
@@ -469,7 +470,9 @@ pub struct FunctionToggles {
 // [ak_config]
 #[derive(Debug, Deserialize, Clone)]
 pub struct SpecialTunedConfig {
-    /// 负载放大系数：目标上限 = 组内最大核心占用率 × headroom，留出升频余量
+    /// 负载系数：目标上限 = 组内最大核心占用率 × headroom。
+    /// >1.0 = 放大留余量（响应优先，游戏默认 1.15）；1.0 = 原样；
+    /// <1.0 = **收紧**（省电方向，视频稳态用 0.95，配合 perf_ceil 压天花板）。
     #[serde(default = "d_ak_headroom")]
     pub headroom: f32,
     /// 目标上限比例下限（0 = 空闲组上限可收到硬件最低频）
@@ -493,6 +496,78 @@ pub struct SpecialTunedConfig {
     /// 其上限均值反而高于带平滑的 CLG），视频/轻载用 0.3~0.5 滤掉尖峰。
     #[serde(default = "d_ak_util_smoothing")]
     pub util_smoothing: f32,
+    /// 性能比例**天花板**（0..1）：目标比例的上限钳制。CLG 有同名参数，tuned 原本
+    /// 只有 floor 没有 ceil——缺它就无法单独压某个核心组的频率上限（8550 视频实测
+    /// 需要压 little/prime、放开 big）。1.0 = 不设天花板（与加该字段前完全一致）。
+    #[serde(default = "d_ak_perf_ceil")]
+    pub perf_ceil: f32,
+    /// 按核心组的参数覆盖（键：little / big / prime，大小写敏感）。
+    /// 三个簇的负载形态往往完全不同（8550 视频实测：little 过载、big 合理、prime
+    /// 空转却被尖峰顶到 84%），模式级一刀切必然顾此失彼。未列出的组、或组内未列出
+    /// 的字段，一律回退模式级同名参数——**不给配置就与旧行为逐位一致**。
+    #[serde(default)]
+    pub per_cluster: HashMap<String, ClusterTunedOverride>,
+    /// 接管期间写入 `/proc/sys/kernel/sched_migration_cost_ns`（None = 完全不动）。
+    /// 稳态负载（视频播放）下该值偏小会让调度器频繁跨核搬迁（8550 实测 ≈557 次/s），
+    /// 调高可减无谓迁移与 cache 失效；release 时按快照恢复，不污染其它场景。
+    #[serde(default)]
+    pub migration_cost_ns: Option<u64>,
+}
+
+/// 按核心组的参数覆盖（`per_cluster` 段的元素）：**全部字段可选**，
+/// None = 回退模式级同名参数（这样新增覆盖不必把每个字段都抄一遍）。
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct ClusterTunedOverride {
+    pub headroom: Option<f32>,
+    pub perf_floor: Option<f32>,
+    pub perf_ceil: Option<f32>,
+    pub hysteresis: Option<f32>,
+    pub down_hold_ms: Option<u64>,
+    pub util_smoothing: Option<f32>,
+}
+
+impl ClusterTunedOverride {
+    /// 非有限值直接丢弃（回退模式级）：范围钳制统一在 `for_cluster` 里做，
+    /// 避免两处各钳一次导致口径不一致
+    pub fn normalize(&mut self) {
+        if let Some(v) = self.headroom {
+            if !v.is_finite() {
+                self.headroom = None;
+            }
+        }
+        if let Some(v) = self.perf_floor {
+            if !v.is_finite() {
+                self.perf_floor = None;
+            }
+        }
+        if let Some(v) = self.perf_ceil {
+            if !v.is_finite() {
+                self.perf_ceil = None;
+            }
+        }
+        if let Some(v) = self.hysteresis {
+            if !v.is_finite() {
+                self.hysteresis = None;
+            }
+        }
+        if let Some(v) = self.util_smoothing {
+            if !v.is_finite() {
+                self.util_smoothing = None;
+            }
+        }
+    }
+}
+
+/// 单个核心组的**有效**参数：`per_cluster` 覆盖 + 范围钳制之后的最终值。
+/// tuned.rs 的决策只用这个，不再直接读 `SpecialTunedConfig` 的字段。
+#[derive(Debug, Clone, Copy)]
+pub struct EffectiveTuned {
+    pub headroom: f32,
+    pub perf_floor: f32,
+    pub perf_ceil: f32,
+    pub hysteresis: f32,
+    pub down_hold_ms: u64,
+    pub util_smoothing: f32,
 }
 
 // SpecialTunedConfig 缺省值：tuned_profiles.yaml 没写的字段回退到这里
@@ -511,6 +586,10 @@ fn d_ak_down_hold_ms() -> u64 {
 fn d_ak_util_smoothing() -> f32 {
     1.0
 }
+/// 默认不设天花板（1.0 = 与加该字段前一致）
+fn d_ak_perf_ceil() -> f32 {
+    1.0
+}
 
 impl Default for SpecialTunedConfig {
     fn default() -> Self {
@@ -521,6 +600,9 @@ impl Default for SpecialTunedConfig {
             down_hold_ms: d_ak_down_hold_ms(),
             boost_affinity: true,
             util_smoothing: d_ak_util_smoothing(),
+            perf_ceil: d_ak_perf_ceil(),
+            per_cluster: HashMap::new(),
+            migration_cost_ns: None,
         }
     }
 }
@@ -531,7 +613,9 @@ impl SpecialTunedConfig {
         if !self.headroom.is_finite() {
             self.headroom = d_ak_headroom();
         }
-        self.headroom = self.headroom.clamp(1.0, 2.0);
+        // 下限放到 0.5：<1.0 是**收紧**（省电方向），1.0 = 原样，>1.0 = 放大留余量。
+        // 原先写死下限 1.0 会把任何收紧型配置静默抬回 1.0，等于该参数在省电方向失效。
+        self.headroom = self.headroom.clamp(0.5, 2.0);
         if !self.perf_floor.is_finite() {
             self.perf_floor = d_ak_perf_floor();
         }
@@ -545,6 +629,55 @@ impl SpecialTunedConfig {
             self.util_smoothing = d_ak_util_smoothing();
         }
         self.util_smoothing = self.util_smoothing.clamp(0.05, 1.0);
+        if !self.perf_ceil.is_finite() {
+            self.perf_ceil = d_ak_perf_ceil();
+        }
+        self.perf_ceil = self.perf_ceil.clamp(0.1, 1.0);
+        // floor 高于 ceil 时 clamp 会静默取 ceil（语义退化成恒等于上限），直接对齐
+        if self.perf_floor > self.perf_ceil {
+            self.perf_floor = self.perf_ceil;
+        }
+        for ov in self.per_cluster.values_mut() {
+            ov.normalize();
+        }
+    }
+
+    /// 取某个核心组的有效参数：先套 `per_cluster` 覆盖，再按全局口径钳制。
+    /// 未配置该组时返回模式级参数（与加 per_cluster 之前逐位一致）。
+    pub fn for_cluster(&self, name: &str) -> EffectiveTuned {
+        let mut e = EffectiveTuned {
+            headroom: self.headroom,
+            perf_floor: self.perf_floor,
+            perf_ceil: self.perf_ceil,
+            hysteresis: self.hysteresis,
+            down_hold_ms: self.down_hold_ms,
+            util_smoothing: self.util_smoothing,
+        };
+        let Some(ov) = self.per_cluster.get(name) else {
+            return e;
+        };
+        if let Some(v) = ov.headroom.filter(|v| v.is_finite()) {
+            e.headroom = v.clamp(0.5, 2.0);
+        }
+        if let Some(v) = ov.perf_floor.filter(|v| v.is_finite()) {
+            e.perf_floor = v.clamp(0.0, 0.5);
+        }
+        if let Some(v) = ov.perf_ceil.filter(|v| v.is_finite()) {
+            e.perf_ceil = v.clamp(0.1, 1.0);
+        }
+        if let Some(v) = ov.hysteresis.filter(|v| v.is_finite()) {
+            e.hysteresis = v.clamp(0.0, 0.2);
+        }
+        if let Some(v) = ov.down_hold_ms {
+            e.down_hold_ms = v.min(5_000);
+        }
+        if let Some(v) = ov.util_smoothing.filter(|v| v.is_finite()) {
+            e.util_smoothing = v.clamp(0.05, 1.0);
+        }
+        if e.perf_floor > e.perf_ceil {
+            e.perf_floor = e.perf_ceil;
+        }
+        e
     }
 }
 

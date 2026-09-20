@@ -21,15 +21,33 @@ akmode:
 tuned_profiles:
   # playback —— 视频播放稳态（2026-09-17 8550 实测新增）：只有长稳态场景
   # 值得特调（上机反馈：高频短交互不该被接管，daily 组已于当晚移除）。
-  # headroom 1.05 贴负载但留 5% 余量——回放扫参里 1.0 最省，但上机后
-  # 按「别压太紧」的反馈回退一档；util_smoothing 0.35 滤掉弹幕/进度条的
-  # 噪声尖峰（无平滑时上限会被瞬时尖峰反复推高、均值反高于 CLG）。
   # boost_affinity=false：不做 boost 亲和收窄、不保大核常在线——保大核与
   # 「贴负载省电」相反，播放场景让核按 EAS 自然摆放。
+  #
+  # 2026-09-20 8550 视频功耗回放调整（依据见 .codebuddy/docs/2026-09-20-8550-video-power-analysis.md）：
+  # - headroom 1.05 → 0.95：原「别压太紧」档位下 little 上限仍达 72%（p95 100%），
+  #   而 capfreq_little 与 batt_p 相关性最强（r=0.884），是头号功耗驱动；
+  # - util_smoothing 0.35 → 0.25：进一步滤掉弹幕/进度条尖峰，压 prime 的 p95（84%）；
+  # - per_cluster：三簇形态不同，模式级一刀切必然顾此失彼——
+  #     little 过载（各核 util 54~59%、p95 近 100%）→ 再收一档并压天花板 0.65；
+  #     prime 空转（util p50=0）却被尖峰顶到 84% → 收 headroom + 天花板 0.50；
+  #     big（util 30~39%）不覆盖，跟随模式级 0.95；
+  # - migration_cost_ns 400000：稳态下调高迁移成本，减少无谓跨核搬迁（实测 ≈557 次/s），
+  #   接管期生效、退出按快照恢复（feature.yaml 的一次性 200000 不受影响）。
+  # **未列 per_cluster 的 big、以及所有组的未列字段都回退上面的模式级值。**
   playback:
-    headroom: 1.05
+    headroom: 0.95
     perf_floor: 0.0
+    perf_ceil: 1.0
     hysteresis: 0.04
     down_hold_ms: 100
-    util_smoothing: 0.35
+    util_smoothing: 0.25
     boost_affinity: false
+    per_cluster:
+      little:
+        headroom: 0.90
+        perf_ceil: 0.65
+      prime:
+        headroom: 0.80
+        perf_ceil: 0.50
+    migration_cost_ns: 400000
