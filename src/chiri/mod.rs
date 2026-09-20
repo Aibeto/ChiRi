@@ -753,9 +753,13 @@ pub fn start_scheduler_thread(
             const MODE_FILE_REWRITE_INTERVAL: Duration = Duration::from_secs(5);
             let mut last_mode_file_write = Instant::now();
             // 停摆期心跳间隔：停摆中本线程不打任何日志，按这个间隔落一条状态行
-            // （既是「停摆仍在生效」的证据，也是「采集与日志照常」的证据）
-            const DOWN_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(300);
+            // （既是「停摆仍在生效」的证据，也是「采集与日志照常」的证据）。
+            // 取 60s 而不是更长：停摆期的日志**完全静止**，用户只能靠这一行区分
+            // 「停摆生效中」与「进程已经死了」，间隔太长等于没有。
+            const DOWN_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(60);
             let mut last_down_heartbeat = Instant::now();
+            // 停摆起始时刻（启动即停摆时就是现在）：心跳里带上已持续分钟数
+            let mut halt_since: Option<Instant> = None;
             // [halt] 停摆状态机：进入/退出 DOWN 时做一次性的释放与恢复。
             // 放在调度循环里而不是监听线程里——这些 governor 对象归本线程独占。
             let mut halted = crate::down::is_down();
@@ -768,6 +772,7 @@ pub fn start_scheduler_thread(
                 // 于是整份日志里没有任何停摆字样——与「调度线程根本没起来」完全同形，
                 // 只能靠推断（旁证是 tweaks 被跳过的那行），必须留痕
                 log::warn!("{}", t("down-boot-halted"));
+                halt_since = Some(Instant::now());
             }
             // 启动时先写一次初始模式，避免开机后文件缺失/被清空时 WebUI 显示未知状态
             {
@@ -897,14 +902,21 @@ pub fn start_scheduler_thread(
                     crate::chiri::governor::GovernorGuard::cleanup_residue();
                 }
                 let current_mode = mode_clone.lock().unwrap().clone();
-                if current_mode == "vector" {
-                    fast_lock.init();
-                } else if current_mode != "fas" {
-                    let config_lock = config_clone.read().unwrap();
-                    let clg_cfg = get_clg_cfg(&config_lock, &current_mode);
-                    if clg_cfg.enabled {
-                        cpu_governor.init_policies(&clg_cfg);
-                        log::info!("{}", t_with_args("scheduler-clg-init", &fluent_args!("mode" => current_mode.clone())));
+                // 启动接管（极速锁频 / CLG）：**停摆期一律不做**。
+                // 此前只靠「停摆时内存模式是 down → 既不等于 vector、get_clg_cfg 又
+                // 返回 enabled=false」间接跳过——这是个脆弱不变量：feature.yaml 里
+                // 一旦出现名为 `down` 的模式段，停摆期开机就会直接锁频/接管 CLG。
+                // 显式门控，不再依赖模式名恰好不命中。
+                if !halted {
+                    if current_mode == "vector" {
+                        fast_lock.init();
+                    } else if current_mode != "fas" {
+                        let config_lock = config_clone.read().unwrap();
+                        let clg_cfg = get_clg_cfg(&config_lock, &current_mode);
+                        if clg_cfg.enabled {
+                            cpu_governor.init_policies(&clg_cfg);
+                            log::info!("{}", t_with_args("scheduler-clg-init", &fluent_args!("mode" => current_mode.clone())));
+                        }
                     }
                 }
                 // 开发记录开关初始同步：**与停摆无关**（停摆只停调度，采集照常），
@@ -973,6 +985,7 @@ pub fn start_scheduler_thread(
                         down_resume_mode = mode_clone.lock().unwrap().clone();
                         // FAS 延迟退出的目标模式随之失效（DOWN 退出按 down_resume_mode 接管）
                         pending_mode_after_fas = None;
+                        halt_since = Some(Instant::now());
                         // 顺序：先把频率与布局交回系统（各 release 会恢复自己的快照），
                         // 再写状态文件——反了会有一瞬间「既停摆又还持有着」
                         cpu_governor.release();
@@ -1002,6 +1015,7 @@ pub fn start_scheduler_thread(
                         // 停摆前是 fas/特调时若沿用旧快照，退出后会因「模式没变 → 不发
                         // ModeChange」而一直空窗；实时值把「前台已变/未变」两种情况一起解决
                         // （快照仅在 monitor 尚未判定/刚亮屏清空时兜底）。
+                        halt_since = None;
                         let live_mode = crate::monitor::app_detect::last_determined_mode();
                         let resume_mode = if live_mode.is_empty() {
                             down_resume_mode.clone()
@@ -1118,7 +1132,13 @@ pub fn start_scheduler_thread(
                 // 与独立线程维持，与本心跳无关。
                 if halted && last_down_heartbeat.elapsed() >= DOWN_HEARTBEAT_INTERVAL {
                     last_down_heartbeat = Instant::now();
-                    log::info!("{}", t("down-heartbeat"));
+                    let mins = halt_since
+                        .map(|t| t.elapsed().as_secs() / 60)
+                        .unwrap_or(0);
+                    log::info!(
+                        "{}",
+                        t_with_args("down-heartbeat", &fluent_args!("mins" => mins.to_string()))
+                    );
                 }
 
                 // config.yaml 热重载联动：config_watcher 成功重载后置位。
