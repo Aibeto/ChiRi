@@ -233,6 +233,41 @@ pub fn get_cpu_policies() -> Vec<CpuPolicy> {
     policies
 }
 
+/// devimp snap 行用：各 policy 的**实际**当前频率 / 上限 / 下限 / 调速器
+/// （`scaling_cur_freq` / `scaling_max_freq` / `scaling_min_freq` / `scaling_governor`）。
+/// 多 policy 以 `;` 分隔，每项 `policy<id>:<值>`；节点读不到写 `-`。
+/// **只在 devimp 开启时调用**（每秒一次 sysfs 读），不做缓存——这些值会被内核
+/// governor 与 TunedGovernor 改写，缓存只会给出过期数据。与 devimp 既有的
+/// `cur_freq_khz`/`max_freq_khz`（调度器决策值）互补：那两列是「我们写了多少」，
+/// 这里是「内核现在实际是多少」。
+pub fn cpu_freq_snapshot() -> (String, String, String, String) {
+    let (mut cur, mut max, mut min, mut gov) = (
+        String::new(),
+        String::new(),
+        String::new(),
+        String::new(),
+    );
+    for p in get_cpu_policies() {
+        let base = format!("/sys/devices/system/cpu/cpufreq/policy{}", p.id);
+        let read = |f: &str| -> String {
+            std::fs::read_to_string(format!("{base}/{f}"))
+                .map(|s| s.trim().to_string())
+                .unwrap_or_else(|_| "-".to_string())
+        };
+        let push = |dst: &mut String, v: String| {
+            if !dst.is_empty() {
+                dst.push(';');
+            }
+            dst.push_str(&format!("policy{}:{}", p.id, v));
+        };
+        push(&mut cur, read("scaling_cur_freq"));
+        push(&mut max, read("scaling_max_freq"));
+        push(&mut min, read("scaling_min_freq"));
+        push(&mut gov, read("scaling_governor"));
+    }
+    (cur, max, min, gov)
+}
+
 /// 读取指定 policy 的 scaling_boost_frequencies（kHz）。
 /// 文件不存在、为空或解析失败时返回空 Vec，不影响 policy 注册。
 fn read_boost_frequencies(pid: i32) -> Vec<u32> {
@@ -1363,6 +1398,11 @@ pub fn start_scheduler_thread(
                     // 开发记录 snap 行（1s）：环境上下文（开启 dev_record 才有 IO；
                     // 前台包名由 set_devimp_package 已同步，行内自动填充）
                     if crate::logger::devimp_active() {
+                        // 频率/调速器快照只在 devimp 开启时采集（每秒一次 sysfs 读，
+                        // 常态零开销）；不缓存——内核与其它进程随时会改这些值
+                        let (cpu_cur, cpu_max, cpu_min, cpu_gov) = crate::chiri::cpu_freq_snapshot();
+                        let (gpu_cur, gpu_max, gpu_min, gpu_gov) =
+                            crate::chiri::gpu::devfreq_snapshot();
                         crate::logger::devimp_snap(
                             is_screen_on,
                             &fmt_opt(last_batt_temp, 1),
@@ -1379,6 +1419,14 @@ pub fn start_scheduler_thread(
                             last_bpf_stats.0,
                             last_bpf_stats.1,
                             last_bpf_stats.2,
+                            &cpu_cur,
+                            &cpu_max,
+                            &cpu_min,
+                            &cpu_gov,
+                            &gpu_cur,
+                            &gpu_max,
+                            &gpu_min,
+                            &gpu_gov,
                         );
                     }
                     if telemetry_log_counter % 20 == 0 && log::log_enabled!(log::Level::Debug) {

@@ -93,6 +93,62 @@ pub struct GpuGuard {
     active: bool,
 }
 
+/// devimp snap 行用：GPU 各节点的**实际**当前频率 / 上下限 / 调速器。
+/// 多节点以 `;` 分隔，每项 `<设备名>:<值>`，读不到写 `-`。
+/// **只在 devimp 开启时调用**（每秒一次 sysfs 读），故不做缓存——这些值会被
+/// 内核 devfreq 与其它进程改动，缓存只会给出过期数据。
+/// 节点口径与探测一致：Adreno(kgsl-3d0) + 通用 devfreq(gpu/kgsl/mali)。
+pub fn devfreq_snapshot() -> (String, String, String, String) {
+    let mut dirs: Vec<String> = Vec::new();
+    if std::path::Path::new(ADRENO_DIR).exists() {
+        dirs.push(ADRENO_DIR.to_string());
+    }
+    if let Ok(entries) = fs::read_dir(GPU_DEVFREQ_ROOT) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_lowercase();
+            if name.contains("gpu") || name.contains("kgsl") || name.contains("mali") {
+                let dir = entry.path().to_string_lossy().to_string();
+                if !dirs.contains(&dir) {
+                    dirs.push(dir);
+                }
+            }
+        }
+    }
+
+    let (mut cur, mut max, mut min, mut gov) = (
+        String::new(),
+        String::new(),
+        String::new(),
+        String::new(),
+    );
+    for dir in dirs {
+        let label = dir.rsplit('/').next().unwrap_or("gpu").to_string();
+        // Adreno 的当前频率节点是 gpuclk，devfreq 形式是 cur_freq：都试一遍
+        let read_any = |names: &[&str]| -> String {
+            for n in names {
+                if let Ok(s) = fs::read_to_string(format!("{dir}/{n}")) {
+                    let s = s.trim().to_string();
+                    if !s.is_empty() {
+                        return s;
+                    }
+                }
+            }
+            "-".to_string()
+        };
+        let push = |dst: &mut String, v: String| {
+            if !dst.is_empty() {
+                dst.push(';');
+            }
+            dst.push_str(&format!("{label}:{v}"));
+        };
+        push(&mut cur, read_any(&["cur_freq", "gpuclk", "clock"]));
+        push(&mut max, read_any(&["max_freq", "max_gpuclk"]));
+        push(&mut min, read_any(&["min_freq"]));
+        push(&mut gov, read_any(&["governor"]));
+    }
+    (cur, max, min, gov)
+}
+
 impl GpuGuard {
     /// 启动时构造并探测一次；探测结果缓存，之后不再扫文件系统
     pub fn new() -> Self {

@@ -57,7 +57,12 @@ default:
     headroom_factor: 1.25
     headroom_ramp: 0.15
     perf_floor: 0.15
-    perf_ceil: 1.0
+    # 2026-09-22 双机型实测调整：日常/均衡档原本没有天花板（1.0 = 与无限制等价），
+    # 尖峰一来就把上限顶到硬件最高（8550 实测：util 才 0.5 左右，cap p95 却是 100%）。
+    # 压到 0.80 省的是「频率高于负载所需」的那部分——视频场景按同一思路已实测降 26.5%。
+    # **交互响应由 touch_boost 兜**（下方 touch_boost_enabled/ms）：稳态降频、触摸即升，
+    # 切勿只降 perf_ceil 而不动 touch_boost。
+    perf_ceil: 0.80
     perf_init: 0.50
     up_jump_threshold: 0.35
     slow_up_scale: 0.02

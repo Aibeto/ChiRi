@@ -195,6 +195,13 @@ pub struct CpuLoadGovernorConfig {
     /// 性能上限：目标性能永不超过此值（锁频上限的百分比）
     #[serde(default = "d_clg_ceil")]
     pub perf_ceil: f32,
+    /// 按核心组的参数覆盖（键：little / big / prime，大小写敏感）。
+    /// CLG 原本三簇共用同一份参数，而日常负载下三簇形态差很多（8550 实测：util
+    /// little 0.55 / big 0.36 / prime 0.32，但上限都被尖峰顶到 100%）——一刀切只能
+    /// 取「最松的那簇」能接受的上限。未列出的组与字段回退模式级同名参数，
+    /// **不配置就与加这个字段之前逐位一致**。
+    #[serde(default)]
+    pub per_cluster: HashMap<String, ClgClusterOverride>,
     /// 接管瞬间的初始性能：init_policies 时先把频率锁到该档位，避免从 0 爬升
     #[serde(default = "d_clg_init")]
     pub perf_init: f32,
@@ -279,6 +286,49 @@ fn d_clg_touch_boost_tiers() -> u32 {
     1
 }
 
+/// 按核心组的参数覆盖（CLG `per_cluster` 段的元素）：只覆盖最常用的五个量
+/// （阈值 / 余量 / 上下限），其余沿用模式级——字段越多越难调，这五个足够
+/// 表达「little 压狠点、prime 压狠点、big 放开」这类诉求。
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct ClgClusterOverride {
+    pub up_threshold: Option<f32>,
+    pub down_threshold: Option<f32>,
+    pub headroom_factor: Option<f32>,
+    pub perf_floor: Option<f32>,
+    pub perf_ceil: Option<f32>,
+}
+
+impl ClgClusterOverride {
+    /// 非有限值丢弃（回退模式级）：范围钳制统一在 `effective()` 里做
+    pub fn normalize(&mut self) {
+        if let Some(v) = self.up_threshold {
+            if !v.is_finite() {
+                self.up_threshold = None;
+            }
+        }
+        if let Some(v) = self.down_threshold {
+            if !v.is_finite() {
+                self.down_threshold = None;
+            }
+        }
+        if let Some(v) = self.headroom_factor {
+            if !v.is_finite() {
+                self.headroom_factor = None;
+            }
+        }
+        if let Some(v) = self.perf_floor {
+            if !v.is_finite() {
+                self.perf_floor = None;
+            }
+        }
+        if let Some(v) = self.perf_ceil {
+            if !v.is_finite() {
+                self.perf_ceil = None;
+            }
+        }
+    }
+}
+
 impl Default for CpuLoadGovernorConfig {
     fn default() -> Self {
         Self {
@@ -292,6 +342,7 @@ impl Default for CpuLoadGovernorConfig {
             headroom_ramp: d_clg_headroom_ramp(),
             perf_floor: d_clg_floor(),
             perf_ceil: d_clg_ceil(),
+            per_cluster: HashMap::new(),
             perf_init: d_clg_init(),
             up_jump_threshold: d_clg_up_jump(),
             slow_up_scale: d_clg_slow_up_scale(),
@@ -387,6 +438,43 @@ impl CpuLoadGovernorConfig {
             self.perf_floor = self.perf_ceil;
         }
         self.perf_init = self.perf_init.clamp(self.perf_floor, self.perf_ceil);
+        for ov in self.per_cluster.values_mut() {
+            ov.normalize();
+        }
+    }
+
+    /// 取某个核心组的**有效参数**：以模式级参数为底，套上 `per_cluster` 覆盖后
+    /// 再走一遍同样的交叉约束（floor/ceil 顺序、perf_init 落在区间内）。
+    /// 未配置该组时返回自身克隆（与加 per_cluster 之前逐位一致）。
+    /// Worker 侧继续按单一 `self.cfg` 使用，不需要感知覆盖的存在。
+    pub fn effective(&self, cluster: &str) -> CpuLoadGovernorConfig {
+        let mut c = self.clone();
+        let Some(ov) = self.per_cluster.get(cluster) else {
+            return c;
+        };
+        if let Some(v) = ov.up_threshold {
+            c.up_threshold = v.clamp(0.0, 1.0);
+        }
+        if let Some(v) = ov.down_threshold {
+            c.down_threshold = v.clamp(0.0, 1.0);
+        }
+        if let Some(v) = ov.headroom_factor {
+            c.headroom_factor = v.clamp(1.0, 2.0);
+        }
+        if let Some(v) = ov.perf_floor {
+            c.perf_floor = v.clamp(0.0, 1.0);
+        }
+        if let Some(v) = ov.perf_ceil {
+            c.perf_ceil = v.clamp(0.0, 1.0);
+        }
+        if c.down_threshold > c.up_threshold {
+            c.down_threshold = c.up_threshold;
+        }
+        if c.perf_floor > c.perf_ceil {
+            c.perf_floor = c.perf_ceil;
+        }
+        c.perf_init = c.perf_init.clamp(c.perf_floor, c.perf_ceil);
+        c
     }
 }
 

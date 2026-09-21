@@ -171,7 +171,16 @@
       // 计数
       wakeups: '--ak-text-secondary',
       migrations: '--ak-surface-muted',
-      freq_trans: '--ak-surface-raised'
+      freq_trans: '--ak-surface-raised',
+      // CPU/GPU 实际频率与调速器（devimp snap 行，2026-09-21 新增）
+      cpu_cur_khz: '--ak-color-accent',
+      cpu_max_khz: '--ak-color-basic',
+      cpu_min_khz: '--ak-color-secondary',
+      cpu_governor: '--ak-text-secondary',
+      gpu_cur_khz: '--ak-color-yellow',
+      gpu_max_khz: '--ak-color-advanced',
+      gpu_min_khz: '--ak-color-dark-blue',
+      gpu_governor: '--ak-surface-muted'
     }
     const COLOR_POOL = [
       '--ak-color-primary',
@@ -1526,7 +1535,10 @@
       clg_active: 'clg', psi_cpu_some: 'cpu_some', psi_io_some: 'io_some',
       psi_mem_some: 'mem_some', gpu_busy_pct: 'gpu', batt_voltage_v: 'batt_v',
       batt_current_ma: 'batt_a', batt_power_w: 'batt_w', wakeups: 'wake',
-      migrations: 'mig', freq_trans: 'freq'
+      migrations: 'mig', freq_trans: 'freq',
+      cpu_cur_khz: 'cpu_cur', cpu_max_khz: 'cpu_max', cpu_min_khz: 'cpu_min',
+      cpu_governor: 'cpu_gov', gpu_cur_khz: 'gpu_cur', gpu_max_khz: 'gpu_max',
+      gpu_min_khz: 'gpu_min', gpu_governor: 'gpu_gov'
     }
     const HEADER_TIPS = {
       timestamp: '采样时刻（设备本地时间）', type: '行类型，snap = 每秒快照',
@@ -1538,7 +1550,17 @@
       gpu_busy_pct: 'GPU 占用率（%）', batt_voltage_v: '电池电压（V，单节域）',
       batt_current_ma: '电池电流（A；放电为正、充电为负）', batt_power_w: '电池功率（W = |电流| × 电压）',
       wakeups: '每秒 CPU 唤醒次数', migrations: '每秒跨核迁移次数',
-      freq_trans: '每秒调频次数（内核缺 tracepoint 时恒为 0）', fps: 'FAS 实测帧率，未启用为 -'
+      freq_trans: '每秒调频次数（内核缺 tracepoint 时恒为 0）', fps: 'FAS 实测帧率，未启用为 -',
+      // 末 8 列（2026-09-21 新增）：多 policy / 多节点用 ; 分隔，读不到写 -
+      // 与 cur_freq_khz / max_freq_khz 的区别：那两列是调度器写入的决策值，这里是内核当前实际值
+      cpu_cur_khz: 'CPU 各 policy 当前实际频率（kHz），形如 policy0:1459200;policy3:2592000',
+      cpu_max_khz: 'CPU 各 policy 当前频率上限（内核实际 scaling_max_freq）',
+      cpu_min_khz: 'CPU 各 policy 当前频率下限（内核实际 scaling_min_freq）',
+      cpu_governor: 'CPU 各 policy 当前内核调速器（schedutil / performance …）',
+      gpu_cur_khz: 'GPU 当前实际频率（kHz），形如 kgsl-3d0:600000',
+      gpu_max_khz: 'GPU 当前频率上限',
+      gpu_min_khz: 'GPU 当前频率下限',
+      gpu_governor: 'GPU 当前 devfreq 调速器'
     }
     // charge 值精简（信息显示非表头；「详细列名」开时显示原文）
     const CHG_SHORT = { charging: 'chg', discharging: 'dis', full: 'full', not_charging: 'nchg' }

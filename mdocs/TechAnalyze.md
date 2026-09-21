@@ -2085,7 +2085,7 @@ i18n/en.ftl
 
 **新增列必须追加在末尾**。WebUI 的 `STATUS_COLUMNS` 按列数过滤残缺行，往中间插入会打乱既有索引。
 
-### 9.4 devimp 的 40 列
+### 9.4 devimp 的 48 列
 
 devimp 是开发诊断日志，按前台包名分组。文件名 `devimp_<包名>_<MMDD-HHmmss>.log`，包名段过滤为字母数字和 `. _ -`，截断到 64 字符。没有包名时用 `nopkg`。
 
@@ -2101,7 +2101,13 @@ devimp 是开发诊断日志，按前台包名分组。文件名 `devimp_<包名
 | `tgtop` | 全系统 top 消耗者                    | 30 秒一轮，最多 5 行            |
 | `event` | 模式/屏幕/热/配置/FAS 生命周期变化   | 发生即写                        |
 
-40 列的字段名依次为 `ts`、`type`、`mode`、`screen_on`、`pid`、`package`、`tid`、`comm`、`cluster`、`core`、`from_core`、`to_core`、`util_pct`、`max_util`、`over_cores`、`under_cores`、`cur_perf`、`tgt_perf`、`cur_freq_khz`、`max_freq_khz`、`decision`、`deb_up`、`deb_down`、`reason`、`pinned`、`thermal_cap_pct`、`touch`、`psi_cpu`、`psi_io`、`psi_mem`、`gpu_busy`、`batt_v`、`batt_i`、`batt_p`、`wakeups`、`migrations`、`freq_trans`、`batt_temp`、`cpu_temp`、`clg_active`。
+48 列的字段名依次为 `ts`、`type`、`mode`、`screen_on`、`pid`、`package`、`tid`、`comm`、`cluster`、`core`、`from_core`、`to_core`、`util_pct`、`max_util`、`over_cores`、`under_cores`、`cur_perf`、`tgt_perf`、`cur_freq_khz`、`max_freq_khz`、`decision`、`deb_up`、`deb_down`、`reason`、`pinned`、`thermal_cap_pct`、`touch`、`psi_cpu`、`psi_io`、`psi_mem`、`gpu_busy`、`batt_v`、`batt_i`、`batt_p`、`wakeups`、`migrations`、`freq_trans`、`batt_temp`、`cpu_temp`、`clg_active`、`cpu_cur_khz`、`cpu_max_khz`、`cpu_min_khz`、`cpu_governor`、`gpu_cur_khz`、`gpu_max_khz`、`gpu_min_khz`、`gpu_governor`。
+
+末 8 列（2026-09-21 新增，**追加在末尾**，仅 `snap` 行填充，其余行类型留 `-`）记录**内核当前实际值**，
+与既有的 `cur_freq_khz` / `max_freq_khz`（调度器写入的决策值）互补：那两列是「我们写了多少」，
+这 8 列是「内核现在实际是多少」。多 policy / 多 GPU 节点以 `;` 分隔，每项 `policy<id>:<值>`
+或 `<设备名>:<值>`，节点读不到写 `-`。**只在 devimp 开启时采集**（每秒一次 sysfs 读，常态零开销），
+且不做缓存——这些值会被内核 governor 与 TunedGovernor 随时改写，缓存只会给出过期数据。
 
 文件头会写入设备元信息：`module.prop` 内容、`build.prop` 解析结果、`getprop` 查询结果。源码注释中记录了一处问题：`ro.product.model` 这类跨分区属性必须通过 `getprop` 命令获取，直接读 `/system/build.prop` 会读空。
 

@@ -11,8 +11,16 @@
 akmode:
   headroom: 1.15
   perf_floor: 0.0
+  # 2026-09-22 8745 明日方舟实测调整（全局生效，游戏场景各 SoC 同向受益）：
+  # 该场景 7.06 W、big 上限中位数 100%、gpu 74%——原本 headroom 1.15 且无天花板，
+  # util 尖峰一来就是 1.0×1.15 → clamp 1.0 直接满频。
+  # perf_ceil 0.95：留 5% 余量即可，不再让尖峰顶到 100%；
+  # util_smoothing 0.85：只滤最陡的尖峰（游戏仍以响应优先，不做到 0.3 那种强平滑）。
+  # **掉帧/操作变粘即回退**：先把 util_smoothing 回 1.0，仍不行再回 perf_ceil 1.0。
+  perf_ceil: 0.95
   hysteresis: 0.03
   down_hold_ms: 100
+  util_smoothing: 0.85
 
 # [tuned-profiles]
 # 按特调模式名分派的参数组（模式名在 special_tuned.yaml 的模式列表中注册，

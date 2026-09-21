@@ -823,6 +823,21 @@ impl CpuLoadGovernor {
     }
 
     /// 接管所有 cpufreq policy：停旧 Worker → 快照原始状态 → 写 schedutil →
+    /// 判定某个 policy 属于哪个核心组：cpufreq 的 policy 名就是该簇首个 CPU id，
+    /// 配合 `chiri_core_ranges()` 即可定位，无需额外读 sysfs。落在未知区间时按
+    /// prime 兜底（与 tuned.rs 的判定顺序一致）。仅供 `per_cluster` 覆盖取参数用。
+    fn cluster_name_for_policy(policy_id: i32) -> &'static str {
+        let r = crate::common::chiri_core_ranges();
+        let id = policy_id.max(0) as usize;
+        if r.little.contains(&id) {
+            "little"
+        } else if r.big.contains(&id) {
+            "big"
+        } else {
+            "prime"
+        }
+    }
+
     /// min 压到硬件最低 → max 按 perf_init 设初始值 → 为每个 policy 起 Worker 线程。
     pub fn init_policies(&mut self, gov_cfg: &CpuLoadGovernorConfig) {
         self.stop_workers();
@@ -839,7 +854,8 @@ impl CpuLoadGovernor {
         for policy in &policies {
             let result = CoreGroupWorker::spawn(
                 policy.id,
-                self.cfg.clone(),
+                // 按核心组取有效参数：per_cluster 覆盖在此生效（未配置则原样克隆）
+                self.cfg.effective(Self::cluster_name_for_policy(policy.id)),
                 &policy.boost_frequencies,
                 core_ranges.clone(),
                 touch.clone(),
@@ -907,7 +923,8 @@ impl CpuLoadGovernor {
             }
             let result = CoreGroupWorker::spawn(
                 policy.id,
-                self.cfg.clone(),
+                // 按核心组取有效参数：per_cluster 覆盖在此生效（未配置则原样克隆）
+                self.cfg.effective(Self::cluster_name_for_policy(policy.id)),
                 &policy.boost_frequencies,
                 core_ranges.clone(),
                 touch.clone(),

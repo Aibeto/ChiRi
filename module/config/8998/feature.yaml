@@ -95,7 +95,10 @@ default:
     headroom_factor: 1.05
     headroom_ramp: 0.12
     perf_floor: 0.05
-    perf_ceil: 1.0
+    # 2026-09-22：SoC 覆盖会盖掉根 feature.yaml，这里同步加日常天花板 0.80
+    # （原 1.0）。交互响应靠 touch_boost_ms 兜，别只降 ceil。
+    # 本机型暂无 per_cluster 实测数据，故不写覆盖（写了也无依据）。
+    perf_ceil: 0.80
     perf_init: 0.25
     up_jump_threshold: 0.30
     slow_up_scale: 0.03

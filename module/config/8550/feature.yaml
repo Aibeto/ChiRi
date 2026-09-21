@@ -49,7 +49,11 @@ Thermal:
   # 只在接近内核起控点时提前轻压
   cpu_soft_temp_c: 90
   cpu_hard_temp_c: 95
-  soft_perf_cap: 0.70
+  # 2026-09-22 实测调整（仅本机型）：原 0.70 是一刀切，电池 40.7℃ 触发后瞬间砍掉
+  # 三成上限 = 断崖式掉帧。改 0.85 让压制更平缓（少掉帧、也不至于失控），
+  # 真正的解法是 P1/P3 把功耗压下去让温度不上来——这条只是把「断崖」改成「斜坡」。
+  # 安全阈值本身（batt_soft_temp_c / batt_hard_temp_c）不动。
+  soft_perf_cap: 0.85
   hard_perf_cap: 0.40
   free_above: 0.80
   hysteresis_c: 3
@@ -100,8 +104,18 @@ default:
     headroom_factor: 1.05
     headroom_ramp: 0.12
     perf_floor: 0.05
-    perf_ceil: 1.0
+    # 2026-09-22 实测调整：本文件是 SoC 覆盖，会盖掉根 feature.yaml，故这里同步改。
+    # 日常档加天花板 0.80（原 1.0）；交互响应靠下方 touch_boost_ms 兜，别只降 ceil。
+    perf_ceil: 0.80
     perf_init: 0.25
+    # 按核心组再收紧（8550 实测日常 util：little 0.55 / big 0.36 / prime 0.32，
+    # 但三簇上限都被尖峰顶到 100%）——三簇一刀切只能取「最松那簇」能接受的值：
+    # little 最热压到 0.70，prime 空转多压到 0.65，big 不覆盖、继承 0.80。
+    per_cluster:
+      little:
+        perf_ceil: 0.70
+      prime:
+        perf_ceil: 0.65
     up_jump_threshold: 0.30
     slow_up_scale: 0.03
     down_fast_threshold: 0.25

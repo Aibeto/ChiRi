@@ -827,7 +827,13 @@ fn devimp_tick_state_clear() {
 /// 列序由 devimp_tick / devimp_snap / devimp_place / devimp_aff /
 /// devimp_core / devimp_tgtop / devimp_event 的写入保证对齐
 // [devrow]
-const DEVIMP_HEADER: &str = "ts,type,mode,screen_on,pid,package,tid,comm,cluster,core,from_core,to_core,util_pct,max_util,over_cores,under_cores,cur_perf,tgt_perf,cur_freq_khz,max_freq_khz,decision,deb_up,deb_down,reason,pinned,thermal_cap_pct,touch,psi_cpu,psi_io,psi_mem,gpu_busy,batt_v,batt_i,batt_p,wakeups,migrations,freq_trans,batt_temp,cpu_temp,clg_active";
+/// 列 40-47（2026-09-21 新增，追加在末尾而非插入中间，避免打乱既有列索引）：
+/// CPU 各 policy 与 GPU 各节点的**实际**频率/上下限/调速器。
+/// 多 policy（节点）用 `;` 分隔，每项 `policy<id>:<值>`（GPU 为 `<设备名>:<值>`），
+/// 读不到写 `-`。只在 snap 行填充（1s 整机快照），其余行类型留 `-`。
+/// 与既有 cur_freq_khz / max_freq_khz 的区别：那两列是 **TunedGovernor/CLG 的
+/// 决策值**（写进去的 scaling_max 与硬件最高），这几列是**内核当前实际值**。
+const DEVIMP_HEADER: &str = "ts,type,mode,screen_on,pid,package,tid,comm,cluster,core,from_core,to_core,util_pct,max_util,over_cores,under_cores,cur_perf,tgt_perf,cur_freq_khz,max_freq_khz,decision,deb_up,deb_down,reason,pinned,thermal_cap_pct,touch,psi_cpu,psi_io,psi_mem,gpu_busy,batt_v,batt_i,batt_p,wakeups,migrations,freq_trans,batt_temp,cpu_temp,clg_active,cpu_cur_khz,cpu_max_khz,cpu_min_khz,cpu_governor,gpu_cur_khz,gpu_max_khz,gpu_min_khz,gpu_governor";
 
 // 列索引常量（DevRow.set 用，调用方按列语义取用）
 const D_TS: usize = 0;
@@ -870,9 +876,18 @@ const D_FREQT: usize = 36;
 const D_BATTTEMP: usize = 37;
 const D_CPUTEMP: usize = 38;
 const D_CLGACT: usize = 39;
+// 40-47：CPU/GPU 实际频率与调速器（见 DEVIMP_HEADER 上方注释，仅 snap 行填充）
+const D_CPUCUR: usize = 40;
+const D_CPUMAX: usize = 41;
+const D_CPUMIN: usize = 42;
+const D_CPUGOV: usize = 43;
+const D_GPUCUR: usize = 44;
+const D_GPUMAX: usize = 45;
+const D_GPUMIN: usize = 46;
+const D_GPUGOV: usize = 47;
 
-/// 一行诊断记录（固定 40 列，未用列填 "-"），由各 devimp_* 函数填充
-struct DevRow([String; 40]);
+/// 一行诊断记录（固定 48 列，未用列填 "-"），由各 devimp_* 函数填充
+struct DevRow([String; 48]);
 
 impl DevRow {
     /// 新建一行：ts/type/mode/package 已填（mode 读全局 DEVIMP_MODE，package
@@ -1353,6 +1368,14 @@ pub fn devimp_snap(
     wakeups: u32,
     migrations: u32,
     freq_trans: u32,
+    cpu_cur: &str,
+    cpu_max: &str,
+    cpu_min: &str,
+    cpu_gov: &str,
+    gpu_cur: &str,
+    gpu_max: &str,
+    gpu_min: &str,
+    gpu_gov: &str,
 ) {
     let mut r = DevRow::new("snap");
     r.set(D_SCREEN, if screen_on { "1" } else { "0" })
@@ -1369,7 +1392,16 @@ pub fn devimp_snap(
         .set(D_BATTP, batt_p)
         .set(D_WAKEUPS, wakeups.to_string())
         .set(D_MIGR, migrations.to_string())
-        .set(D_FREQT, freq_trans.to_string());
+        .set(D_FREQT, freq_trans.to_string())
+        // CPU/GPU 实际频率与调速器：内核当前值，区别于 D_CURFREQ/D_MAXFREQ 的决策值
+        .set(D_CPUCUR, cpu_cur)
+        .set(D_CPUMAX, cpu_max)
+        .set(D_CPUMIN, cpu_min)
+        .set(D_CPUGOV, cpu_gov)
+        .set(D_GPUCUR, gpu_cur)
+        .set(D_GPUMAX, gpu_max)
+        .set(D_GPUMIN, gpu_min)
+        .set(D_GPUGOV, gpu_gov);
     devimp_write_line(r);
 }
 
