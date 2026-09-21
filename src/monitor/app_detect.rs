@@ -214,6 +214,12 @@ fn get_focused_app_from_cgroup(ignored_apps: &[String]) -> Result<(String, i32),
 // [mode]
 // 模式判定辅助函数
 
+/// 模式判定：FAS 白名单 > 特调白名单 > app_modes > 特调映射 > 全局模式，
+/// 优先级见下方各分支注释。
+///
+/// **PowerBase 不在这里出现**：它只替换「谁来调频」这一段实现，模式名与所有外部接口
+/// （current_mode.chr / rules.yaml / WebUI / 通知）一律保持原样——开启后 current_mode
+/// 依然是 default/boost，只是背后的调频器从 CLG 换成了 PowerBase。
 fn determine_mode(config: &RulesConfig, current_package: &str) -> String {
     // 特调可用性：仅 Chiri SoC 且 tuned_profiles.yaml 成功加载时特调才生效。
     // 缺 tuned_profiles.yaml 的机型白名单应用回退 CLG（按 app_modes / global_mode 普通模式调度）。

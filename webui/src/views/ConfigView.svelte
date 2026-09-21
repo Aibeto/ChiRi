@@ -225,6 +225,14 @@
       {#if app.downError}
         <p class="u-note u-danger u-mt-2">{app.downError}</p>
       {/if}
+      <!-- PowerBase：以放电功耗替换 CLG 调频（只换实现，模式名与外部接口不变）。
+           直写 meta.yaml 的 powerbase_enabled，热重载即时生效 -->
+      <ToggleField
+        label={t('config.powerbase')}
+        hint={t('config.powerbase.hint')}
+        checked={app.powerbaseEnabled}
+        onchange={next => app.setPowerbase(next)}
+      />
       <!-- 功耗口径与电池读数（电流/电压/功率）的设置都在「电池读数」二级页 -->
     </div>
   </Panel>

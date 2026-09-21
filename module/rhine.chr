@@ -4,7 +4,9 @@
 #   vector        全局模式切到 vector + 关掉 FAS / 息屏场景模式 / 场景特调（界面：Vector Breakthrough）
 #   contingency   预留，当前无任何效果（界面：Contingency Contract）
 #   babel         预留，当前无任何效果（界面：Babel）
-#   frozen        预留，当前无任何效果（界面：Frozen）
+#   frozen        全局模式切到 frozen（界面：待春归）：全 cluster 锁**硬件最低频**（与
+#                 vector 的锁最高频相反）+ 关掉 FAS / 息屏场景模式 / 场景特调 / 线程绑定
+#                 （不再迁移线程）+ 停写 devimp 与 status.csv，只留 daemon.log
 #
 # 手改这个文件同样生效，改完不用重启调度。格式不对或写了未知名字，守护进程会用
 # 内置默认内容覆盖本文件，并在日志里告警。

@@ -16,10 +16,11 @@ export const LAB_MODE_KEYS = ['vector', 'contingency', 'babel', 'frozen'] as con
 export type LabModeKey = (typeof LAB_MODE_KEYS)[number]
 
 /**
- * 界面上放开启用的模式。frozen 仍是预留条目（rhine-init.yaml 空映射，启用无效果），
- * 不给入口避免点了没反应。
+ * 界面上放开启用的模式（2026-09-22）：frozen（待春归）已实现——全部 cluster 锁硬件
+ * 最低频 + 停掉亲和/迁移/诊断日志，从此不再是空映射，可以给入口了。
+ * （此前它是 rhine-init.yaml 里的 `{}`，留在列表里只会「点了没反应」。）
  */
-export const LAB_ENABLEABLE: readonly LabModeKey[] = ['vector', 'contingency', 'babel']
+export const LAB_ENABLEABLE: readonly LabModeKey[] = ['vector', 'contingency', 'babel', 'frozen']
 
 // [takeover]
 /**
@@ -37,7 +38,9 @@ export const LAB_TAKEOVER: Record<LabModeKey, readonly string[]> = {
   vector: ['fas_enabled', 'scenemode_enabled'],
   contingency: ['fas_enabled', 'scenemode_enabled'],
   babel: ['fas_enabled', 'scenemode_enabled'],
-  frozen: []
+  // frozen（待春归）比其它实验室模式多接管一个 thread_bind：它要把线程亲和/绑核与
+  // core_ctl 交还系统（不再迁移线程），这是「停掉额外开销」的一部分
+  frozen: ['fas_enabled', 'scenemode_enabled', 'thread_bind']
 }
 
 // [parse]

@@ -27,3 +27,5 @@ voltage_divisor: 1000
 current_divisor: 1000
 # 耗电读数满量程（W，WebUI 状态页仪表盘用；可选，默认 12）：只影响显示，不参与调度。
 power_max_w: 12
+# PowerBase 总开关（Stardust 家族，高级设置，默认关闭）：开启后 CLG 交由 PowerBase 接管
+powerbase_enabled: false

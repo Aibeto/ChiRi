@@ -65,7 +65,7 @@ fn family(mode: &str) -> &'static str {
         "scenemode" => "Stardust",
         "fas" => "FAS",
         "reduce" | "default" | "boost" => "CLG",
-        "vector" | "contingency" | "babel" => "RHINE",
+        "vector" | "contingency" | "babel" | "frozen" => "RHINE",
         _ if is_special(mode) => "Special",
         _ => "UNKNOWN",
     }

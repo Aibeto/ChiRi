@@ -28,9 +28,11 @@ struct PolicySnapshot {
 struct LockedPolicy {
     policy_id: i32,
     hw_max: u32,
+    /// 本次接管锁定的目标频率（kHz）：vector 取硬件最高、frozen 取硬件最低
+    target: u32,
     max_writer: FastWriter,
     min_writer: FastWriter,
-    /// 已成功写入的频率（kHz），与 hw_max 一致；0 表示尚未写入成功
+    /// 已成功写入的频率（kHz），与 target 一致；0 表示尚未写入成功
     current_freq: u32,
 }
 
@@ -57,8 +59,14 @@ impl FastLock {
     }
 
     // [init]
-    /// 接管全部 cpufreq policy：读取可用频率、快照原始状态、写 schedutil + 锁 hw_max。
-    pub fn init(&mut self) {
+    /// 接管全部 cpufreq policy：读取可用频率、快照原始状态、写 schedutil，
+    /// 再把 min 与 max 一起锁到目标频率。
+    ///
+    /// `lock_min = true` 锁**硬件最低频**（frozen：最低功耗、最冷，代价是完全没有性能），
+    /// `false` 锁硬件最高频（vector：极速档）。两者的差别只在目标值与写序：
+    /// 升频必须「先抬 max 再抬 min」（给 min 上升的空间），降频必须「先压 min 再压 max」
+    /// （否则会出现 min > max 的非法中间态被内核拒绝）。
+    pub fn init(&mut self, lock_min: bool) {
         self.release();
 
         let clusters = crate::chiri::get_cpu_policies();
@@ -101,6 +109,8 @@ impl FastLock {
             }
 
             let hw_max = *freqs.last().unwrap();
+            let hw_min = *freqs.first().unwrap();
+            let target = if lock_min { hw_min } else { hw_max };
 
             // 快照原始状态（release 时恢复）
             let governor = fs::read_to_string(&gov_path)
@@ -151,15 +161,22 @@ impl FastLock {
             let mut locked = LockedPolicy {
                 policy_id: pid,
                 hw_max,
+                target,
                 max_writer,
                 min_writer,
                 current_freq: 0,
             };
-            // 首次锁频：max 先拉高再拉 min（升频写序，保证 min <= max）
-            let ok = locked.max_writer.write_value_force(hw_max)
-                && locked.min_writer.write_value_force(hw_max);
+            // 首次锁频：升频「先 max 后 min」、降频「先 min 后 max」，都是为了保证
+            // 写的过程中不出现 min > max（内核会直接拒绝）
+            let ok = if lock_min {
+                locked.min_writer.write_value_force(target)
+                    && locked.max_writer.write_value_force(target)
+            } else {
+                locked.max_writer.write_value_force(target)
+                    && locked.min_writer.write_value_force(target)
+            };
             if ok {
-                locked.current_freq = hw_max;
+                locked.current_freq = target;
             }
 
             info!(
@@ -168,7 +185,7 @@ impl FastLock {
                     "fast-init",
                     &fluent_args!(
                         "pid" => pid.to_string(),
-                        "max_khz" => (hw_max / 1000).to_string()
+                        "max_khz" => (target / 1000).to_string()
                     )
                 )
             );

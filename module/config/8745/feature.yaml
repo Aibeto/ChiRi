@@ -131,7 +131,7 @@ vector:
 #   overload_hold_ms    且需持续这么久才放行升频
 #   touch_break_ms      触摸事件时允许短暂突破功率上限的窗口
 powerbase:
-  target_power_w: 3.0
+  target_power_w: 3.5
   up_headroom_below: 1.15
   down_scale: 0.5
   overload_cores_pct: 50

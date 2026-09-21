@@ -22,6 +22,7 @@ export const META_FIELDS = [
   'fas_enabled',
   'scenemode_enabled',
   'thread_bind',
+  'powerbase_enabled',
   'power_avg',
   'notify',
   'oplus_chg',
@@ -45,6 +46,7 @@ export const WRITABLE_FIELDS = [
   'fas_enabled',
   'scenemode_enabled',
   'thread_bind',
+  'powerbase_enabled',
   'power_avg',
   'notify',
   'oplus_chg',
@@ -170,6 +172,7 @@ export function validateMeta(values: Record<string, unknown>): string[] {
     'fas_enabled',
     'scenemode_enabled',
     'thread_bind',
+    'powerbase_enabled',
     'power_avg',
     'notify',
     'oplus_chg',
@@ -230,6 +233,7 @@ export function validateFieldValue(
     case 'fas_enabled':
     case 'scenemode_enabled':
     case 'thread_bind':
+    case 'powerbase_enabled':
     case 'power_avg':
     case 'notify':
     case 'oplus_chg':

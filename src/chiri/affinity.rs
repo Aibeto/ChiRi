@@ -1449,10 +1449,18 @@ impl AffinityManager {
                         .by_ref()
                         .filter_map(|c| self.core_utils.get(c).copied())
                         .fold(0.0_f32, f32::max);
-                    let promote_thresh = if little_max > LITTLE_HIGH_WATER {
-                        LITTLE_PROMOTE_UTIL_PCT
+                    // PowerBase 开启时线程亲和积极性减半：promote 阈值翻倍——
+                    // 更不容易把后台线程抬到大核（少了迁移动作与随之而来的开销），
+                    // 与该模式「只做最低限度干预」的取向一致。
+                    let (promote_base, little_promote) = if crate::common::powerbase_enabled() {
+                        (PROMOTE_UTIL_PCT * 2.0, LITTLE_PROMOTE_UTIL_PCT * 2.0)
                     } else {
-                        PROMOTE_UTIL_PCT
+                        (PROMOTE_UTIL_PCT, LITTLE_PROMOTE_UTIL_PCT)
+                    };
+                    let promote_thresh = if little_max > LITTLE_HIGH_WATER {
+                        little_promote
+                    } else {
+                        promote_base
                     };
                     let big_pressure = boost && big_max > BIG_HIGH_WATER;
                     let clk = clk_tck();

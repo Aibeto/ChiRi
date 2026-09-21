@@ -111,11 +111,19 @@ default:
     # 按核心组再收紧（8550 实测日常 util：little 0.55 / big 0.36 / prime 0.32，
     # 但三簇上限都被尖峰顶到 100%）——三簇一刀切只能取「最松那簇」能接受的值：
     # little 最热压到 0.70，prime 空转多压到 0.65，big 不覆盖、继承 0.80。
-    per_cluster:
-      little:
-        perf_ceil: 0.70
-      prime:
-        perf_ceil: 0.65
+    # **[A/B 2026-09-22] 临时注释以定位迁移率异常**：0922-0424 包实测 default 档迁移
+    # ≈2800~3700/s（2s 增量），而 P1~P4 之前的 0922-0014 包同口径 ≈278/s，涨了一个
+    # 数量级，且 cloudmusic 场景全程无安静期（每分钟 5300~16500/2s）。首要可疑变量
+    # 是本段把三簇天花板拉开（0.70/0.80/0.65）后簇间频率落差变大、EAS 在
+    # 「小核不够快、大核又被压」之间来回搬线程。本段注释后三簇回到全局 0.80，
+    # 同场景（网易云音乐）录 ≥10min 对比迁移率：回落到 ≈300/s 即确认根因，
+    # 届时二选一——恢复本段并接受迁移开销，或保留本段并给 default 档加
+    # migration_cost_ns 抑制迁移；若迁移仍高则嫌疑转向 48 列版本其它改动/探针口径。
+    # per_cluster:
+    #   little:
+    #     perf_ceil: 0.70
+    #   prime:
+    #     perf_ceil: 0.65
     up_jump_threshold: 0.30
     slow_up_scale: 0.03
     down_fast_threshold: 0.25
@@ -146,3 +154,10 @@ boost:
     touch_boost_enabled: true
     touch_boost_ms: 500
     touch_boost_tiers: 1
+
+# [powerbase]
+# PowerBase（Stardust 家族，开关在 meta.yaml `powerbase_enabled`，默认关闭）：
+# 8550 实测日常/视频放电功耗在 2~3W 区间，目标取 2.5W——低于它放宽升频，达到即守住。
+# 字段含义见根 config/feature.yaml 的同名段。
+powerbase:
+  target_power_w: 2.5

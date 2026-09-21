@@ -30,7 +30,7 @@
 
 - 特调模式下息屏保持 akmode 接管（akmode 已统一 schedutil，息屏随负载自然降频省电）；非特调走 CLG doze → 超时 scenemode（见「息屏省电与屏幕状态」——2026-09 曾短暂暂停后**已恢复**，屏幕状态正常驱动息屏/亮屏切换；旧的「[已暂停] 屏幕状态不驱动调度」描述已删除）。
 
-- **模式家族（2026-09-17 重申）**：CLG = reduce/default/boost（兜底档；2026-09-16 由 powersave/balance/performance/fast 改名，id 与 feature.yaml 段名/rules global_mode/current_mode.chr 同名，显示名走 i18n `mode.*`）；**stardust = scenemode（独立息屏轴，不产生模式值；2026-09-18 起在 UI 家族体系注册 `mode.family.stardust`——不管实际运行中看不看得到都占位，不并入 CLG）**；**down（停摆布尔）是独立家族 `mode.family.down`（kind `'down'`），不属于 stardust**；**rhine = vector/contingency/babel（仅实验室**，rhine.chr 经 global_mode 覆盖驱动）。CLG 档位语义：reduce 较 default 升频更保守（up 0.85）降频更激进（down 0.60、上限压 0.70）；default 为默认兼参考基线；boost 升频更激进（up 0.65）降频略消极（down 0.40、rate_limit 5）、headroom 1.40 给线程/核心更大余量。档位由 rules.yaml 生效模式决定（明日方舟 app_modes > global_mode）；特调期间固定应用；所有档位都能使用硬件最高档位。
+- **模式家族（2026-09-17 重申）**：CLG = reduce/default/boost（兜底档；2026-09-16 由 powersave/balance/performance/fast 改名，id 与 feature.yaml 段名/rules global_mode/current_mode.chr 同名，显示名走 i18n `mode.*`）；**stardust = scenemode（独立息屏轴，不产生模式值；2026-09-18 起在 UI 家族体系注册 `mode.family.stardust`——不管实际运行中看不看得到都占位，不并入 CLG）**；**down（停摆布尔）是独立家族 `mode.family.down`（kind `'down'`），不属于 stardust**；**rhine = vector/contingency/babel/frozen（仅实验室**，rhine.chr 经 global_mode 覆盖驱动）。CLG 档位语义：reduce 较 default 升频更保守（up 0.85）降频更激进（down 0.60、上限压 0.70）；default 为默认兼参考基线；boost 升频更激进（up 0.65）降频略消极（down 0.40、rate_limit 5）、headroom 1.40 给线程/核心更大余量。档位由 rules.yaml 生效模式决定（明日方舟 app_modes > global_mode）；特调期间固定应用；所有档位都能使用硬件最高档位。
 
 - 档位差异仅在升降频策略参数和防抖等待（wait_ms，每档可不同）。核心组区间随命中 SoC 变化，统一在 `common::chiri_core_ranges()`（8550 little 0-2 / big 3-6 / prime 7；8475 0-3/4-6/7；8998 0-3/4-7 无 prime），akmode 与 CLG 触摸升频共用。每组独立 up_core_count/up_util_percent/down_core_count/down_util_percent：核心数为组内绝对个数，yaml 写整数，0 = 组内任一核心命中即触发，写大值如 64 = 关闭该方向判定；占用率写整数百分比，加载时转 0..1。
 
@@ -132,7 +132,9 @@ WebUI 侧：
 
 ### 极速模式（fast）
 
-- vector 档用专属锁频器、不读 yaml、停用 CLG：`src/chiri/fast.rs` 的 `FastLock` 与 CLG 完全独立，vector 档下由 `mod.rs` 的 scheduler_ipc 先 `cpu_governor.release()` 再 `fast_lock.init()` 接管（**六个入口都不能漏**：启动 / 亮屏恢复 / ModeChange / ConfigReload / DOWN 退出 / panic 自愈——vector 不注册 CLG 参数，漏掉就是频率零接管且无任何告警）。
+- vector 档用专属锁频器、不读 yaml、停用 CLG：`src/chiri/fast.rs` 的 `FastLock` 与 CLG 完全独立，vector 档下由 `mod.rs` 的 scheduler_ipc 先 `cpu_governor.release()` 再 `fast_lock.init()` 接管（**六个入口都不能漏**：启动 / 亮屏恢复 / ModeChange / ConfigReload / DOWN 退出 / panic 自愈——vector 不注册 CLG 参数，漏掉就是频率零接管且无任何告警）。**frozen（待春归）复用同一条通路、共享这六个入口**，差别只在 `fast_lock.init(true)` 锁到**硬件最低频**（vector 是最高频）；额外地，frozen 会停掉一切额外开销：devimp 与 status.csv 停写（闸门在 `logger.rs` 的 `devimp_active()` 与 `status_log_snapshot()`，只保留 daemon.log 便于排错），线程亲和/绑核与 core_ctl 由 rhine 的 `thread_bind: false` 交还系统（不再迁移线程）。
+
+- **PowerBase（Stardust 家族，meta.yaml `powerbase_enabled`，默认关）只替换「谁来调频」**：开启后原本由 CLG 接管的档位（reduce/default/boost）改由 `src/chiri/power_base.rs` 以**放电功耗**为指标调频——功耗低于 feature 里的 `target_power_w` 时放宽升频；达到或超过时守住不升，除非「满占用核心占比 ≥ `overload_cores_pct` 且持续 `overload_hold_ms`」；降频恒激进（不看功耗）；触摸窗口内允许突破功率上限。**模式名与所有外部接口一律不变**（`current_mode.chr` 仍是 default/boost，rules / WebUI / 通知都不受影响）。接管点有两处：`apply_mode_takeover`（主路径，即时）与调度循环每轮的兜底纠正块（覆盖启动块 / ConfigReload / 亮屏恢复 / lab 重建四条旁路——它们直接 init CLG，不兜就会「CLG 与 PowerBase 抢写 scaling_max_freq」或「切换后没人接管」）。affinity 的 promote 阈值在开启时翻倍（积极性减半）。**已知 TODO**：触摸突破当前恒 false——CLG 的 `AtomicTouchState` 是它私有字段，需另备共享标志。**热保护对它无效是预期行为**（thermal 靠压 CLG 上限工作）。
 
 - `FastLock::init()` 遍历 `get_cpu_policies()`、快照原始状态、写 schedutil governor、把所有 cluster 的 `scaling_min_freq/scaling_max_freq` 都锁到含 boost 的硬件最高频（min=max=hw_max）；`tick()` 每 5 秒重写一次 hw_max 防止系统/厂商守护进程篡改；`release()` 恢复接管前的 governor/min/max。
 

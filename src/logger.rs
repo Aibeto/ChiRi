@@ -605,6 +605,11 @@ pub fn status_log_snapshot(
     freq_trans: u32,
     fps: Option<f32>,
 ) {
+    // frozen（待春归）：1s 一行的 status.csv 属于该模式要停掉的「额外开销」。
+    // 闸口放在这里而不是调用点，是为了让所有写入路径（含将来的）都过同一道。
+    if mode == "frozen" {
+        return;
+    }
     status_write_line(&[
         &format_now(),
         "snap",
@@ -724,6 +729,8 @@ pub fn set_devimp_active(on: bool) {
 
 /// 同步当前模式名（devimp 行 mode 列填充用）
 pub fn set_devimp_mode(mode: &str) {
+    // frozen 标记顺带维护给 devimp_active() 高频读取（见那里的注释）
+    DEVIMP_FROZEN.store(mode == "frozen", Ordering::Relaxed);
     if let Ok(mut m) = DEVIMP_MODE.lock() {
         *m = mode.to_string();
     }
@@ -785,9 +792,23 @@ pub fn set_devimp_package(pkg: &str) {
     }
 }
 
+/// frozen（待春归）标记：由 `set_devimp_mode`（低频）维护，供 `devimp_active()` 高频读取。
+/// 单独存一份原子量，是为了让那条闸门不抢 `DEVIMP_MODE` 的锁（见函数内注释）。
+static DEVIMP_FROZEN: AtomicBool = AtomicBool::new(false);
+
 /// 开发记录是否开启（各写入点检查；关闭时不产生任何 IO）
 pub fn devimp_active() -> bool {
-    DEVIMP_ACTIVE.load(Ordering::Relaxed)
+    if !DEVIMP_ACTIVE.load(Ordering::Relaxed) {
+        return false;
+    }
+    // frozen（待春归）：诊断记录是 40ms/tick 级别的高频写入，属于该模式要停掉的
+    // 「额外开销」。按当前模式二次判定，避免只关 dev_record 开关后又在别处被打开。
+    // **只读原子量**：本函数是每条 devimp 行写入前的闸门（特调下可达 25 行/s/组），
+    // 这里不能去抢 DEVIMP_MODE 的锁——标记由 set_devimp_mode（低频）维护。
+    if DEVIMP_FROZEN.load(Ordering::Relaxed) {
+        return false;
+    }
+    true
 }
 
 /// devimp 目录相对模块根的路径

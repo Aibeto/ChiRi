@@ -232,6 +232,20 @@ pub fn set_special_tuned_available(available: bool) {
 // 高频路径（fas_available / scenemode 进入判定）只读原子量，不触碰磁盘与锁。
 static FAS_ENABLED: AtomicBool = AtomicBool::new(true);
 static SCENEMODE_ENABLED: AtomicBool = AtomicBool::new(true);
+/// PowerBase 总开关（meta.yaml `powerbase_enabled`，**缺省 false**：默认由 CLG 接管）
+static POWERBASE_ENABLED: AtomicBool = AtomicBool::new(false);
+
+/// 设置 PowerBase 总开关（meta.yaml 的 powerbase_enabled，Config::load 时调用）。
+pub fn set_powerbase_enabled(enabled: bool) {
+    POWERBASE_ENABLED.store(enabled, Ordering::Release);
+}
+
+/// PowerBase 是否开启（meta.yaml 的 powerbase_enabled，缺省 false）。
+/// 高频路径（determine_mode 的模式替换、affinity 的 promote 阈值）只读这个原子量，
+/// 不在 tick 内读磁盘与锁。
+pub fn powerbase_enabled() -> bool {
+    POWERBASE_ENABLED.load(Ordering::Acquire)
+}
 
 /// 设置 FAS 总开关（meta.yaml 的 fas_enabled，Config::load 时调用）。
 pub fn set_fas_enabled(enabled: bool) {

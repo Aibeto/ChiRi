@@ -189,6 +189,7 @@ pub mod fas_manager;
 pub mod fast;
 pub mod governor;
 pub mod gpu;
+pub mod power_base;
 pub mod touch_detect;
 pub mod tuned;
 
@@ -409,7 +410,7 @@ fn sync_lab_governor_gpu(
             // 全核最高频硬锁：不能只靠 performance——部分机型 scaling_governor
             // 节点只读（写不进），min=max=硬件最高在任意 governor 下都等效锁频
             if !fast_lock.is_active() {
-                fast_lock.init();
+                fast_lock.init(false);
             }
         }
         "babel" => {
@@ -429,6 +430,14 @@ fn sync_lab_governor_gpu(
             }
         }
     }
+}
+
+/// 硬锁档判定：vector 与 frozen 都走 `FastLock` 的 min=max 硬锁（不注册 CLG 参数），
+/// 差别只在锁定目标——vector 锁硬件最高频（极速），frozen 锁硬件最低频（待春归：
+/// 最低功耗、最冷，同时停掉亲和/迁移/诊断日志这类额外开销）。
+/// 两档在事件分支、停摆重建、亮屏恢复里都必须同进同出，漏一个就是「切过去没锁上」。
+fn is_fast_lock(mode: &str) -> bool {
+    mode == "vector" || mode == "frozen"
 }
 
 /// CLG 档位参数获取（未知/空模式名禁用 CLG，避免默认参数意外接管）。
@@ -456,6 +465,7 @@ fn apply_mode_takeover(
     cpu_governor: &mut crate::chiri::cpu_load_governor::CpuLoadGovernor,
     ak_governor: &mut crate::chiri::tuned::TunedGovernor,
     fast_lock: &mut crate::chiri::fast::FastLock,
+    power_base: &mut crate::chiri::power_base::PowerBase,
 ) {
     if crate::common::is_special_mode(mode) {
         let ak_cfg = config.get_tuned_profile(mode);
@@ -465,22 +475,33 @@ fn apply_mode_takeover(
                 cpu_governor.init_policies(&clg_cfg);
             }
         }
-    } else if mode == "vector" {
-        // vector 档由 fast_lock 硬锁（不注册 CLG 参数），漏 init 就是频率零接管
+    } else if is_fast_lock(mode) {
+        // vector / frozen 都由 fast_lock 硬锁（不注册 CLG 参数），漏 init 就是频率零接管。
+        // 差别只在锁定目标：vector 锁硬件最高频（极速），frozen 锁硬件最低频（待春归）。
         ak_governor.release();
         cpu_governor.release();
-        fast_lock.init();
+        fast_lock.init(mode == "frozen");
     } else {
         ak_governor.release();
         fast_lock.release();
         let clg_cfg = clg_cfg_for(config, mode);
-        if clg_cfg.enabled {
+        if clg_cfg.enabled && crate::common::powerbase_enabled() {
+            // PowerBase 开启：**原本该 CLG 上场的场合**改由 PowerBase 接管。
+            // 模式名、current_mode.chr、规则与界面等外部接口一律不变，只替换
+            // 「谁来调频」这一段实现。CLG 必须先释放，否则两个调频器同时写
+            // scaling_max_freq 会互相踩。
+            cpu_governor.release();
+            power_base.init(&config.powerbase);
+        } else if clg_cfg.enabled {
+            // PowerBase 关闭时它可能还持着频率：先交还，再让 CLG 上场
+            power_base.release();
             if cpu_governor.is_active() {
                 cpu_governor.reload_config(&clg_cfg);
             } else {
                 cpu_governor.init_policies(&clg_cfg);
             }
         } else {
+            power_base.release();
             cpu_governor.release();
         }
     }
@@ -857,6 +878,10 @@ pub fn start_scheduler_thread(
             // 直接锁所有 cluster 的 min=max=硬件最高频，每 5 秒重写防止外部篡改。
             let mut fast_lock = crate::chiri::fast::FastLock::new();
 
+            // PowerBase（Stardust 家族，meta.yaml `powerbase_enabled` 控制，默认关）：
+            // 开启时**替换 CLG 的调频实现**（以放电功耗为指标），模式名与所有外部接口不变。
+            let mut power_base = crate::chiri::power_base::PowerBase::new();
+
             // governor/GPU 接管层（contingency/babel 用；FAS 的 governor 在 FasManager 内部）。
             // GpuGuard::new 启动探测一次 devfreq 节点并缓存结果。
             let mut governor_guard = governor::GovernorGuard::new();
@@ -974,8 +999,8 @@ pub fn start_scheduler_thread(
                 // 一旦出现名为 `down` 的模式段，停摆期开机就会直接锁频/接管 CLG。
                 // 显式门控，不再依赖模式名恰好不命中。
                 if !halted {
-                    if current_mode == "vector" {
-                        fast_lock.init();
+                    if is_fast_lock(&current_mode) {
+                        fast_lock.init(current_mode == "frozen");
                     } else if current_mode != "fas" {
                         let config_lock = config_clone.read().unwrap();
                         let clg_cfg = get_clg_cfg(&config_lock, &current_mode);
@@ -1057,6 +1082,10 @@ pub fn start_scheduler_thread(
                         cpu_governor.release();
                         ak_governor.release();
                         fast_lock.release();
+                        // PowerBase 也必须在停摆清单里：兜底纠正块虽然带 `!halted`
+                        // 会在下一轮把它收掉，但停摆的语义是「立刻交回系统」——
+                        // 靠下一轮兜底等于留了一个仍在写频率的窗口。
+                        power_base.release();
                         fas_mgr.deactivate_all();
                         affinity_mgr.release();
                         affinity_mgr.lab_static_deactivate();
@@ -1101,8 +1130,8 @@ pub fn start_scheduler_thread(
                             let cfg = config_clone.read().unwrap();
                             let pkg = crate::monitor::app_detect::get_current_package();
                             let pid = crate::monitor::app_detect::get_current_pid();
-                            if mode == "vector" {
-                                fast_lock.init();
+                            if is_fast_lock(&mode) {
+                                fast_lock.init(mode == "frozen");
                             } else if mode == "fas" {
                                 // 与 ModeChange 的 fas 分支同款重建：三 governor 互斥释放
                                 // → activate（内部复查白名单，竞态下前台刚变即拒绝）→
@@ -1235,8 +1264,8 @@ pub fn start_scheduler_thread(
                             let ak_cfg = config_lock.get_tuned_profile(&current_mode);
                             ak_governor.reload_config(&ak_cfg);
                         }
-                    } else if current_mode == "vector" {
-                        // fast_lock 不读 yaml 调参，仅需确保 CLG 未意外持有
+                    } else if is_fast_lock(&current_mode) {
+                        // 硬锁档（vector/frozen）不读 yaml 调参，仅需确保 CLG 未意外持有
                         if cpu_governor.is_active() { cpu_governor.release(); }
                     } else if current_mode != "fas" {
                         // fas 模式下 CLG fallback 不参与热重载（FAS 配置编译期嵌入静态）
@@ -1533,6 +1562,7 @@ pub fn start_scheduler_thread(
                                     &mut cpu_governor,
                                     &mut ak_governor,
                                     &mut fast_lock,
+                                    &mut power_base,
                                 );
                             } else {
                                 // 息屏：FAS 退出后交 CLG doze（与 fas_enabled=false 息屏
@@ -1805,6 +1835,39 @@ pub fn start_scheduler_thread(
                 // 免得将来给 FastLock 加的开关绕过这道防线
                 let fast_next = if halted { None } else { fast_lock.tick() };
 
+                // PowerBase 兜底纠正：开关与「谁在接管」不一致时拉齐。
+                // apply_mode_takeover 与 ModeChange 是主路径（切换即时），但另有几条
+                // 直接 init CLG 的旁路（启动块 / ConfigReload / 亮屏恢复 / lab 分组重建）
+                // 不会自动换成 PowerBase——在这里兜一次，任何一条漏接都不会造成
+                // 「CLG 与 PowerBase 抢着写 scaling_max_freq」或「切换后没人接管」。
+                // 停摆期一律交还（DOWN 的语义是调度完全不工作）。
+                {
+                    // 先取模式（临时的 guard 随语句结束释放），再读配置——
+                    // 保持「mode → config」的取锁顺序，不制造反向持有的窗口
+                    let cur_mode = mode_clone.lock().unwrap().clone();
+                    let cfg = config_clone.read().unwrap();
+                    // 三条排除缺一不可：
+                    //  - `!is_fast_lock`：vector / frozen 走 fast_lock 硬锁，而 vector 段在
+                    //    feature.yaml 里是**存在且 enabled** 的（get_mode 返回 Some）——
+                    //    不排除就会让 PowerBase 与 fast_lock 抢着写 min/max；
+                    //  - `is_screen_on`：息屏交给 doze（CLG 压低上限的专用配置）。PowerBase
+                    //    的目标功耗是亮屏口径（8550 2.5W），息屏待机只有 ~0.4W，让它接管
+                    //    会判成「远低于目标」而放宽升频，夜间功耗反而上去；
+                    //  - `clg_cfg.enabled`：特调 / FAS 模式下 get_mode 返回 None → enabled=false，
+                    //    天然排除（它们优先级高于 PowerBase）。
+                    let want = !halted
+                        && is_screen_on
+                        && !is_fast_lock(&cur_mode)
+                        && crate::common::powerbase_enabled()
+                        && clg_cfg_for(&cfg, &cur_mode).enabled;
+                    if want && !power_base.is_active() {
+                        cpu_governor.release();
+                        power_base.init(&cfg.powerbase);
+                    } else if !want && power_base.is_active() {
+                        power_base.release();
+                    }
+                }
+
                 // 动态超时：阻塞到「最近一个周期任务的 deadline」或事件到达（先到者打断）。
                 // 周期任务（telemetry 1s / thermal+亲和 2s / mode file 5s / fast 重写 5s）
                 // 各自 deadline 取最小值；负载/模式/触摸等推送事件随时到达，recv_timeout
@@ -2014,11 +2077,12 @@ pub fn start_scheduler_thread(
                                 ak_governor.release();
                                 fast_lock.release();
                                 sync_lab_governor_gpu(&current_mode, &mut governor_guard, &mut gpu_guard, &mut fast_lock);
-                            } else if current_mode == "vector" {
-                                // 亮屏恢复极速模式：释放 doze CLG，由 fast_lock 接管
+                            } else if is_fast_lock(&current_mode) {
+                                // 亮屏恢复硬锁档：释放 doze CLG，由 fast_lock 接管
+                                // （vector 锁最高频 / frozen 锁最低频）
                                 ak_governor.release();
                                 cpu_governor.release();
-                                fast_lock.init();
+                                fast_lock.init(current_mode == "frozen");
                             } else if current_mode == "fas" {
                                 // FAS 活跃：保持接管，CLG 绝不能接管 FAS 已接管的 CPU，
                                 // 亮屏不做任何恢复（FAS 息屏保持接管，2026-09）。
@@ -2209,21 +2273,28 @@ pub fn start_scheduler_thread(
                                             let clg_cfg = get_clg_cfg(&config_lock, &mode);
                                             if clg_cfg.enabled { cpu_governor.init_policies(&clg_cfg); }
                                         }
-                                    } else if mode == "vector" {
-                                        // 极速模式：停止特调/CLG，由 fast_lock 独立锁满频
+                                    } else if is_fast_lock(&mode) {
+                                        // 硬锁档：停止特调/CLG，由 fast_lock 独立锁定
+                                        // （vector 锁满频 / frozen 锁最低频）
                                         ak_governor.release();
                                         cpu_governor.release();
-                                        fast_lock.init();
+                                        fast_lock.init(mode == "frozen");
                                     } else {
-                                        // 退出特调/极速模式：停止 akmode/fast_lock，交回 CLG 接管
+                                        // 退出特调/极速模式：停止 akmode/fast_lock，交回 CLG
+                                        // （PowerBase 开启时交回的是它——只换实现，模式名不变）
                                         ak_governor.release();
                                         fast_lock.release();
                                         let clg_cfg = get_clg_cfg(&config_lock, &mode);
-                                        if clg_cfg.enabled {
+                                        if clg_cfg.enabled && crate::common::powerbase_enabled() {
+                                            cpu_governor.release();
+                                            power_base.init(&config_lock.powerbase);
+                                        } else if clg_cfg.enabled {
+                                            power_base.release();
                                             // CLG 已激活时热切换配置，避免同模式反复切换全量重建
                                             if cpu_governor.is_active() { cpu_governor.reload_config(&clg_cfg); }
                                             else { cpu_governor.init_policies(&clg_cfg); }
                                         } else {
+                                            power_base.release();
                                             cpu_governor.release();
                                         }
                                     }
@@ -2314,6 +2385,19 @@ pub fn start_scheduler_thread(
                             fas_mgr.on_load_update(foreground_max_util, &core_utils);
                         } else if ak_governor.is_active() {
                             ak_governor.on_load_update(&core_utils);
+                        } else if power_base.is_active() {
+                            // PowerBase 接管中（它替换的正是 CLG 的位置）：以**放电功耗**为指标。
+                            // 非放电（电流 ≤ 0）或没有读数时传 None —— 语义是「不做功耗限制」，
+                            // 此时只按利用率调，与 CLG 类似。
+                            // TODO(触摸突破)：touch_active 目前恒 false——CLG 的触摸窗口
+                            // （AtomicTouchState）是它的私有字段，这里拿不到；等触摸事件接上
+                            // 共享标志后再传，否则「触摸时允许突破功率上限」这条不会生效。
+                            let tm_now = crate::monitor::telemetry::telemetry();
+                            let power_w = match tm_now.batt_current_ma() {
+                                Some(i) if i > 0.0 => tm_now.batt_power_w(),
+                                _ => None,
+                            };
+                            power_base.on_load_update(&core_utils, power_w, false);
                         } else if cpu_governor.is_active() {
                             // Worker 架构：on_load_update 广播给各核心组 Worker，
                             // Worker 线程内自主完成决策 + 写频，无需外部 flush
@@ -2583,9 +2667,12 @@ pub fn start_scheduler_thread(
                                         if clg_cfg.enabled { cpu_governor.init_policies(&clg_cfg); }
                                     }
                                 }
-                            } else if current_mode == "vector" {
-                                // 极速模式不读 yaml 参数，ConfigReload 无需处理；
-                                // fast_lock 保持活跃，仅确保 CLG 未意外启动
+                            } else if is_fast_lock(&current_mode) {
+                                // 硬锁档（vector 锁最高 / frozen 锁最低）不读 yaml 参数，
+                                // ConfigReload 无需处理；fast_lock 保持活跃，仅确保 CLG 未意外启动。
+                                // **frozen 必须进这一支**：落到下面 `current_mode != "fas"`
+                                // 的 else 会执行 `fast_lock.release()`，把刚锁上的最低频又放掉
+                                // ——配置热重载（改 meta/rules 即触发）时必现。
                                 if cpu_governor.is_active() { cpu_governor.release(); }
                             } else if current_mode != "fas" {
                                 // 非特调、非极速模式：确保 fast_lock 释放，CLG 接管
@@ -2693,10 +2780,10 @@ pub fn start_scheduler_thread(
                             &[],
                             scene_mode_active,
                         );
-                    } else if current_mode == "vector" {
-                        // vector 档不能漏：它不注册 CLG（feature.yaml 无 vector 段、
+                    } else if is_fast_lock(&current_mode) {
+                        // vector / frozen 档不能漏：它们不注册 CLG（feature.yaml 无对应段、
                         // get_mode 返回 None → enabled=false），漏掉就是频率零接管
-                        fast_lock.init();
+                        fast_lock.init(current_mode == "frozen");
                     } else if current_mode != "fas"
                         && !crate::common::is_special_mode(&current_mode)
                     {

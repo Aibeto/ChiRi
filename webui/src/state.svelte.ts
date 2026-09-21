@@ -522,12 +522,20 @@ class AppStore {
   powerStaleReason = $state('')
   powerAvgPending = $state(false)
   powerAvgError = $state('')
+  /** PowerBase 开关写入中的状态（高级设置） */
+  powerbasePending = $state(false)
+  powerbaseError = $state('')
   /** 当前功耗（W，status.csv 最后一行的 batt_power_w，1s 采样）：null = 无行/无读数，显示 — */
   powerNowWatt = $state<number | null>(null)
 
   /** 功耗口径：是否使用累计平均值（meta.yaml `power_avg`，默认 false = 参考值） */
   get powerAvgUsesAverage(): boolean {
     return this.metaSnapshot?.values?.power_avg === true
+  }
+
+  /** PowerBase 是否开启（meta.yaml `powerbase_enabled`，默认 false = 由 CLG 调频） */
+  get powerbaseEnabled(): boolean {
+    return this.metaSnapshot?.values?.powerbase_enabled === true
   }
 
   // [powerMax]
@@ -657,6 +665,35 @@ class AppStore {
       toast(useAverage ? t('overview.power.avg') : t('overview.power.ref'))
     } finally {
       this.powerAvgPending = false
+      this.metaWritePending = false
+    }
+  }
+
+  /**
+   * 高级设置：PowerBase 开关——直写 meta.yaml 的 `powerbase_enabled`（不走草稿，立即热重载）。
+   * 开启后原本由 CLG 接管的档位改由 PowerBase 以放电功耗为指标调频；模式名、规则与
+   * 界面等外部接口保持不变（只换实现）。写后回读，界面以实际落盘内容为准。
+   */
+  async setPowerbase(enabled: boolean): Promise<void> {
+    if (this.powerbasePending || this.metaWritePending) return
+    this.powerbasePending = true
+    this.metaWritePending = true
+    this.powerbaseError = ''
+    try {
+      const result = await writeMetaFields({ powerbase_enabled: enabled })
+      if (result.kind !== 'ok') {
+        this.powerbaseError =
+          result.kind === 'failed' ? result.error : t('state.unsupportedEnv')
+        toast(this.powerbaseError)
+        return
+      }
+      this.metaSnapshot = result.value
+      this.metaValid = result.value.valid
+      this.metaProblems = result.value.problems
+      this.metaPath = result.value.path
+      toast(enabled ? t('config.powerbase') : t('config.advanced'))
+    } finally {
+      this.powerbasePending = false
       this.metaWritePending = false
     }
   }

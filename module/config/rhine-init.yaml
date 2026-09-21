@@ -45,5 +45,15 @@ babel:
   scenemode_enabled: false
   special_tuned: false
 
-# frozen：预留条目，当前不产生任何影响。界面上显示 Frozen。
-frozen: {}
+# frozen：待春归（实验室）。界面上显示「待春归」。与 vector 同一条硬锁通路，但方向相反：
+#   - vector 锁**硬件最高频**（极速）；frozen 锁**硬件最低频**（min=max=hw_min）：
+#     最低功耗、最冷，代价是完全没有性能——用来测「设备什么都不做时能到多低」。
+#   - 停掉一切额外开销：thread_bind=false 交还线程亲和/绑核与 core_ctl（不再迁移线程），
+#     FAS 与息屏场景模式关闭，devimp 与 status.csv 停写（只留 daemon.log 便于排错）。
+# 行为在 chiri 按 current_mode=frozen 分支实现（复用 vector 的 fast_lock 通路）。
+frozen:
+  global_mode: frozen
+  fas_enabled: false
+  scenemode_enabled: false
+  special_tuned: false
+  thread_bind: false

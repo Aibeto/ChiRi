@@ -174,6 +174,9 @@ sysfs-write-freq-failed = [SysFS] 写入频率 { $freq } 失败: { $error }
 # --- CLG ---
 clg-init = [CLG] P{ $pid } 初始化 | 核心={ $cpus } | 频率={ $fmin }-{ $fmax } MHz | P={ $perf } -> { $freq } kHz
 clg-activated = [CLG] CPU 负载调频器已激活，共接管 { $count } 个集群
+powerbase-activated = [PowerBase] 功耗基准调频器已接管（CLG 已释放）
+powerbase-deactivated = [PowerBase] 功耗基准调频器已释放
+powerbase-writer-invalid = [PowerBase] P{ $pid } 频率写入器不可用，跳过该集群
 clg-no-clusters = [CLG] CPU 负载调频器: 未找到有效集群，保持未激活状态
 clg-deactivated = [CLG] CPU 负载调频器已停用
 clg-config-reloaded = [CLG] 配置已热重载 | 升频={ $up } 降频={ $down } 地板={ $floor } 天花板={ $ceil }

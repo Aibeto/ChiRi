@@ -97,6 +97,13 @@ pub struct Meta {
     #[serde(default = "crate::utils::default_true", alias = "ThreadBind")]
     pub thread_bind: bool,
 
+    /// PowerBase 总开关（meta.yaml `powerbase_enabled`，**高级设置，默认关闭**）：
+    /// 开启后原本由 CLG 接管的场合（reduce / default / boost）改由 PowerBase 接管——
+    /// 以**放电功耗**为指标调频，而不是像 CLG 那样只看利用率。
+    /// FAS / 场景特调 / DOWN 停摆 / 实验室的启停判据一律不受影响（PowerBase 只替换 CLG）。
+    #[serde(default, alias = "PowerbaseEnabled")]
+    pub powerbase_enabled: bool,
+
     /// 功耗口径开关（meta.yaml `power_avg`，默认 false = 参考值）：控制 1s 状态
     /// 采样写模块根 `PowerAVG.chr` 的口径——false 写参考值（(旧值 × 10 + 新值) / 11
     /// 递推，偏历史，含息屏样本）；true 写累计平均值（(旧值 × 次数 + 新值) / (次数 + 1)，
@@ -1012,6 +1019,90 @@ impl Default for CoreCtlConfig {
     }
 }
 
+/// PowerBase 配置（feature.yaml `powerbase` 段）：以功耗为指标的调频参数。
+///
+/// 与 CLG 的根本区别：CLG 只看「利用率够不够」，PowerBase 看「功耗超没超目标」——
+/// 放电状态下以 `target_power_w` 为闸门，超了就不再升频（除非确实压不住：满占用核心
+/// 占比达 `overload_cores_pct` 且持续 `overload_hold_ms`）。降频**恒激进**，不看功耗。
+#[derive(Debug, Deserialize, Clone)]
+pub struct PowerBaseConfig {
+    /// 放电状态下的目标功耗（W）：功耗低于它时按 `up_headroom_below` 放宽升频，
+    /// 达到或超过它时守住不升（过载判定除外）。各 SoC 在自己的 feature.yaml 里覆盖。
+    #[serde(default = "d_pb_target_power")]
+    pub target_power_w: f32,
+    /// 功耗低于目标时的升频宽松度（>1 = 放宽，1.0 = 不放宽）
+    #[serde(default = "d_pb_up_headroom")]
+    pub up_headroom_below: f32,
+    /// 降频激进度：目标性能乘以它（0.5 = 直接砍半），**与功耗无关，恒生效**
+    #[serde(default = "d_pb_down_scale")]
+    pub down_scale: f32,
+    /// 功耗已达上限时仍允许升频的门槛：满占用（100%）核心占比（%）
+    #[serde(default = "d_pb_overload_cores")]
+    pub overload_cores_pct: f32,
+    /// 上面那个占比需持续这么久（ms）才放行升频
+    #[serde(default = "d_pb_overload_hold")]
+    pub overload_hold_ms: u64,
+    /// 触摸事件时允许短暂突破功率上限的窗口（ms）
+    #[serde(default = "d_pb_touch_break")]
+    pub touch_break_ms: u64,
+}
+
+fn d_pb_target_power() -> f32 {
+    3.0
+}
+fn d_pb_up_headroom() -> f32 {
+    1.15
+}
+fn d_pb_down_scale() -> f32 {
+    0.5
+}
+fn d_pb_overload_cores() -> f32 {
+    50.0
+}
+fn d_pb_overload_hold() -> u64 {
+    3000
+}
+fn d_pb_touch_break() -> u64 {
+    400
+}
+
+impl Default for PowerBaseConfig {
+    fn default() -> Self {
+        Self {
+            target_power_w: d_pb_target_power(),
+            up_headroom_below: d_pb_up_headroom(),
+            down_scale: d_pb_down_scale(),
+            overload_cores_pct: d_pb_overload_cores(),
+            overload_hold_ms: d_pb_overload_hold(),
+            touch_break_ms: d_pb_touch_break(),
+        }
+    }
+}
+
+impl PowerBaseConfig {
+    /// 参数钳制：非有限值回退默认，比例类限制在合理区间
+    pub fn normalize(&mut self) {
+        if !self.target_power_w.is_finite() || self.target_power_w <= 0.0 {
+            self.target_power_w = d_pb_target_power();
+        }
+        self.target_power_w = self.target_power_w.clamp(0.5, 30.0);
+        if !self.up_headroom_below.is_finite() {
+            self.up_headroom_below = d_pb_up_headroom();
+        }
+        self.up_headroom_below = self.up_headroom_below.clamp(1.0, 2.0);
+        if !self.down_scale.is_finite() {
+            self.down_scale = d_pb_down_scale();
+        }
+        self.down_scale = self.down_scale.clamp(0.1, 1.0);
+        if !self.overload_cores_pct.is_finite() {
+            self.overload_cores_pct = d_pb_overload_cores();
+        }
+        self.overload_cores_pct = self.overload_cores_pct.clamp(1.0, 100.0);
+        self.overload_hold_ms = self.overload_hold_ms.clamp(0, 30_000);
+        self.touch_break_ms = self.touch_break_ms.clamp(0, 5_000);
+    }
+}
+
 /// 顶层配置（feature.yaml 调优段 + meta.yaml 抬头）
 // [config_root]
 #[derive(Debug, Deserialize, Default)]
@@ -1038,6 +1129,10 @@ pub struct Config {
     pub boost: Mode,
     #[serde(default)]
     pub vector: Mode,
+    /// PowerBase（Stardust 家族）：以放电功耗为指标的调频器参数（开关在 meta 段）。
+    /// 未定义该段时用代码默认值（见 `PowerBaseConfig::default`）。
+    #[serde(default)]
+    pub powerbase: PowerBaseConfig,
     /// 息屏场景模式（scenemode）：屏幕熄灭超过 `scene_mode_delay_secs` 秒后切换到的
     /// 低功耗配置（压低频率上限、禁止主动升频），亮屏后恢复原模式。
     /// 未定义时回退 CLG 默认参数（兜底，通常 8550 config.yaml 会显式配置）。
@@ -1116,6 +1211,7 @@ impl Config {
         // 功能总开关同步到进程级原子标志（覆盖启动 + config_watcher 热重载两条路径）
         crate::common::set_fas_enabled(config.meta.fas_enabled);
         crate::common::set_scenemode_enabled(config.meta.scenemode_enabled);
+        crate::common::set_powerbase_enabled(config.meta.powerbase_enabled);
         // 线程功能总闸与机型内的两个子开关取「与」：关掉后 affinity 走 release()
         // （逐线程恢复全核 + cpuset/uclamp 快照回写）、core_ctl 回 Normal（恢复
         // min_cpus/online 快照）——即「把绑定分配全部改成全核心」。热重载后由
@@ -1127,6 +1223,8 @@ impl Config {
         config.merge_scenemode();
         config.thermal.normalize();
         config.affinity.normalize();
+        // PowerBase 参数同样在加载处钳制（各段统一口径，别等 init 时才钳）
+        config.powerbase.normalize();
         // 电池读数选项同步到遥测层（原子量，热重载即时生效）。倍电压/倍电流与私有节点
         // 互斥：私有开关打开时这里强制关掉它们——UI 侧同时置灰并清值，手改 meta 也兜得住
         crate::monitor::telemetry::set_battery_options(

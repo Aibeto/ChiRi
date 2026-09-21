@@ -13,7 +13,7 @@ import { DOWN_WORD } from '@/data/down'
  * - stardust：scenemode（独立息屏轴，不作为 current_mode 档位出现；家族位照常
  *   注册——不管实际运行中看不看得到，展示体系里都占位）
  * - down：DOWN 停摆（独立家族，不是 stardust）
- * - rhine：vector/contingency/babel（仅实验室，rhine.chr 驱动 global_mode 覆盖）
+ * - rhine：vector/contingency/babel/frozen（仅实验室，rhine.chr 驱动 global_mode 覆盖）
  */
 export type ModeKind = 'clg' | 'fas' | 'special' | 'lab' | 'down' | 'stardust' | 'unknown'
 /** 语义信号（UI 映射到 --ak-signal-*，不用裸色值） */
@@ -67,6 +67,12 @@ const LAB_CATALOG: Record<string, {
   babel: {
     signal: 'accent', labelKey: 'mode.babel',
     // descKey: 'mode.babel.desc'
+  },
+  // frozen（待春归）：与 vector 反向——锁硬件最低频、停亲和/迁移/诊断日志。
+  // 语义是「最冷/最低功耗」，不是危险档，故 signal 用中性 info 而非 danger。
+  frozen: {
+    signal: 'info', labelKey: 'mode.frozen',
+    // descKey: 'mode.frozen.desc'
   }
 }
 

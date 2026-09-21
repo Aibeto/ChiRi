@@ -218,9 +218,11 @@ describe('与守护进程解析口径对齐', () => {
 })
 
 describe('可启用模式', () => {
-  it('vector/contingency/babel 给启用入口，frozen 保持预留', () => {
-    expect(LAB_ENABLEABLE).toEqual(expect.arrayContaining(['vector', 'contingency', 'babel']))
-    expect(LAB_ENABLEABLE).not.toContain('frozen')
+  // 2026-09-22：frozen（待春归）已实现（锁最低频 + 停亲和/迁移/日志），从预留转为可启用
+  it('vector/contingency/babel/frozen 都给启用入口', () => {
+    expect(LAB_ENABLEABLE).toEqual(
+      expect.arrayContaining(['vector', 'contingency', 'babel', 'frozen'])
+    )
   })
 
   it('可启用模式都在已定义的 key 里', () => {

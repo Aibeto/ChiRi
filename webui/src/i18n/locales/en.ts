@@ -165,6 +165,9 @@ export default {
   'lab.subtitle': 'Experimental feature warning',
   'lab.notice.stability': 'Features on this page are highly unstable and may be removed at any time',
   'lab.notice.reboot': 'Use under developer guidance',
+  'config.powerbase': 'The tide repeats, and that is enough',
+  'config.powerbase.hint': 'Follow me — right or wrong is a false proposition',
+
   'lab.notice.effects': 'Turning the lab off requires a reboot',
   'lab.notice.manual': 'In special cases you can edit rhine.chr directly',
   'lab.mode.vector': 'Vector Breakthrough',
@@ -173,8 +176,8 @@ export default {
   'lab.mode.contingency.detail': 'Push the data to its limit, and the proof you earn is your own',
   'lab.mode.babel': 'Babel',
   'lab.mode.babel.detail': 'The evil spirit of Babel',
-  'lab.mode.frozen': 'Frozen',
-  'lab.mode.frozen.detail': 'Access not granted',
+  'lab.mode.frozen': 'Waiting for Spring',
+  'lab.mode.frozen.detail': 'The spring breeze comes',
   'lab.status.on': 'Enabled',
   'lab.status.off': 'Not enabled',
   'lab.status.busy': 'Working',
@@ -268,6 +271,7 @@ export default {
   'mode.contingency': 'contingency',
   // 'mode.contingency.desc': 'CPU+GPU all cores at max, performance governor, no thread affinity',
   'mode.babel': 'babel',
+  'mode.frozen': 'frozen',
   // 'mode.babel.desc': 'Regularized: background on little, foreground/top on big+prime, system on big',
   // DOWN halt: label is the id too, same in every locale
   'mode.down': 'down',

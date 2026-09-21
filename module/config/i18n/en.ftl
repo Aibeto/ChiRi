@@ -175,6 +175,9 @@ sysfs-write-freq-failed = [SysFS] Write freq { $freq } failed: { $error }
 # --- CLG ---
 clg-init = [CLG] P{ $pid } init | cores={ $cpus } | freqs={ $fmin }-{ $fmax } MHz | P={ $perf } -> { $freq } kHz
 clg-activated = [CLG] CPU Load Governor activated, taking over { $count } cluster(s)
+powerbase-activated = [PowerBase] power-based governor took over (CLG released)
+powerbase-deactivated = [PowerBase] power-based governor released
+powerbase-writer-invalid = [PowerBase] P{ $pid } frequency writer unavailable, cluster skipped
 clg-no-clusters = [CLG] CPU Load Governor: no valid clusters found, staying inactive
 clg-deactivated = [CLG] CPU Load Governor deactivated
 clg-config-reloaded = [CLG] config hot-reloaded | up={ $up } down={ $down } floor={ $floor } ceil={ $ceil }
