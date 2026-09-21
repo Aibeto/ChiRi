@@ -268,6 +268,37 @@ pub fn cpu_freq_snapshot() -> (String, String, String, String) {
     (cur, max, min, gov)
 }
 
+/// GPU 频率快照的节流间隔：读 GPU 频率节点（尤其 Adreno 的 `gpuclk`）会把 GPU
+/// 从低功耗状态拉起来，跟着 1s 的 snap 走等于**每秒唤醒一次 GPU**。
+/// 8550 实测：加上每秒 GPU 采集后，同一 playback 场景（gpu_busy<12）功耗从
+/// 1.76 W 涨到 2.59 W、util 与 psi 同步上升——采集本身的代价盖过了收益。
+/// 故 GPU 单独按 10s 采一次；CPU 的 cpufreq 节点读取是廉价的，仍每秒采。
+const GPU_SNAP_INTERVAL_MS: u64 = 10_000;
+
+/// GPU 频率/调速器快照总开关：**当前默认关闭**。
+/// 关闭原因（8550 实测）：读 GPU 频率节点（Adreno `gpuclk` / devfreq `cur_freq`）会把
+/// GPU 从低功耗状态拉起来，跟着 1s 的 snap 走等于每秒唤醒一次 GPU——同一 playback
+/// 场景（gpu_busy<12）功耗由 1.76 W 涨到 2.59 W（+47%），util 与 psi 同步上升，
+/// 采集本身的代价盖过了数据收益。CPU 那 4 列不受影响（cpufreq 节点读取廉价）。
+/// **恢复方式**：确需 GPU 频率数据时把这里改回 true（节流间隔见 GPU_SNAP_INTERVAL_MS）；
+/// 彻底避免唤醒需要另找不触碰 GPU 硬件的读数路径，本开关只是先止血。
+const GPU_SNAPSHOT_ENABLED: bool = false;
+static LAST_GPU_SNAP_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// 距上次 GPU 快照是否已超过节流间隔（到点则顺带更新时间戳）
+fn gpu_snapshot_due() -> bool {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let prev = LAST_GPU_SNAP_MS.load(std::sync::atomic::Ordering::Relaxed);
+    if now.saturating_sub(prev) < GPU_SNAP_INTERVAL_MS {
+        return false;
+    }
+    LAST_GPU_SNAP_MS.store(now, std::sync::atomic::Ordering::Relaxed);
+    true
+}
+
 /// 读取指定 policy 的 scaling_boost_frequencies（kHz）。
 /// 文件不存在、为空或解析失败时返回空 Vec，不影响 policy 注册。
 fn read_boost_frequencies(pid: i32) -> Vec<u32> {
@@ -1398,11 +1429,19 @@ pub fn start_scheduler_thread(
                     // 开发记录 snap 行（1s）：环境上下文（开启 dev_record 才有 IO；
                     // 前台包名由 set_devimp_package 已同步，行内自动填充）
                     if crate::logger::devimp_active() {
-                        // 频率/调速器快照只在 devimp 开启时采集（每秒一次 sysfs 读，
-                        // 常态零开销）；不缓存——内核与其它进程随时会改这些值
+                        // 频率/调速器快照只在 devimp 开启时采集（常态零开销）；
+                        // 不缓存——内核与其它进程随时会改这些值。
+                        // CPU 每秒采（cpufreq 节点读取廉价）；GPU 受 `GPU_SNAPSHOT_ENABLED`
+                        // 总开关控制（当前关闭，见其注释）、开启时再叠加 `gpu_snapshot_due()`
+                        // 的 10s 节流。关闭期间这 4 列恒为 "-"。
                         let (cpu_cur, cpu_max, cpu_min, cpu_gov) = crate::chiri::cpu_freq_snapshot();
-                        let (gpu_cur, gpu_max, gpu_min, gpu_gov) =
-                            crate::chiri::gpu::devfreq_snapshot();
+                        let (gpu_cur, gpu_max, gpu_min, gpu_gov) = if GPU_SNAPSHOT_ENABLED
+                            && gpu_snapshot_due()
+                        {
+                            crate::chiri::gpu::devfreq_snapshot()
+                        } else {
+                            ("-".to_string(), "-".to_string(), "-".to_string(), "-".to_string())
+                        };
                         crate::logger::devimp_snap(
                             is_screen_on,
                             &fmt_opt(last_batt_temp, 1),

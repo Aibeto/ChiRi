@@ -2109,6 +2109,11 @@ devimp 是开发诊断日志，按前台包名分组。文件名 `devimp_<包名
 或 `<设备名>:<值>`，节点读不到写 `-`。**只在 devimp 开启时采集**（每秒一次 sysfs 读，常态零开销），
 且不做缓存——这些值会被内核 governor 与 TunedGovernor 随时改写，缓存只会给出过期数据。
 
+**GPU 那 4 列当前默认关闭**（`chiri/mod.rs` 的 `GPU_SNAPSHOT_ENABLED = false`）：读 GPU 频率节点会把
+GPU 从低功耗状态唤醒，8550 实测同一 playback 场景功耗因此 +47%（1.76 → 2.59 W），采集代价盖过收益；
+关闭期间这 4 列恒为 `-`，CPU 那 4 列不受影响、照常每秒采集。实现保留在
+`chiri/gpu.rs::devfreq_snapshot()`，确需该数据时把开关改回 true 即可（开启后还会叠加 10 s 节流）。
+
 文件头会写入设备元信息：`module.prop` 内容、`build.prop` 解析结果、`getprop` 查询结果。源码注释中记录了一处问题：`ro.product.model` 这类跨分区属性必须通过 `getprop` 命令获取，直接读 `/system/build.prop` 会读空。
 
 **`tgtop` 行**的列语义有复用：`pid` 是 TGID，`comm` 是 cmdline 首段，`util_pct` 是窗口运行占比，**多核并行可以超过 100%**（比如 320% 约等于 3.2 个核满载），不做 clamp。

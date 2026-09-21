@@ -98,22 +98,70 @@ pub struct GpuGuard {
 /// **只在 devimp 开启时调用**（每秒一次 sysfs 读），故不做缓存——这些值会被
 /// 内核 devfreq 与其它进程改动，缓存只会给出过期数据。
 /// 节点口径与探测一致：Adreno(kgsl-3d0) + 通用 devfreq(gpu/kgsl/mali)。
+///
+/// **当前未被调用**：`chiri/mod.rs` 的 `GPU_SNAPSHOT_ENABLED` 默认 false（读 GPU 节点会
+/// 把 GPU 唤醒，8550 实测使同场景功耗 +47%），保留实现待该问题有解或确需数据时再开。
+#[allow(dead_code)]
 pub fn devfreq_snapshot() -> (String, String, String, String) {
-    let mut dirs: Vec<String> = Vec::new();
-    if std::path::Path::new(ADRENO_DIR).exists() {
-        dirs.push(ADRENO_DIR.to_string());
-    }
+    // 目录按**设备名**去重，且标准 devfreq 优先：kgsl-3d0 会同时出现在
+    // /sys/class/devfreq/ 与 /sys/class/kgsl/ 下，两处的节点语义不同
+    // （前者是标准 devfreq 接口、后者是 Adreno 私有接口），混读会把 min/cur
+    // 拼成互不相干的数（2026-09-22 日志里出现过 min 680 MHz 配 cur 110 MHz）。
+    let mut dirs: Vec<(String, bool)> = Vec::new(); // (dir, 是否标准 devfreq)
+    let mut seen: Vec<String> = Vec::new();
     if let Ok(entries) = fs::read_dir(GPU_DEVFREQ_ROOT) {
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_lowercase();
             if name.contains("gpu") || name.contains("kgsl") || name.contains("mali") {
                 let dir = entry.path().to_string_lossy().to_string();
-                if !dirs.contains(&dir) {
-                    dirs.push(dir);
-                }
+                seen.push(name);
+                dirs.push((dir, true));
             }
         }
     }
+    if std::path::Path::new(ADRENO_DIR).exists() {
+        let lb = ADRENO_DIR.rsplit('/').next().unwrap_or(ADRENO_DIR).to_string();
+        if !seen.contains(&lb) {
+            dirs.push((ADRENO_DIR.to_string(), false));
+        }
+    }
+
+    // 读频率并**统一成 kHz**：devfreq 的 cur_freq 与 Adreno 的 gpuclk 都以 Hz 计，
+    // 直接写进日志会得到 1.1 亿 kHz 这种荒谬值（与 CPU 的 kHz 口径也对不上）。
+    // 已是 kHz 的厂商节点（数值小）保持原样。
+    let read_freq = |dir: &str, names: &[&str]| -> String {
+        for n in names {
+            if let Ok(s) = fs::read_to_string(format!("{dir}/{n}")) {
+                let s = s.trim();
+                if s.is_empty() {
+                    continue;
+                }
+                return match s.parse::<u64>() {
+                    Ok(v) if v > 10_000_000 => (v / 1_000).to_string(), // Hz -> kHz
+                    _ => s.to_string(),
+                };
+            }
+        }
+        "-".to_string()
+    };
+    // 调速器：只在标准 devfreq 下读（Adreno 私有目录里的同名节点可能是频率值，
+    // 不是 governor 名）；读到的内容若整体是数字也判定为无效，避免误导。
+    let read_gov = |dir: &str, is_devfreq: bool| -> String {
+        if !is_devfreq {
+            return "-".to_string();
+        }
+        match fs::read_to_string(format!("{dir}/governor")) {
+            Ok(s) => {
+                let s = s.trim();
+                if s.is_empty() || s.chars().all(|c| c.is_ascii_digit()) {
+                    "-".to_string()
+                } else {
+                    s.to_string()
+                }
+            }
+            Err(_) => "-".to_string(),
+        }
+    };
 
     let (mut cur, mut max, mut min, mut gov) = (
         String::new(),
@@ -121,30 +169,18 @@ pub fn devfreq_snapshot() -> (String, String, String, String) {
         String::new(),
         String::new(),
     );
-    for dir in dirs {
+    for (dir, is_devfreq) in dirs {
         let label = dir.rsplit('/').next().unwrap_or("gpu").to_string();
-        // Adreno 的当前频率节点是 gpuclk，devfreq 形式是 cur_freq：都试一遍
-        let read_any = |names: &[&str]| -> String {
-            for n in names {
-                if let Ok(s) = fs::read_to_string(format!("{dir}/{n}")) {
-                    let s = s.trim().to_string();
-                    if !s.is_empty() {
-                        return s;
-                    }
-                }
-            }
-            "-".to_string()
-        };
         let push = |dst: &mut String, v: String| {
             if !dst.is_empty() {
                 dst.push(';');
             }
             dst.push_str(&format!("{label}:{v}"));
         };
-        push(&mut cur, read_any(&["cur_freq", "gpuclk", "clock"]));
-        push(&mut max, read_any(&["max_freq", "max_gpuclk"]));
-        push(&mut min, read_any(&["min_freq"]));
-        push(&mut gov, read_any(&["governor"]));
+        push(&mut cur, read_freq(&dir, &["cur_freq", "gpuclk", "clock"]));
+        push(&mut max, read_freq(&dir, &["max_freq", "max_gpuclk"]));
+        push(&mut min, read_freq(&dir, &["min_freq"]));
+        push(&mut gov, read_gov(&dir, is_devfreq));
     }
     (cur, max, min, gov)
 }
