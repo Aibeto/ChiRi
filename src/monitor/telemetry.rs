@@ -25,10 +25,11 @@ pub struct Telemetry {
     psi_mem_some: AtomicU32,
     /// GPU 利用率（%），NaN = 节点不可用
     gpu_busy: AtomicU32,
-    /// 电池电流（µA，负值常见于放电方向），UNAVAIL = 不可用
-    batt_current_ua: AtomicI32,
-    /// 电池电压（µV），UNAVAIL = 不可用
-    batt_voltage_uv: AtomicI32,
+    /// 电池电流（**节点原始值**：私有节点 mV/mA 口径、标准节点 µA 口径；
+    /// 负值常见于放电方向），UNAVAIL = 不可用
+    batt_current_raw: AtomicI32,
+    /// 电池电压（**节点原始值**：私有节点 mV 口径、标准节点 µV 口径），UNAVAIL = 不可用
+    batt_voltage_raw: AtomicI32,
 }
 
 static TELEMETRY: Telemetry = Telemetry {
@@ -36,8 +37,8 @@ static TELEMETRY: Telemetry = Telemetry {
     psi_io_some: AtomicU32::new(0),
     psi_mem_some: AtomicU32::new(0),
     gpu_busy: AtomicU32::new(0x7FC00000), // f32::NAN.to_bits()
-    batt_current_ua: AtomicI32::new(UNAVAIL),
-    batt_voltage_uv: AtomicI32::new(UNAVAIL),
+    batt_current_raw: AtomicI32::new(UNAVAIL),
+    batt_voltage_raw: AtomicI32::new(UNAVAIL),
 };
 
 /// BCC 字段不可用告警去重（一次运行一条，避免 1s 轮询刷屏）
@@ -77,19 +78,17 @@ const BCC_PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(6
 /// - `VOLT_DIVISOR` / `CURR_DIVISOR`：单位校准（**电压、电流各一个**）。**全链没有内置
 ///   换算**——`输出 = 节点原始值 ÷ 校准值`：电压得到 V、电流得到**安培**
 ///   （`batt_power_w` = 电流值 × 电压 = W）。校准值就是「原始单位 → 输出单位」的除数：
-///     电压：节点报 mV 填 1000、报 µV 填 1000000；
-///     电流：节点报 mA 填 1000、报 µA 填 1000000（私有节点 bcc_parms 报 mV/mA 时
-///           电压 1000、电流 1000）。
+///     电压：节点报 mV 填 1000、报 µV 填 1000000（**缺省 1000000**，即标准 ABI 口径）；
+///     电流：节点报 mA 填 1000、报 µA 填 1000000（缺省同上；私有节点 bcc_parms 报 mV/mA，
+///           安装脚本检测到该节点时会把两个值都写成 1000）。
 ///   分开的理由：节点的电压与电流单位未必同时错（常见只错一个），一个共用值会让
 ///   功率按平方变化，改了也说不清是谁的锅。
 static OPLUS_CHG: AtomicBool = AtomicBool::new(false);
 static OPLUS_DUAL_CELL: AtomicBool = AtomicBool::new(false);
 static VOLTAGE_DOUBLE: AtomicBool = AtomicBool::new(false);
 static CURRENT_DOUBLE: AtomicBool = AtomicBool::new(false);
-static VOLT_DIVISOR_BITS: AtomicU32 =
-    AtomicU32::new(crate::utils::DEFAULT_UNIT_DIVISOR.to_bits());
-static CURR_DIVISOR_BITS: AtomicU32 =
-    AtomicU32::new(crate::utils::DEFAULT_UNIT_DIVISOR.to_bits());
+static VOLT_DIVISOR_BITS: AtomicU32 = AtomicU32::new(crate::utils::DEFAULT_UNIT_DIVISOR.to_bits());
+static CURR_DIVISOR_BITS: AtomicU32 = AtomicU32::new(crate::utils::DEFAULT_UNIT_DIVISOR.to_bits());
 
 /// 写入电池读数选项。校准值非有限/非正时退回默认值——单项笔误不牵连其它选项。
 pub fn set_battery_options(
@@ -117,7 +116,7 @@ fn sane_divisor(v: f32) -> f32 {
     }
 }
 
-/// 电压校准除数（1 个 V 对应多少毫单位），恒 > 0
+/// 电压校准除数（节点原始单位 → V 的除数），恒 > 0
 fn voltage_divisor() -> f32 {
     f32::from_bits(VOLT_DIVISOR_BITS.load(Ordering::Relaxed))
 }
@@ -149,19 +148,18 @@ impl Telemetry {
         if v.is_nan() { None } else { Some(v) }
     }
     /// 电池电流（**单位是安培**，保留方向符号；函数名里的 ma 是历史遗留命名）；None = 不可用。
-    /// **没有内置换算**：直接是 `节点原始值 ÷ current_divisor`，所以校准值就是
-    /// 「原始单位 → 安培」的除数：节点报 mA 填 1000、报 µA 填 1000000、报 A 填 1。
+    /// `节点原始值 ÷ current_divisor`：标准节点报 µA 填 1000000（缺省值）、
+    /// OPlus 私有节点报 mA 填 1000（安装脚本检测到该节点时自动写入）。
     /// `batt_power_w` 按安培使用本值（× 电压得瓦），status.csv 的 `batt_current_ma`
     /// 列写的也是这个值（列名同样遗留）。
     pub fn batt_current_ma(&self) -> Option<f32> {
-        let v = self.batt_current_ua.load(Ordering::Relaxed);
+        let v = self.batt_current_raw.load(Ordering::Relaxed);
         (v != UNAVAIL).then(|| v as f32 / current_divisor())
     }
     /// 电池电压（V）；None = 不可用。
-    /// **没有内置换算**：直接是 `节点原始值 ÷ voltage_divisor`，单位由电压校准值决定
-    /// （节点报 µV 就填 1000000 得到 V，报 mV 就填 1000）
+    /// `节点原始值 ÷ voltage_divisor`（口径同电流，见 [`Self::batt_current_ma`]）
     pub fn batt_voltage_v(&self) -> Option<f32> {
-        let v = self.batt_voltage_uv.load(Ordering::Relaxed);
+        let v = self.batt_voltage_raw.load(Ordering::Relaxed);
         (v != UNAVAIL).then(|| v as f32 / voltage_divisor())
     }
     /// 电池瞬时功率（W，电流取绝对值）；电流或电压缺失返回 None
@@ -193,7 +191,12 @@ fn read_i32(path: &str) -> Option<i32> {
         .and_then(|s| s.trim().parse::<i32>().ok())
 }
 
-/// 标准 Android 节点（Android ABI：µV / µA）；不可用返回哨兵 [`UNAVAIL`]
+/// 标准 Android 节点（ABI：µV / µA），存**节点原始值**、读取层不做任何换算——
+/// 由 meta 的校准除数（缺省 1000000，正是 ABI 口径）换算为 V / A。
+/// 不可用返回哨兵 [`UNAVAIL`]。
+/// OPlus 标准节点「单位也不保证」（部分版本 10s 才刷新）：回退读数本就只作兜底，
+/// 且 OPlus 机型由安装脚本把校准值写成 1000（见 customize.sh 的 [battery-detect]），
+/// 两路口径不一致时以私有节点为准（`oplus_chg` 打开且读到有效值就不回退）。
 fn read_standard_battery() -> (i32, i32) {
     (
         read_i32("/sys/class/power_supply/battery/current_now").unwrap_or(UNAVAIL),
@@ -209,7 +212,8 @@ fn read_standard_battery() -> (i32, i32) {
 const OPLUS_BCC_PARMS: &str = "/sys/class/oplus_chg/battery/bcc_parms";
 
 /// 读 OPlus bcc_parms，存**节点原始值**（不做任何换算）供共享快照使用。
-/// 单位由 meta 的「电压/电流校准」决定：该节点报 mV / mA，配套填 1000 / 1。
+/// 该节点报 mV / mA，配套校准除数填 **1000**（安装脚本检测到该节点时会写入；
+/// 缺省 1000000 是标准 Android ABI µV/µA 的口径）。
 /// 不做量级启发式猜测（旧的 mV/V、mA/A 自动识别 + 2–6V/±30A 物理范围门已删除）。
 /// 字段缺失/越界返回 None（调用方回退标准 power_supply 节点）。
 fn read_oplus_bcc(dual_cell: bool) -> Option<(i32, i32)> {
@@ -306,7 +310,9 @@ pub fn telemetry_loop() {
         // --- 电池电流/电压：OPlus bcc_parms 优先（规避标准节点 10s 缓存），失败回退标准节点 ---
         let use_oplus = OPLUS_CHG.load(Ordering::Relaxed);
         if use_oplus
-            && bcc_probed_at.map_or(true, |t: std::time::Instant| t.elapsed() >= BCC_PROBE_INTERVAL)
+            && bcc_probed_at.map_or(true, |t: std::time::Instant| {
+                t.elapsed() >= BCC_PROBE_INTERVAL
+            })
         {
             let now = std::path::Path::new(OPLUS_BCC_PARMS).exists();
             // 只在状态变化时打点：可用 = info；不可用 = warn（一次，恢复后重新武装）
@@ -369,8 +375,8 @@ pub fn telemetry_loop() {
         } else {
             BATT_UNAVAIL_WARNED.store(false, Ordering::Relaxed);
         }
-        TELEMETRY.batt_current_ua.store(current, Ordering::Relaxed);
-        TELEMETRY.batt_voltage_uv.store(voltage, Ordering::Relaxed);
+        TELEMETRY.batt_current_raw.store(current, Ordering::Relaxed);
+        TELEMETRY.batt_voltage_raw.store(voltage, Ordering::Relaxed);
 
         std::thread::sleep(std::time::Duration::from_secs(1));
     }

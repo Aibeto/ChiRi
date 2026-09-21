@@ -1,18 +1,57 @@
 /* app.css: [fonts] [brand-map] [base] [utilities] [signal-map] [ak-adapt] [buttons] [rows] [lists] */
 
 /* [fonts]
- * 内置等宽（JetBrains Mono 拉丁子集，SIL OFL 1.1，许可见同目录
- * LICENSE-OFL-jetbrains-mono.txt）：遥测数值、日志、路径都走等宽栈，Android 自带的
- * 等宽字体各家不一，内置后数字对齐与字形稳定。拉丁子集两档共约 43KB——只含拉丁/
- * 数字/标点，中文仍由系统的 Noto Sans CJK 兜底（不必内置整份 CJK）。
- * 衬线已按用户要求（2026-09-18「禁止使用衬线字体」）停用：原先内置的 Noto Serif SC
- * Bold 子集已随字体文件一并移除，--ak-font-serif 保留 token、回落系统衬线，未来
- * 需要时再按 [fonts] 先例重新内置。 */
+ * 拉丁/数字 → 'ChiRi Sans'（Poppins，几何主义无衬线，SIL OFL 1.1）；
+ * 中文      → 'ChiRi Sans CJK'（Noto Sans SC / 思源黑体，人文主义无衬线，SIL OFL 1.1）；
+ * 等宽      → 'ChiRi Mono'（JetBrains Mono 拉丁子集，SIL OFL 1.1）——遥测数值、日志、
+ *             路径都走等宽栈，Android 自带等宽各家不一，内置后数字对齐与字形稳定。
+ * 前两份的二进制都不入库，构建期由 scripts/fetch-fonts.mjs 从 jsdelivr 拉取
+ * （挂 npm 的 predev/prebuild），许可正文随仓库同目录：
+ * LICENSE-OFL-poppins.txt / LICENSE-OFL-noto-sans-sc.txt。
+ * 中文那份已按仓库实际用字裁到 CJK 码位、不含拉丁字形，因此拉丁自然落到 Poppins、
+ * 中文落到本字体，互不干扰，也就不需要 unicode-range（范围声明过宽会在缺字时出豆腐块）。
+ * 衬线已按用户要求（2026-09-18「禁止使用衬线字体」）停用：--ak-font-serif 保留 token、
+ * 回落系统衬线。 */
+@font-face {
+  font-family: 'ChiRi Sans';
+  src: url('./assets/fonts/poppins-regular.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
 
-/* 内置等宽（JetBrains Mono 拉丁子集，SIL OFL 1.1，许可见同目录
- * LICENSE-OFL-jetbrains-mono.txt）：遥测数值、日志、路径都走等宽栈，Android 自带的
- * 等宽字体各家不一，内置后数字对齐与字形稳定。拉丁子集两档共约 43KB——只含拉丁/
- * 数字/标点，中文仍由系统的 Noto Sans CJK 兜底（不必内置整份 CJK）。 */
+@font-face {
+  font-family: 'ChiRi Sans';
+  src: url('./assets/fonts/poppins-semibold.woff2') format('woff2');
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'ChiRi Sans';
+  src: url('./assets/fonts/poppins-bold.woff2') format('woff2');
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'ChiRi Sans CJK';
+  src: url('./assets/fonts/noto-sans-sc-400.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'ChiRi Sans CJK';
+  src: url('./assets/fonts/noto-sans-sc-700.woff2') format('woff2');
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
 @font-face {
   font-family: 'ChiRi Mono';
   src: url('./assets/fonts/mono-regular.woff2') format('woff2');
@@ -51,10 +90,10 @@
   --ak-signal-danger: #e5484d;
   --ak-signal-disabled: #6b7280;
 
-  /* 设备端字体栈：中文正文由系统提供（Android 为 Noto Sans CJK）；等宽走内置
-   * ChiRi Mono（见 [fonts]），映射进 ak-ui 语义 token */
-  --ak-font-sans: system-ui, -apple-system, 'PingFang SC', 'Noto Sans SC', 'Source Han Sans SC',
-    Roboto, 'Helvetica Neue', Arial, sans-serif;
+  /* 设备端字体栈：拉丁走内置 Poppins（几何主义）、中文走内置 Noto Sans SC（人文主义），
+   * 系统栈只作兜底；等宽走内置 ChiRi Mono（见 [fonts]），映射进 ak-ui 语义 token */
+  --ak-font-sans: 'ChiRi Sans', 'ChiRi Sans CJK', system-ui, -apple-system, 'PingFang SC',
+    'Noto Sans SC', 'Source Han Sans SC', Roboto, 'Helvetica Neue', Arial, sans-serif;
   --ak-font-mono: 'ChiRi Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   --ak-font-serif: 'Noto Serif SC', serif;
   /* 用户要求「禁止使用衬线字体」：命令字/标题统一走无衬线栈；原先内置的衬线子集已

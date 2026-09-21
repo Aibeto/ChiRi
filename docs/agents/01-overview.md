@@ -27,18 +27,20 @@ module/               # Magisk/KernelSU 模块载体（module.prop、customize.s
   config/             # config.yaml / rules.yaml / i18n (en.ftl / zh.ftl)；<soc>/config.yaml 处理器子目录（各 SoC 自带，8475/8998 参数相同、各自一份）+ normal/tuned_profiles.yaml、normal/scenemode.yaml、normal/fas.yaml（FAS 白名单）、normal/fas/<配置名>.yaml 每应用 FAS 调优（编译期嵌入）；rhine-init.yaml 实验室模式定义（同样只进二进制）
   rhine.chr           # 实验室状态（对外暴露、可手改；空/只有注释 = 未启用）。rhine-back.chr 由 daemon 生成，不随包
 webui/                # Svelte 5(runes) + TypeScript + Vite + ak-ui 管理界面；分层 kernel/shell → contract → data → views，tests/ 为纯逻辑断言（详见 webui/README.md）
+  scripts/fetch-fonts.mjs  # 构建期拉取字体（predev/prebuild 自动执行）：Poppins 拉丁 + Noto Sans SC 中文子集，产物 src/assets/fonts/ 不入库
 updateInformation/    # 更新.json 与 changelog
 .github/workflows/    # CI：Node 24 + Rust nightly + NDK r29 + cargo-ndk
 ```
 
 ## [stack] 技术栈
 
-| 层       | 技术                                                                              |
-| -------- | --------------------------------------------------------------------------------- |
-| 守护进程 | Rust (edition 2024, nightly), tokio, aya (eBPF), serde_yaml, inotify, netlink     |
-| eBPF     | aya 框架，`sched_switch` tracepoint + `queueBuffer` uprobe                        |
-| WebUI    | Svelte 5 (runes), TypeScript, Vite, ak-ui 1.0.0 (CSS Core), js-yaml, vitest       |
-| 构建     | cargo xtask build（Rust aarch64-linux-android 交叉编译 + webui npm build + 打包） |
+| 层         | 技术                                                                                                                                                       |
+| ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 守护进程   | Rust (edition 2024, nightly), tokio, aya (eBPF), serde_yaml, inotify, netlink                                                                              |
+| eBPF       | aya 框架，`sched_switch` tracepoint + `queueBuffer` uprobe                                                                                                 |
+| WebUI      | Svelte 5 (runes), TypeScript, Vite, ak-ui 1.0.0 (CSS Core), js-yaml, vitest                                                                                |
+| WebUI 字体 | 构建期 `scripts/fetch-fonts.mjs` 从 jsdelivr 拉取并子集化：Poppins（拉丁几何）+ Noto Sans SC（中文人文主义），二进制不入库；`subset-font` 仅 devDependency |
+| 构建       | cargo xtask build（Rust aarch64-linux-android 交叉编译 + webui npm build + 打包）                                                                          |
 
 ## [cmds] 常用命令
 
@@ -69,4 +71,3 @@ cd webui && npm test
 - 本地开发只做 `cargo check` / WebUI `type-check`；完整产物由 CI（GitHub Actions）生成。不要随意 `cargo build`（需要 NDK 环境），优先静态检查。
 
 - bpf-linker 获取：`build.rs` 的 `ensure_bpf_linker` 依次尝试 PATH 中已有 bpf-linker → OUT_DIR 缓存 → `cargo install bpf-linker`。CI 通过 GitHub API 下载静态链接 LLVM 的预编译二进制（bpf-linker 0.11 依赖 LLVM 21+，源码编译在 ubuntu runner 上不可行；cargo-binstall 也会回退到源码编译）。eBPF release 编译在 build.rs 内用 `CARGO_PROFILE_RELEASE_OPT_LEVEL=2` 局部覆盖（新版 bpf-linker 已移除 `-Oz`/`-Os`，仅支持 `-O0~O3`，workspace 根的 `opt-level="z"` 会导致链接失败）。Windows 兜底：bpf-linker 源码编译依赖 `os::unix` API，Windows 上无法构建，且本地不承担完整产物构建。`ensure_bpf_linker` 在 Windows 无现成 bpf-linker 时返回跳过错误，`build_ebpf` 捕获后经 `write_ebpf_stub()` 回退占位产物（`ebpf_target/bpfel-unknown-none/{debug,release}/yumi-ebpf`，与 `YUMI_SKIP_EBPF=1` 同路径），保证 rust-analyzer 和本地 `cargo check` 不被阻塞。Windows 上若有 `bpf-linker.exe` 仍正常构建 eBPF，CI 行为不变。
-

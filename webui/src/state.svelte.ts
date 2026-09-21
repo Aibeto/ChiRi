@@ -582,18 +582,20 @@ class AppStore {
   get currentDouble(): boolean {
     return this.metaSnapshot?.values?.current_double === true
   }
-  /** 电压校准除数：缺省/非法一律按 1000；旧键 unit_divisor 作为兜底（daemon 侧同口径） */
+  /** 电压校准除数：缺省/非法一律按 1000000（标准 Android ABI µV 口径，与 daemon
+   * DEFAULT_UNIT_DIVISOR 同值）；OPlus 私有节点报 mV，安装脚本会写成 1000。
+   * 旧键 unit_divisor 作为兜底 */
   get voltageDivisor(): number {
     const values = this.metaSnapshot?.values
     for (const v of [values?.voltage_divisor, values?.unit_divisor]) {
       if (typeof v === 'number' && Number.isFinite(v) && v > 0) return v
     }
-    return 1000
+    return 1_000_000
   }
-  /** 电流校准除数：缺省/非法一律按 1000 */
+  /** 电流校准除数：缺省/非法一律按 1000000（标准节点 µA → A；batt_power_w 按安培消费） */
   get currentDivisor(): number {
     const v = this.metaSnapshot?.values?.current_divisor
-    return typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : 1000
+    return typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : 1_000_000
   }
   /** 电池读数页写入中（直写 meta.yaml） */
   battPending = $state(false)

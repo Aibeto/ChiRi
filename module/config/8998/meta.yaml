@@ -22,9 +22,10 @@ oplus_dual_cell: false
 voltage_double: false
 current_double: false
 # 单位校准（须 > 0，无内置换算）：节点原始值 ÷ 该值 = V / A（功率 = 电流 × 电压）。
-# 节点报 mV/mA 时两个都填 1000；报 µV/µA 时都填 1000000
-voltage_divisor: 1000
-current_divisor: 1000
+# 缺省 1000000 = 标准 Android ABI 口径（节点报 µV/µA）；OPlus 私有节点报 mV/mA，
+# 安装时检测到该节点会自动写成 1000，正常无需手改，仅节点量级异常时才作校正。
+voltage_divisor: 1000000
+current_divisor: 1000000
 # 耗电读数满量程（W，WebUI 状态页仪表盘用；可选，默认 12）：只影响显示，不参与调度。
 power_max_w: 12
 # PowerBase 总开关（Stardust 家族，高级设置，默认关闭）：开启后 CLG 交由 PowerBase 接管

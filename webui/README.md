@@ -30,6 +30,12 @@ npm run type-check   # svelte-check
 npm test             # vitest
 ```
 
+`dev` / `build` 前会自动执行 `scripts/fetch-fonts.mjs`（npm 的 `predev` / `prebuild`）：
+从 jsdelivr 拉取字体并落地到 `src/assets/fonts/`（二进制不入库，已在 `.gitignore` 忽略）。
+字体分工见 `src/app.css` 的 `[fonts]`：拉丁/数字走 Poppins（几何主义）、中文走 Noto Sans SC
+（人文主义）子集、等宽走内置 JetBrains Mono。脚本按仓库实际用字裁中文（只留 CJK 码位，
+拉丁交给 Poppins，故无需 `unicode-range`），新增中文文案后重跑构建即可覆盖新字。
+
 ## 与守护进程的契约要点
 
 - **存活判据**：`daemon.lock` 的 flock 探测（`flock -n FILE true`，取锁后立刻释放）；不用 `pidof`。

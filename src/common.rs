@@ -739,6 +739,10 @@ struct MetaYamlFile {
     scenemode_enabled: Option<bool>,
     /// 线程摆放总开关（affinity + core_ctl），详见 ExternalMetaOverrides
     thread_bind: Option<bool>,
+    /// PowerBase 总开关（meta.yaml `powerbase_enabled`，缺省 false）。**必须与本结构
+    /// 同步注册**：deny_unknown_fields 下 WebUI 直写的键若不在这里，整个 meta.yaml
+    /// 会被判非法并整体重置（2026-09-22 死循环事故的根因——开关写了被抹、再写再抹）。
+    powerbase_enabled: Option<bool>,
     /// 功耗口径开关（PowerAVG.chr），详见 ExternalMetaOverrides（缺省 false）
     power_avg: Option<bool>,
     /// 常驻状态通知开关，详见 ExternalMetaOverrides（缺省 true）
@@ -773,6 +777,10 @@ pub struct ExternalMetaOverrides {
     /// `Affinity.enabled` / `CoreCtl.enabled` 取「与」——任一为假即视为关闭线程功能，
     /// 见 chiri/config.rs::Config::load。
     pub thread_bind: Option<bool>,
+    /// PowerBase 总开关（meta.yaml `powerbase_enabled`，缺省 false）：开启后原本由
+    /// CLG 接管的亮屏日常场合改由 PowerBase 接管（以放电功耗为指标）。
+    /// 消费点：chiri Config::load 合并后 set_powerbase_enabled 同步原子量。
+    pub powerbase_enabled: Option<bool>,
     /// 功耗口径开关（PowerAVG.chr）：false（默认）= 参考值（旧值先乘 10 再与新值
     /// 按 10:1 加权递推，偏历史，含息屏样本）；true = 累计平均值（等权全史，
     /// **仅亮屏**放电样本）。两者都只在电池放电时取样。daemon 只在 ChiRi 的 1s 状态采样里
@@ -795,13 +803,13 @@ pub struct ExternalMetaOverrides {
     pub voltage_double: Option<bool>,
     /// 倍电流（`current_double`，默认 false）：标准节点路径电流 ×2，互斥关系同上。
     pub current_double: Option<bool>,
-    /// 电压校准除数（`voltage_divisor`，默认 1000，须 > 0）：**全链没有内置换算**，
-    /// `节点原始值 ÷ 该值 = V`（标准节点 µV 填 1000000，私有节点 mV 填 1000）。
-    /// 用来替代原先代码里的量级启发式与物理范围门。
+    /// 电压校准除数（`voltage_divisor`，默认 1000000，须 > 0）：`节点原始值 ÷ 该值 = V`，
+    /// 读取层不做换算。缺省 1000000 = 标准 Android ABI 的 µV 口径；OPlus 私有节点报 mV，
+    /// 安装脚本检测到该节点时会写入 1000（见 customize.sh 的 [battery-detect]）。
     pub voltage_divisor: Option<f32>,
-    /// 电流校准除数（`current_divisor`，默认 1000，须 > 0）：`节点原始值 ÷ 该值 = mA`
-    /// （标准节点 µA 填 1000，私有节点 mA 填 1）。
-    /// 与电压分开：节点的两个量未必同时错单位，分开才能单独校正（W = |mA| × V 保持自洽）。
+    /// 电流校准除数（`current_divisor`，默认 1000000，须 > 0）：`节点原始值 ÷ 该值 = 安培`。
+    /// 口径同电压（标准节点 µA → 1000000；OPlus 私有节点 mA → 1000，安装脚本自动写入）。
+    /// 与电压分开：节点的两个量未必同时错单位，分开才能单独校正（W = |A| × V 保持自洽）。
     pub current_divisor: Option<f32>,
     /// 「不改」开关（meta.yaml 字段 `nofix`，默认 false，且默认不写进配置）：
     /// true = 启动时跳过所有「二进制内容对外部文件的覆盖类操作」——webui 资产还原
@@ -924,6 +932,7 @@ fn parse_disk_meta(text: &str) -> Option<ExternalMetaOverrides> {
         fas_enabled: f.fas_enabled,
         scenemode_enabled: f.scenemode_enabled,
         thread_bind: f.thread_bind,
+        powerbase_enabled: f.powerbase_enabled,
         power_avg: f.power_avg,
         notify: f.notify,
         oplus_chg: f.oplus_chg,

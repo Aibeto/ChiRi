@@ -43,10 +43,7 @@ pub fn try_write_file<P: AsRef<Path>, C: AsRef<[u8]>>(path: P, content: C) -> Re
             .downcast_ref::<std::io::Error>()
             .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound);
         if not_found {
-            log::debug!(
-                "write skipped (node missing): {}",
-                path.as_ref().display()
-            );
+            log::debug!("write skipped (node missing): {}", path.as_ref().display());
         } else {
             log::warn!("Failed to write to {}: {}.", path.as_ref().display(), e);
         }
@@ -591,10 +588,12 @@ pub fn default_power_max_w() -> f32 {
     12.0
 }
 
-/// 电池读数单位校准默认值（毫单位 → V/A/W）：meta.yaml `unit_divisor` 与遥测层共用
-pub const DEFAULT_UNIT_DIVISOR: f32 = 1000.0;
+/// 电池读数单位校准默认值（**标准 Android ABI 口径：µV / µA**）：节点原始值 ÷ 该值 = V / A。
+/// 全链口径：**divisor 除完就是 V / A，batt_power_w 按安培 × 伏特得瓦**，读取层不做换算。
+/// OPlus 私有节点（bcc_parms）报 mV / mA，需填 1000——安装脚本检测到该节点时会自动写入。
+pub const DEFAULT_UNIT_DIVISOR: f32 = 1_000_000.0;
 
-/// Serde 默认值辅助函数：单位校准除数（meta.yaml 的 `unit_divisor` 默认 1000）
+/// Serde 默认值辅助函数：单位校准除数（meta.yaml 的 `unit_divisor` 缺省即 [`DEFAULT_UNIT_DIVISOR`]）
 pub fn default_unit_divisor() -> f32 {
     DEFAULT_UNIT_DIVISOR
 }

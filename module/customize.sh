@@ -213,8 +213,10 @@ detect_volume_key() {
 #      目录；都拿不到就打印说明跳过，不去猜别的机型文件；
 #   2) OPlus 私有节点 bcc_parms 读得到内容 → `oplus_chg: false` 改 true，并按第 12 个
 #      字段（0 基下标 11）判双电芯 → `oplus_dual_cell: false` 改 true；
-#   3) 读不到私有节点（回退标准节点）→ 按标准节点电压原始值的位数算校准倍数，
-#      写 `voltage_divisor` / `current_divisor`（两者同值）。
+#   3) 两条路都走同一个入口 `apply_divisor_from_raw` 写校准倍数：按节点**电压原始值的
+#      位数**推算 `voltage_divisor` / `current_divisor`（两者同值）——标准节点取
+#      voltage_now、私有节点取 bcc_parms 下标 6（电芯0电压）。模板缺省 1000000 是标准
+#      ABI 的 µV/µA 口径；私有节点通常报 mV/mA → 推算出 1000，不硬编码。
 # 改的是 $MODPATH（= modules_update 暂存）里那一份：完整安装由安装器落地、热更新由
 # 下面的 cp -r 覆盖到 live 目录——两条路拿到的都是这份结果（所以只改一次）。
 # 只在用户选择「不保留配置」时调用（见 [config-keep]）——保留时那份 meta.yaml 是用户
@@ -244,6 +246,38 @@ locate_meta_file() {
     fi
 }
 
+# 校准倍数统一入口：按**电压原始值的位数**推算除数并写入两个 divisor。
+# 原始值有 n 位 → 除数 = 1 后跟 n-1 个 0（4382 → 1000 = 4.382V；4382000 → 1000000
+# = 4.382V），电流套用同一个数——同一节点的电压/电流单位一致。首位必须是 3 或 4
+# （电池 3~4.5V），否则不猜：量级填错会让功率整条曲线失真，宁可留模板缺省值让用户
+# 在 WebUI 里改。两条路共用（标准节点取 voltage_now、私有节点取 bcc_parms 下标 6），
+# 口径自然一致，也不必对私有节点的 mV/mA 硬编码。返回 1 = 没写。
+apply_divisor_from_raw() {
+    local meta="$1"
+    local raw
+    raw=$(printf '%s' "$2" | tr -d ' \t\r\n-')
+    case "$raw" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    case "$raw" in
+        3*|4*) ;;
+        *) return 1 ;;
+    esac
+
+    local len=${#raw}
+    local div="1"
+    local i=1
+    while [ "$i" -lt "$len" ]; do
+        div="${div}0"
+        i=$((i + 1))
+    done
+    $SED_CMD -i "s/^voltage_divisor: .*/voltage_divisor: $div/" "$meta"
+    $SED_CMD -i "s/^current_divisor: .*/current_divisor: $div/" "$meta"
+    ui_print "$MSG_VOLT_APPLY"
+    ui_print "raw=$raw -> divisor=$div"
+    return 0
+}
+
 # 私有节点可用 → 开 oplus_chg / oplus_dual_cell；返回 1 表示「没有私有节点」，
 # 调用方接着走标准节点校准。
 apply_oplus_switches() {
@@ -261,10 +295,17 @@ apply_oplus_switches() {
         $SED_CMD -i "s/^oplus_chg: false/oplus_chg: true/" "$meta"
         ui_print "$MSG_OPLUS_ON"
     fi
-    # 双电芯 = 第 12 个字段（0 基下标 11）存在且为正数，与 daemon read_oplus_bcc 同口径。
-    # **不能只 `cut -d',' -f 12` 判非空**：字段不足 12 个时 cut 会把整行原样输出（无
-    # 分隔符的行默认透传），单电芯机型会被误判成双电芯——先数逗号确认字段数够。
+    # 字段数（逗号个数 + 1）先算一次：**cut 在字段不足时会把整行原样透传**（无分隔符
+    # 的行默认输出整行），不先数逗号就会拿错值——下面两处都要用。
     local commas=$(printf '%s' "$bcc" | tr -cd ',')
+    # 校准倍数：与标准节点路径同一个入口，原始值改取私有节点的电芯0电压（下标 6 =
+    # 第 7 项，故需 ≥6 个逗号）。该节点通常报 mV/mA → 推算出 1000；万一某机型报
+    # µV/µA 也能自动算对，不必硬编码。推算不出来就不写——此时 daemon 也用不了该
+    # 节点、会回退标准节点，而模板缺省的 1000000 正是标准节点口径，正好对得上。
+    if [ ${#commas} -ge 6 ]; then
+        apply_divisor_from_raw "$meta" "$(printf '%s' "$bcc" | cut -d ',' -f 7)"
+    fi
+    # 双电芯 = 第 12 个字段（0 基下标 11）存在且为正数，与 daemon read_oplus_bcc 同口径。
     local f12=""
     if [ ${#commas} -ge 11 ]; then
         f12=$(printf '%s' "$bcc" | cut -d ',' -f 12 | tr -d ' \t\r\n')
@@ -281,10 +322,7 @@ apply_oplus_switches() {
     return 0
 }
 
-# 没有私有节点 → 走标准 power_supply 节点。电压原始值有几位就除以「1 后面跟 位数-1
-# 个 0」（4382 → 1000 = 4.382V；4382000 → 1000000 = 4.382V），电流套用同一个数——
-# 同一节点的电压/电流单位一致。首位必须是 3 或 4（电池 3~4.5V），否则不猜：量级填错
-# 会让功率整条曲线失真，宁可留默认值让用户在 WebUI 里改。
+# 没有私有节点 → 走标准 power_supply 节点：取 voltage_now 交给统一入口推算。
 apply_standard_divisor() {
     local meta="$1"
     ui_print "$MSG_VOLT_CHECK"
@@ -292,26 +330,7 @@ apply_standard_divisor() {
     if [ -f "$STD_VOLT" ]; then
         raw=$(cat "$STD_VOLT" 2>/dev/null)
     fi
-    raw=$(printf '%s' "$raw" | tr -d ' \t\r\n-')
-    case "$raw" in
-        ''|*[!0-9]*) ui_print "$MSG_VOLT_FAIL"; return 0 ;;
-    esac
-    case "$raw" in
-        3*|4*) ;;
-        *) ui_print "$MSG_VOLT_FAIL"; return 0 ;;
-    esac
-
-    local len=${#raw}
-    local div="1"
-    local i=1
-    while [ "$i" -lt "$len" ]; do
-        div="${div}0"
-        i=$((i + 1))
-    done
-    $SED_CMD -i "s/^voltage_divisor: .*/voltage_divisor: $div/" "$meta"
-    $SED_CMD -i "s/^current_divisor: .*/current_divisor: $div/" "$meta"
-    ui_print "$MSG_VOLT_APPLY"
-    ui_print "voltage_now=$raw -> divisor=$div"
+    apply_divisor_from_raw "$meta" "$raw" || ui_print "$MSG_VOLT_FAIL"
 }
 
 apply_battery_defaults() {

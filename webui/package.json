@@ -4,7 +4,9 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "predev": "node scripts/fetch-fonts.mjs",
     "dev": "vite",
+    "prebuild": "node scripts/fetch-fonts.mjs",
     "build": "vite build",
     "preview": "vite preview",
     "type-check": "svelte-check --tsconfig ./tsconfig.json",
@@ -22,6 +24,7 @@
     "@types/node": "^22.20.2",
     "svelte": "^5.57.0",
     "svelte-check": "^4.7.6",
+    "subset-font": "^2.3.0",
     "typescript": "^6.0.3",
     "vite": "^8.3.0",
     "vitest": "^5.0.0"

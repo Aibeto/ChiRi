@@ -227,7 +227,7 @@ export function validateFieldValue(
       const n = Number(value)
       return Number.isFinite(n) && n > 0 && n <= 1e9
         ? null
-        : '校准值必须是大于 0 的数字（默认 1000）'
+        : '校准值必须是大于 0 的数字（缺省 1000000；OPlus 私有节点由安装脚本写成 1000）'
     }
     case 'dev_record':
     case 'fas_enabled':

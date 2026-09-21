@@ -2,6 +2,9 @@
 /target
 xtask/target
 yumi-ebpf/target
+# 根目录 npm init 误生成，刻意忽略不提交（webui/package.json 已跟踪，不受影响）
+/package.json
+/package-lock.json
 
 # IDE
 # .idea/
@@ -12,6 +15,7 @@ yumi-ebpf/target
 
 # Rust
 *.rs.bk
+node_modules/
 
 # AI tooling
 .reasonix/
@@ -34,6 +38,7 @@ logd/
 .trae/specs/
 # .codebuddy/memory/
 .codebuddy/docs/
+.codebuddy/teams/
 .trae-html-share-packages/
 .workbuddy/docs
 .codebuddy/plans
@@ -44,3 +49,38 @@ LittleYouran_CTS_3/
 
 # devimp
 devimpbin/
+
+# WebUI（原 webui/.gitignore 合并于此，2026-09-22）
+webui/logs
+webui/dist
+webui/dist-ssr
+webui/coverage
+webui/*.local
+webui/npm-debug.log*
+webui/yarn-debug.log*
+webui/yarn-error.log*
+webui/pnpm-debug.log*
+webui/lerna-debug.log*
+webui/__screenshots__/
+webui/*.timestamp-*-*.mjs
+webui/*.tsbuildinfo
+webui/.eslintcache
+webui/.vscode/*
+!webui/.vscode/extensions.json
+webui/.idea
+webui/*.suo
+webui/*.ntvs*
+webui/*.njsproj
+webui/*.sln
+webui/*.sw?
+# 构建期拉取的字体（见 webui/scripts/fetch-fonts.mjs），二进制不入库
+webui/src/assets/fonts/poppins-*.woff2
+webui/src/assets/fonts/noto-sans-sc-*.woff2
+# 中文子集的字表哈希（缓存键：字表一变就重裁）
+webui/src/assets/fonts/.subset-charset
+# tmp→rename 中途残留（见脚本 save()）
+webui/src/assets/fonts/*.tmp
+
+# Magisk 模块打包产物（原 module/.gitignore 合并于此）
+module/webroot/
+module/core/bin/chiri

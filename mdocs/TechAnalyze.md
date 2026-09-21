@@ -2012,8 +2012,8 @@ i18n/en.ftl
 | `oplus_dual_cell`   | false  | 双电芯                                    |
 | `voltage_double`    | false  | 电压倍率                                  |
 | `current_double`    | false  | 电流倍率                                  |
-| `voltage_divisor`   | 1000   | 电压除数                                  |
-| `current_divisor`   | 1000   | 电流除数                                  |
+| `voltage_divisor`   | 1000000 | 电压除数（标准 ABI µV；OPlus 私有节点由安装脚本写 1000） |
+| `current_divisor`   | 1000000 | 电流除数（标准 ABI µA；OPlus 私有节点由安装脚本写 1000） |
 | `nofix`             | false  | 跳过覆盖外部文件                          |
 
 `AffinityConfig` 默认值：

@@ -30,6 +30,9 @@ fn apply_meta_overrides(meta: &mut Meta, o: &crate::common::ExternalMetaOverride
     if let Some(v) = o.thread_bind {
         meta.thread_bind = v;
     }
+    if let Some(v) = o.powerbase_enabled {
+        meta.powerbase_enabled = v;
+    }
     if let Some(v) = o.power_avg {
         meta.power_avg = v;
     }
@@ -139,13 +142,13 @@ pub struct Meta {
     #[serde(default, alias = "CurrentDouble")]
     pub current_double: bool,
 
-    /// 电压校准除数（`voltage_divisor`，默认 1000，须 > 0）：节点原始值 ÷ 该值 = V
-    /// （标准节点 µV 填 1000000，私有节点 mV 填 1000；代码里没有内置换算）
+    /// 电压校准除数（默认 1000000，须 > 0）：节点原始值 ÷ 该值 = V，读取层不做换算。
+    /// 缺省 1000000 = 标准 Android ABI µV 口径；OPlus 私有节点报 mV，安装脚本会写入 1000
     #[serde(default = "crate::utils::default_unit_divisor", alias = "VoltageDivisor")]
     pub voltage_divisor: f32,
 
-    /// 电流校准除数（`current_divisor`，默认 1000，须 > 0）：节点原始值 ÷ 该值 = mA
-    /// （标准节点 µA 填 1000，私有节点 mA 填 1）
+    /// 电流校准除数（默认 1000000，须 > 0）：节点原始值 ÷ 该值 = **安培**（口径同电压）。
+    /// batt_power_w 按安培 × 伏特得瓦——口径必须与本注释一致。
     #[serde(default = "crate::utils::default_unit_divisor", alias = "CurrentDivisor")]
     pub current_divisor: f32,
 
