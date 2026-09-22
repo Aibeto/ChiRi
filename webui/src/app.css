@@ -5,9 +5,9 @@
  * 中文      → 'ChiRi Sans CJK'（Noto Sans SC / 思源黑体，人文主义无衬线，SIL OFL 1.1）；
  * 等宽      → 'ChiRi Mono'（JetBrains Mono 拉丁子集，SIL OFL 1.1）——遥测数值、日志、
  *             路径都走等宽栈，Android 自带等宽各家不一，内置后数字对齐与字形稳定。
- * 前两份的二进制都不入库，构建期由 scripts/fetch-fonts.mjs 从 jsdelivr 拉取
- * （挂 npm 的 predev/prebuild），许可正文随仓库同目录：
- * LICENSE-OFL-poppins.txt / LICENSE-OFL-noto-sans-sc.txt。
+ * 三份许可正文都随仓库同目录：LICENSE-OFL-poppins.txt / LICENSE-OFL-noto-sans-sc.txt /
+ * LICENSE-OFL-jetbrains-mono.txt。前两份的二进制不入库，构建期由 scripts/fetch-fonts.mjs
+ * 从 jsdelivr 拉取（挂 npm 的 predev/prebuild），等宽那份已入库。
  * 中文那份已按仓库实际用字裁到 CJK 码位、不含拉丁字形，因此拉丁自然落到 Poppins、
  * 中文落到本字体，互不干扰，也就不需要 unicode-range（范围声明过宽会在缺字时出豆腐块）。
  * 衬线已按用户要求（2026-09-18「禁止使用衬线字体」）停用：--ak-font-serif 保留 token、
@@ -91,10 +91,13 @@
   --ak-signal-disabled: #6b7280;
 
   /* 设备端字体栈：拉丁走内置 Poppins（几何主义）、中文走内置 Noto Sans SC（人文主义），
-   * 系统栈只作兜底；等宽走内置 ChiRi Mono（见 [fonts]），映射进 ak-ui 语义 token */
+   * 系统栈只作兜底；等宽走内置 ChiRi Mono（见 [fonts]），映射进 ak-ui 语义 token。
+   * 等宽栈里必须插 'ChiRi Sans CJK'：ChiRi Mono 只裁了拉丁，等宽组件（标签 / 字段名 /
+   * 进度表头 / 日志）里的中文没有它就会落到系统默认字体，与其他位置的中文不一致。 */
   --ak-font-sans: 'ChiRi Sans', 'ChiRi Sans CJK', system-ui, -apple-system, 'PingFang SC',
     'Noto Sans SC', 'Source Han Sans SC', Roboto, 'Helvetica Neue', Arial, sans-serif;
-  --ak-font-mono: 'ChiRi Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  --ak-font-mono: 'ChiRi Mono', 'ChiRi Sans CJK', ui-monospace, SFMono-Regular, Menlo, Monaco,
+    Consolas, monospace;
   --ak-font-serif: 'Noto Serif SC', serif;
   /* 用户要求「禁止使用衬线字体」：命令字/标题统一走无衬线栈；原先内置的衬线子集已
    * 随之移除，--ak-font-serif 保留 token 回落系统衬线，未来需要时再按 [fonts] 先例内置 */
@@ -275,10 +278,47 @@ label {
 }
 
 /* [ak-adapt]
- * ak-ui 原语有两类需要修正：① 表单类硬编码浅色（标签深字、输入框浅底），深色下不可读；
- * ② 表面类（card/dialog/gauge）自带浅色或近似本主题的底色，层级叠不开。
- * 这里只在 [data-ak-ui] 作用域内把颜色/表面映射回语义 token，不动 :root，也不影响
+ * ak-ui 原语有三类需要修正：① 表单类硬编码浅色（标签深字、输入框浅底），深色下不可读；
+ * ② 表面类（card/dialog/gauge）自带浅色或近似本主题的底色，层级叠不开；③ 字体族被直接
+ * 写死在组件规则里（见下面两条），绕开 --ak-font-* token。
+ * 这里只在 [data-ak-ui] 作用域内把颜色/表面/字体映射回语义 token，不动 :root，也不影响
  * 其他使用者；几何、间距、交互反馈、状态一律仍来自 ak-ui。 */
+
+/* ③ 字体族收回：官方 dist 把 font-family 硬编码进 78 处组件规则（Noto Sans SC, Roboto,
+ * Arial, sans-serif / Noto Serif SC, serif / SFMono-Regular, Menlo, …），token 在这
+ * 些组件里完全失效——内置的 Poppins / 思源黑体用不上，拉丁落到 Roboto、中文落到系统
+ * 字体。按官方自己的用法分两组收回：正文类走 --ak-font-sans，等宽类（标签 / 字段名 /
+ * 提示 / 进度表头 / 眉头字 / 分段项）走 --ak-font-mono。
+ * 选择器一律带 [data-ak-ui] 前缀提升特异性，压过官方的单类规则（与本文其余覆盖一致）。 */
+[data-ak-ui] :is(
+  .ak-button,
+  .ak-button__label,
+  .ak-dialog,
+  .ak-dialog__title,
+  .ak-dialog__body,
+  .ak-field,
+  .ak-input,
+  .ak-select,
+  .ak-textarea,
+  .ak-choice,
+  .ak-notice__title,
+  .ak-notice__message,
+  .ak-status__detail
+) {
+  font-family: var(--ak-font-sans);
+}
+
+[data-ak-ui] :is(
+  .ak-label,
+  .ak-field__hint,
+  .ak-progress__header,
+  .ak-tag,
+  .ak-dialog__eyebrow,
+  .ak-segmented__item
+) {
+  font-family: var(--ak-font-mono);
+}
+
 [data-ak-ui] .ak-field,
 [data-ak-ui] .ak-choice {
   color: var(--ak-text-primary);

@@ -2393,9 +2393,14 @@ pub fn start_scheduler_thread(
                             // （AtomicTouchState）是它的私有字段，这里拿不到；等触摸事件接上
                             // 共享标志后再传，否则「触摸时允许突破功率上限」这条不会生效。
                             let tm_now = crate::monitor::telemetry::telemetry();
-                            let power_w = match tm_now.batt_current_ma() {
-                                Some(i) if i > 0.0 => tm_now.batt_power_w(),
-                                _ => None,
+                            // 放电判定**不能看电流正负**：厂商节点方向不一，部分设备
+                            // 充放都是正数——与 PowerAVG 取样同口径，读 status 字符串。
+                            // 非放电（charging/full/not_charging/未知）传 None = 不做
+                            // 功耗限制：充电时功率由充电链路决定，压频率没有意义
+                            let power_w = if read_battery_charge_state() == "discharging" {
+                                tm_now.batt_power_w()
+                            } else {
+                                None
                             };
                             power_base.on_load_update(&core_utils, power_w, false);
                         } else if cpu_governor.is_active() {

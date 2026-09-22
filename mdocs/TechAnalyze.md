@@ -1997,24 +1997,24 @@ i18n/en.ftl
 
 `Meta` 字段与默认值：
 
-| 字段                | 默认   | 说明                                      |
-| ------------------- | ------ | ----------------------------------------- |
-| `loglevel`          | "INFO" | OFF / ERROR / WARN / INFO / DEBUG / TRACE |
-| `language`          | "en"   | en / zh                                   |
-| `dev_record`        | false  | 开发记录开关                              |
-| `fas_enabled`       | true   | FAS 总闸                                  |
-| `scenemode_enabled` | true   | 息屏场景模式总闸                          |
-| `thread_bind`       | true   | 线程绑定总闸                              |
-| `power_avg`         | false  | 功耗平均显示                              |
-| `power_max_w`       | 12     | 功耗仪表满量程                            |
-| `notify`            | true   | 系统通知                                  |
-| `oplus_chg`         | false  | OPlus 充电节点                            |
-| `oplus_dual_cell`   | false  | 双电芯                                    |
-| `voltage_double`    | false  | 电压倍率                                  |
-| `current_double`    | false  | 电流倍率                                  |
+| 字段                | 默认    | 说明                                                     |
+| ------------------- | ------- | -------------------------------------------------------- |
+| `loglevel`          | "INFO"  | OFF / ERROR / WARN / INFO / DEBUG / TRACE                |
+| `language`          | "en"    | en / zh                                                  |
+| `dev_record`        | false   | 开发记录开关                                             |
+| `fas_enabled`       | true    | FAS 总闸                                                 |
+| `scenemode_enabled` | true    | 息屏场景模式总闸                                         |
+| `thread_bind`       | true    | 线程绑定总闸                                             |
+| `power_avg`         | false   | 功耗平均显示                                             |
+| `power_max_w`       | 12      | 功耗仪表满量程                                           |
+| `notify`            | true    | 系统通知                                                 |
+| `oplus_chg`         | false   | OPlus 充电节点                                           |
+| `oplus_dual_cell`   | false   | 双电芯                                                   |
+| `voltage_double`    | false   | 电压倍率                                                 |
+| `current_double`    | false   | 电流倍率                                                 |
 | `voltage_divisor`   | 1000000 | 电压除数（标准 ABI µV；OPlus 私有节点由安装脚本写 1000） |
 | `current_divisor`   | 1000000 | 电流除数（标准 ABI µA；OPlus 私有节点由安装脚本写 1000） |
-| `nofix`             | false  | 跳过覆盖外部文件                          |
+| `nofix`             | false   | 跳过覆盖外部文件                                         |
 
 `AffinityConfig` 默认值：
 
@@ -3203,12 +3203,16 @@ WebUI 侧的路径注入防护（`isSafeConfigRel` 拒绝绝对路径、`..`、�
 
 ChiRi 自 imacte/yumi fork，保留了部分 yumi 的核心代码作为回退兜底。线程调整部分参考了 AppOptR。
 
-字体资源另有许可：
+字体资源另有许可（均为 SIL Open Font License 1.1）：
 
 - `analyze/fonts/LICENSE-OFL.txt`（Noto Sans SC）
 - `analyze/fonts/LICENSE-OFL-jetbrains-mono.txt`（JetBrains Mono）
+- `webui/src/assets/fonts/LICENSE-OFL-poppins.txt`（Poppins，拉丁/数字）
+- `webui/src/assets/fonts/LICENSE-OFL-noto-sans-sc.txt`（Noto Sans SC，中文）
+- `webui/src/assets/fonts/LICENSE-OFL-jetbrains-mono.txt`（JetBrains Mono，等宽）
 
-两者都是 SIL Open Font License。
+WebUI 的三份许可正文随仓库入库；Poppins / Noto Sans SC 的二进制不入库（构建期
+`webui/scripts/fetch-fonts.mjs` 从 jsdelivr 拉取并子集化），JetBrains Mono 已入库。
 
 ### 12.6 覆盖范围与未覆盖的内容
 

@@ -124,7 +124,7 @@
 - **i18n 双语**：zh 是唯一语义源，改文案两边同步；`i18n.test.ts` 不校验语义。风格：无句尾句号、不用破折号、避免 AI 腔。信号色成套。
 - **交互定值**：日志/快照限高 60vh 子滚动+自动跟随底部（滑离即退出，点「回到底部」才恢复）；状态码/日志页每秒自刷新+失败 toast 节流；`.u-stack` 必须 `grid-template-columns: minmax(0,1fr)`；关闭用 `ksu.exit`。
 - 读取文件前必须 `[ -f ]` 守卫（`2>/dev/null` 盖不住重定向错误）。导出 history：`pack.sh` + `/sdcard/Download`（系统目录不要 mkdir），前端轮询产物；压缩用 gzip（xz 太慢）。
-- **字体（2026-09-22）**：构建期 `scripts/fetch-fonts.mjs`（predev/prebuild 钩子）从 jsdelivr 拉 Poppins/Noto Sans SC 并按仓库用字子集化，二进制不入库；字表哈希戳 `.subset-charset`；JetBrains Mono 已入库。
+- **字体（2026-09-22）**：构建期 `scripts/fetch-fonts.mjs`（predev/prebuild 钩子）从 jsdelivr 拉 Poppins/Noto Sans SC 并按仓库用字子集化，二进制不入库；字表哈希戳 `.subset-charset`；JetBrains Mono 已入库。**ak-ui 的 dist 把 `font-family` 硬编码进 78 处组件规则、绕开 `--ak-font-*` token**（拉丁落 Roboto、中文落系统字体），故 `app.css [ak-adapt]` 用 `[data-ak-ui] :is(...)` 按「正文 / 等宽」两组收回字体族；`--ak-font-mono` 在 ChiRi Mono 后插 `'ChiRi Sans CJK'`（等宽组件里也有中文）。新用官方类若字体不对，先查这两组是否漏了它。
 
 ## 构建与仓库约定
 

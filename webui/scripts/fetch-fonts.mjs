@@ -15,7 +15,8 @@
 //   zh.ftl 日志、rules.yaml 与 config/**/*.yaml 里的中文）。字表外的生僻字回落系统
 //   CJK，而设备系统 CJK 同为思源黑体，观感无缝。
 // 产物写入 src/assets/fonts/（已被 .gitignore 忽略）；许可正文随仓库入库：
-//   LICENSE-OFL-poppins.txt / LICENSE-OFL-noto-sans-sc.txt
+//   LICENSE-OFL-poppins.txt / LICENSE-OFL-noto-sans-sc.txt / LICENSE-OFL-jetbrains-mono.txt
+//   （等宽那份 mono-*.woff2 已入库，不经本脚本）
 import { readFileSync, writeFileSync, readdirSync, existsSync, statSync, mkdirSync, renameSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { join, dirname } from 'node:path'

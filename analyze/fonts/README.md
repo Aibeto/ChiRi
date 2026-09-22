@@ -18,7 +18,7 @@
 
 整份 Noto Sans SC 简中子集**单字重就有 1.14MB**，两个字重 2.3MB。按本页实际用字
 （从 `index.html` 里抽出的全部字符 + 可打印 ASCII）裁到 441 字后，每个字重只剩约 65KB。
-这与 `webui/src/assets/fonts/` 的先例一致（那里是 487 字、156KB 的衬线子集）。
+这与 `webui/src/assets/fonts/` 的先例一致（那里也按仓库用字裁中文子集，约 145KB/字重）。
 
 ## 重新生成子集
 
