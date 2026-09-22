@@ -21,6 +21,10 @@ fn apply_meta_overrides(meta: &mut Meta, o: &crate::common::ExternalMetaOverride
     if let Some(v) = o.dev_record {
         meta.dev_record = v;
     }
+    // devimp_top_n 无 meta.yaml 模板载体（模板刻意不写、走代码缺省）：「没写」必须
+    // 回到代码缺省 10——Meta 的 derive Default 给的是 0，不能沿用（0/超限最终由
+    // Meta::normalize 钳到 1..=64，这里只保证「缺省 = 10」的口径）
+    meta.devimp_top_n = o.devimp_top_n.unwrap_or_else(d_devimp_top_n);
     if let Some(v) = o.fas_enabled {
         meta.fas_enabled = v;
     }
@@ -74,11 +78,18 @@ pub struct Meta {
     #[serde(default = "default_language", alias = "Language")]
     pub language: String,
 
-    /// 开发记录开关：true 时向 devimp/devimp_<启动时间戳>.log 写入按核调度
-    /// 诊断日志（tick/snap/place/aff/core/event），供离线分析改善调度。
+    /// 开发记录开关：true 时向 devimp/ 写双诊断文件——main_<前台包名>_<MMDD-HHmmss>.log
+    /// 主诊断（tick/snap/event 行）与 aff_<MMDD-HHmmss>.log 线程流（@A 动作帧 +
+    /// @S 每秒快照帧），供离线分析改善调度。
     /// meta 段中允许外部修改的字段之一（WebUI 开关，热重载生效）。
     #[serde(default, alias = "DevRecord")]
     pub dev_record: bool,
+
+    /// 快照 top-N 进程数（meta.yaml `devimp_top_n`，缺省 10，0 不合法会被 clamp）：
+    /// aff_* 的 `@S` 每秒快照帧按 util 降序落盘的进程行数；前台树与被管进程不受
+    /// N 截断、恒定落盘。`Meta::normalize` 钳到 1..=64（0 → 1）。
+    #[serde(default = "d_devimp_top_n", alias = "DevimpTopN")]
+    pub devimp_top_n: usize,
 
     /// FAS 帧感知调度总开关：关闭后 fas_available() 恒为 false（determine_mode
     /// 不再产生 fas 模式、FAS 监测线程不启动、运行中实例立即注销）。
@@ -92,11 +103,10 @@ pub struct Meta {
     #[serde(default = "crate::utils::default_true", alias = "ScenemodeEnabled")]
     pub scenemode_enabled: bool,
 
-    /// 线程摆放总开关（meta.yaml `thread_bind`）：false = 关闭线程功能，CPU 亲和/绑核
-    /// （cpuset / uclamp / sched_setaffinity）与 core_ctl 核心在线接管全部交还系统，
-    /// 也就是**把所有绑定分配改成全核心**。
-    /// 与 feature.yaml 的 `Affinity.enabled` / `CoreCtl.enabled` 取「与」——机型可按硬件
-    /// 禁用、用户可按意愿禁用；合并在 Config::load 完成，下游只看那两个子开关。
+    /// 线程摆放总闸（meta.yaml `thread_bind`）：**实验室 frozen 专用机制**——用户侧
+    /// 开关已移除（线程功能默认常开），仅 frozen 实验室模式会把它写为 false 以交还
+    /// 线程亲和/绑核与 core_ctl。与 feature.yaml 的 `Affinity.enabled` / `CoreCtl.enabled`
+    /// 取「与」，合并在 Config::load 完成，下游只看那两个子开关。
     #[serde(default = "crate::utils::default_true", alias = "ThreadBind")]
     pub thread_bind: bool,
 
@@ -171,6 +181,19 @@ fn default_loglevel() -> String {
 }
 fn default_language() -> String {
     "en".to_string()
+}
+/// 快照 top-N 进程数缺省值（`devimp_top_n`）：10 个进程 / 每秒 @S 帧
+fn d_devimp_top_n() -> usize {
+    10
+}
+
+impl Meta {
+    /// 校验并规范化 meta 段（Config::load 各段 normalize 统一口径）：
+    /// `devimp_top_n` 钳到 1..=64——0（未配置的 derive 默认/手写 0）与超限值
+    /// 都不合法，clamp 后使用（0 → 1、>64 → 64），不判整个文件非法。
+    pub fn normalize(&mut self) {
+        self.devimp_top_n = self.devimp_top_n.clamp(1, 64);
+    }
 }
 
 // [clg_config]
@@ -1241,10 +1264,15 @@ impl Config {
         // min_cpus/online 快照）——即「把绑定分配全部改成全核心」。热重载后由
         // scheduler_ipc 的 config_dirty 分支调 apply_affinity_and_corectl 落地，
         // 周期块（2s）也会兜一次。
+        // thread_bind 是实验室 frozen 专用闸（用户开关已移除、默认 true）：frozen 期间
+        // 为 false，交还线程亲和/绑核与 core_ctl；其余场合恒 true 等于不干预。
+        // 热重载后由 scheduler_ipc 的 config_dirty 分支调 apply_affinity_and_corectl
+        // 落地，周期块（2s）也会兜一次。
         config.affinity.enabled &= config.meta.thread_bind;
         config.core_ctl.enabled &= config.meta.thread_bind;
         config.merge_tuned_profiles();
         config.merge_scenemode();
+        config.meta.normalize();
         config.thermal.normalize();
         config.affinity.normalize();
         // PowerBase 参数同样在加载处钳制（各段统一口径，别等 init 时才钳）

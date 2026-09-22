@@ -118,7 +118,10 @@ impl FasManager {
         controller.set_game(pid, pkg);
         controller.set_temperature(self.last_temp);
         controller.set_temp_threshold(rules.core_temp_threshold);
-        self.instance = Some(FasInstance { package: pkg.to_string(), controller });
+        self.instance = Some(FasInstance {
+            package: pkg.to_string(),
+            controller,
+        });
         self.exit_deadline = None;
         self.fas_active_flag.store(true, Ordering::Release);
         match switch_from.as_deref() {
@@ -137,14 +140,14 @@ impl FasManager {
                 )
             ),
         }
-        crate::logger::devimp_event("fas", pkg, "activate");
+        crate::logger::main_event("fas", pkg, "activate");
         true
     }
 
     /// C2：立即去激活（reset_all_freqs + clear_game + governor 按快照恢复），并清零
     /// fas_active 共享标志（fps_monitor 摘除 uprobe 回到零开销待机）。
     /// 无活跃实例时为 no-op。延迟退出请求一并取消。
-    /// info 打点 scheduler-fas-deactivate（pkg）+ devimp event("fas", pkg, "deactivate")。
+    /// info 打点 scheduler-fas-deactivate（pkg）+ main_event("fas", pkg, "deactivate")。
     // [deactivate]
     pub fn deactivate_active(&mut self) {
         let Some(mut inst) = self.instance.take() else {
@@ -165,7 +168,7 @@ impl FasManager {
                 &fluent_args!("pkg" => pkg.as_str())
             )
         );
-        crate::logger::devimp_event("fas", &pkg, "deactivate");
+        crate::logger::main_event("fas", &pkg, "deactivate");
     }
 
     /// C5：收尾/失败路径（panic 自愈、DOWN、fas_enabled=false 热重载）——立即全退。
@@ -200,8 +203,7 @@ impl FasManager {
     /// （PackageSwitch 同包去重 / 1s 巡检同包 no-op），必须由调用方显式续期，
     /// 否则到期会把正在前台的游戏拆掉重建（局内卡顿）。
     pub fn renew_if_same_pkg(&mut self, pkg: &str) {
-        if self.exit_deadline.is_some()
-            && self.instance.as_ref().is_some_and(|i| i.package == pkg)
+        if self.exit_deadline.is_some() && self.instance.as_ref().is_some_and(|i| i.package == pkg)
         {
             self.exit_deadline = None;
         }

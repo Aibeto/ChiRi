@@ -1,20 +1,25 @@
-# 8475/feature.yaml: [function] [io-settings] [cpu-idle] [affinity] [corectl] [thermal] [reduce] [default] [boost]
+# 8475/feature.yaml: [function] [io-settings] [cpu-idle] [affinity] [corectl] [thermal] [sched]
+#                    [reduce] [default] [boost] [vector] [powerbase]
+# 2026-09-22 合并：`config/8745/`（目录名误写，5e94ee1 引入、SoC 检测永不命中）里更新的
+# 调优（reduce/default/boost 全套、[vector]、[powerbase]、function/IO/cpu-idle 调整）按
+# 修改时间取新并入；affinity/corectl/thermal/sched 为 8475 独有段保留；touch_boost 三档
+# 为 8475 原值（8745 版 default 注释引用了 touch_boost 却漏写参数，本合并补回）。
 
 # [function]
 function:
-  CpuIdleScalingGovernor: true
+  CpuIdleScalingGovernor: false
   IOOptimization: true
 
 # [io-settings]
 IO_Settings:
-  Scheduler: ""
-  read_ahead_kb: "512"
-  nomerges: "1"
+  Scheduler: "none"
+  read_ahead_kb: "128"
+  nomerges: "2"
   iostats: "0"
 
 # [cpu-idle]
 CpuIdle:
-  current_governor: "menu"
+  current_governor: ""
 
 scene_mode_delay_secs: 300
 
@@ -63,19 +68,21 @@ Sched:
     sched_nr_migrate: "27"
 
 # [reduce]
+# 省电模式（CLG 家族）：较 default 升频更保守（up 0.85>0.80）、降频更激进
+# （down 0.60>0.50、rate_limit 2），频率上限压到 0.70
 reduce:
   cpu_load_governor:
-    up_threshold: 0.90
-    down_threshold: 0.50
-    smoothing_up: 0.50
+    up_threshold: 0.85
+    down_threshold: 0.60
+    smoothing_up: 0.40
     util_smoothing: 0.5
     down_rate_limit_ticks: 2
     up_rate_limit_ticks: 2
-    headroom_factor: 1.05
-    headroom_ramp: 0.12
-    perf_floor: 0.05
-    perf_ceil: 0.60
-    perf_init: 0.20
+    headroom_factor: 1.10
+    headroom_ramp: 0.15
+    perf_floor: 0.10
+    perf_ceil: 0.70
+    perf_init: 0.30
     up_jump_threshold: 0.35
     slow_up_scale: 0.02
     down_fast_threshold: 0.10
@@ -86,49 +93,96 @@ reduce:
     touch_boost_tiers: 1
 
 # [default]
+# 均衡模式（CLG 家族）：默认档兼参考基线
 default:
   cpu_load_governor:
-    up_threshold: 0.78
-    down_threshold: 0.55
-    smoothing_up: 0.75
+    up_threshold: 0.80
+    down_threshold: 0.50
+    smoothing_up: 0.60
+    # 决策负载 EMA（1.0=关闭）：滤掉抖动负载的单 tick 摆动，抑制决策方向反复翻转
+    # 与 scaling_max_freq 高频改写（2026-09-22 8550 QQ 日志回放：反转降约五成）。
+    # 性能档 boost 保持 1.0 不开（响应优先）。
     util_smoothing: 0.5
-    down_rate_limit_ticks: 1
-    up_rate_limit_ticks: 1
-    headroom_factor: 1.05
-    headroom_ramp: 0.12
-    perf_floor: 0.05
-    # 2026-09-22：SoC 覆盖会盖掉根 feature.yaml，这里同步加日常天花板 0.80
-    # （原 1.0）。交互响应靠 touch_boost_ms 兜，别只降 ceil。
-    # 本机型暂无 per_cluster 实测数据，故不写覆盖（写了也无依据）。
+    down_rate_limit_ticks: 3
+    up_rate_limit_ticks: 2
+    headroom_factor: 1.25
+    headroom_ramp: 0.15
+    perf_floor: 0.15
+    # 2026-09-22 双机型实测调整：日常/均衡档原本没有天花板（1.0 = 与无限制等价），
+    # 尖峰一来就把上限顶到硬件最高（8550 实测：util 才 0.5 左右，cap p95 却是 100%）。
+    # 压到 0.80 省的是「频率高于负载所需」的那部分——视频场景按同一思路已实测降 26.5%。
+    # **交互响应由 touch_boost 兜**（下方 touch_boost_enabled/ms）：稳态降频、触摸即升，
+    # 切勿只降 perf_ceil 而不动 touch_boost。
     perf_ceil: 0.80
-    perf_init: 0.25
-    up_jump_threshold: 0.30
-    slow_up_scale: 0.03
-    down_fast_threshold: 0.25
-    spike_jump_threshold: 0.40
-    spike_decay: 0.25
+    perf_init: 0.50
+    up_jump_threshold: 0.35
+    slow_up_scale: 0.02
+    down_fast_threshold: 0.10
+    spike_jump_threshold: 0.35
+    spike_decay: 0.30
     touch_boost_enabled: true
     touch_boost_ms: 400
     touch_boost_tiers: 1
 
 # [boost]
+# 性能模式（CLG 家族）：较 default 升频更激进（up 0.65<0.80）、降频略消极
+# （down 0.40<0.50、rate_limit 5），headroom 1.40 给线程/核心更大余量
 boost:
   cpu_load_governor:
-    up_threshold: 0.55
+    up_threshold: 0.65
     down_threshold: 0.40
-    smoothing_up: 0.95
+    smoothing_up: 0.80
     down_rate_limit_ticks: 5
     up_rate_limit_ticks: 1
-    headroom_factor: 1.25
-    headroom_ramp: 0.12
-    perf_floor: 0.40
+    headroom_factor: 1.40
+    headroom_ramp: 0.15
+    perf_floor: 0.35
     perf_ceil: 1.0
     perf_init: 0.60
-    up_jump_threshold: 0.25
-    slow_up_scale: 0.05
-    down_fast_threshold: 0.05
-    spike_jump_threshold: 0.40
-    spike_decay: 0.20
+    up_jump_threshold: 0.35
+    slow_up_scale: 0.02
+    down_fast_threshold: 0.10
+    spike_jump_threshold: 0.35
+    spike_decay: 0.30
     touch_boost_enabled: true
     touch_boost_ms: 500
     touch_boost_tiers: 1
+
+# [vector]
+# 极速模式（rhine 家族，仅实验室）：全核最高频——运行时走 fast_lock 硬锁
+# （min=max=hw_max、governor 保持 schedutil），不读本段参数；本段仅为缺省值来源
+vector:
+  cpu_load_governor:
+    up_threshold: 0.01
+    down_threshold: 0.01
+    smoothing_up: 1.0
+    down_rate_limit_ticks: 10
+    up_rate_limit_ticks: 1
+    headroom_factor: 2.0
+    headroom_ramp: 0.15
+    perf_floor: 1.0
+    perf_ceil: 1.0
+    perf_init: 1.0
+    up_jump_threshold: 0.35
+    slow_up_scale: 0.02
+    down_fast_threshold: 0.10
+    spike_jump_threshold: 0.35
+    spike_decay: 0.30
+
+# [powerbase]
+# PowerBase（Stardust 家族）：以**功耗**为指标的调频器。开关在 meta.yaml
+# （`powerbase_enabled`，高级设置，默认关闭）；开启后接管原本由 CLG 接管的场合
+# （reduce/default/boost），FAS / 特调 / DOWN 停摆 / 实验室的启停判据一律不受影响。
+#   target_power_w      放电状态下的目标功耗（W）——各 SoC 在自己的 feature.yaml 覆盖
+#   up_headroom_below   功耗**低于**目标时的升频宽松度（>1 = 放宽）
+#   down_scale          降频激进度：目标性能乘以它（越小降得越狠；与功耗无关，恒生效）
+#   overload_cores_pct  功耗已达上限时仍允许升频的门槛：满占用（100%）核心占比 %
+#   overload_hold_ms    且需持续这么久才放行升频
+#   touch_break_ms      触摸事件时允许短暂突破功率上限的窗口
+powerbase:
+  target_power_w: 3.5
+  up_headroom_below: 1.15
+  down_scale: 0.5
+  overload_cores_pct: 50
+  overload_hold_ms: 3000
+  touch_break_ms: 400

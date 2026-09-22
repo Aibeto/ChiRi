@@ -138,6 +138,22 @@ function fakeStatusCsv(): string {
   return rows.join('\n') + '\n'
 }
 
+/** aff_ 线程流样例（2026-09-22 拆分）：3 行 @A 动作帧（含一条失败观测 e3）+ 一帧 @S
+ *  快照（帧头 ntop/nfg 计数与随后 p/t 行数严格一致）。帧格式见 docs/agents/02-convention.md。 */
+function fakeAffLog(): string {
+  return [
+    '# ts-column=local format_now',
+    '@A ts=0913-120001 act=pin pid=12345 tid=12361 pkg=com.tencent.tmgp.sgame comm=RenderThread dst=7 value=- result=ok reason=fg_pin',
+    '@A ts=0913-120002 act=pin pid=12345 tid=12408 pkg=com.tencent.tmgp.sgame comm=UnityGfxDeviceW dst=3 value=- result=e3 reason=home_overload',
+    '@A ts=0913-120003 act=uclamp pid=0 tid=0 pkg=- comm=- dst=/dev/cpuctl/top-app/cpu.uclamp.max value=85.00 result=ok reason=override',
+    '@S ts=0913-120004 ntop=2 nfg=1',
+    'p 1 12345 com.tencent.tmgp.sgame u=62 mask=ff home=7',
+    'p 2 2104 com.android.systemui u=18 mask=38 home=3',
+    't 12345 12361 RenderThread u=41 core=7 home=7 pin=1 uclamp=-1',
+    ''
+  ].join('\n')
+}
+
 function specialTunedExport(): string {
   const raw = FILES['src/chiri/special_tuned.yaml'] ?? ''
   return raw
@@ -205,8 +221,9 @@ function seed(): void {
   if (daemonRunning) put('logs/watchdog.pid', '12345\n')
   put('logs/daemon.log', fakeDaemonLog())
   if (isChiri) put('logs/status.csv', fakeStatusCsv())
-  put('devimp/devimp_com.tencent.tmgp.sgame_0913-120000.log', '# ts-column=local format_now\n')
-  put('logd/ziped_0913-120000.zip', 'PK\u0003\u0004mock')
+  put('devimp/main_com.tencent.tmgp.sgame_0913-120000.log', '# ts-column=local format_now\n')
+  put('devimp/aff_0913-120000.log', fakeAffLog())
+  put('logd/devimp_0913-120000.tar', 'mock')
 }
 
 // [exec]

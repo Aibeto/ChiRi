@@ -78,9 +78,10 @@ export function listLogd(): Promise<ReadResult<string[]>> {
 }
 
 /**
- * 删除历史归档：整目录删掉 logd/（历次重启的归档包）与 devimp/（诊断文件）。
- * 删目录比逐个删文件干净：devimp 由 daemon 启动时重建，logd 下次归档自动出现；
- * 当前会话的 logs/（daemon.log / status.csv）不在此列，不会被碰到。
+ * 删除历史归档：只删 logd/（历次重启的归档包，整目录删掉即可——下次归档自动重建）。
+ * devimp/ 不是历史归档：它是当前诊断写入现场（main_/aff_ 文件），调度启动归档时才
+ * 整体打包进 logd 并清空，在这里删它会毁掉进行中的诊断记录。当前会话的 logs/
+ * （daemon.log / status.csv）同样不在此列。
  */
 export async function clearArchives(): Promise<ReadResult<true>> {
   if (!isLive()) return absent<true>('unsupported-env')

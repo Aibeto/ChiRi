@@ -54,14 +54,14 @@ npm test             # vitest
   Contract / Babel / Frozen；中文只出现在各模式的 `.detail` 描述里。
 - **实验室接管**：`data/lab.ts::LAB_TAKEOVER` 列出各模式会写的 meta 开关（与 rhine-init.yaml
   同步，单测有刚性断言），配置页把被接管的开关**置灰不可切换**并在提示里点名原因。
-- **导出历史日志**（状态页底部）：设备上后台跑 tar（xz 不可用自动退 gzip），前端只轮询产物，
-  不阻塞界面。`/sdcard/Download/devimp_<MMDD-HHmmss>.tar.xz`；本次运行正在写的文件会被排除。
+- **导出历史日志**（状态页底部）：设备上后台跑 tar + gzip（设备无 gzip 时保留未压缩 tar），
+  前端只轮询产物，不阻塞界面。`/sdcard/Download/logd_<MMDD-HHmmss>.tar.gz`；本次运行正在写的文件会被排除。
 - **实验室锁定**：`/tmp/chiri-labs.lock`（回退 `/dev/chiri-labs.lock`，与守护进程同序探测）存在
   即表示本次开机后启用过，运行时关不掉——关闭按钮禁用并提示需重启设备。标记里的 `#` 行是守护
   进程留下的异常痕迹，配合 `labWarnings()` 的一致性检查（rhine.chr 非法 / 与锁定态不一致 /
   `rhine-back.chr` 缺失）在页面顶部出「建议立即重启」的警示条。
-- **平台差异**：`status.csv`、`devimp/`、`special_tuned.yaml`、`fas_whitelist.yaml` 仅 ChiRi 机型产生，
-  非 ChiRi 与「无法判定」在界面上是两种不同的表达。
+- **平台差异**：`status.csv`、`devimp/`（诊断双文件 `main_*` 决策 / `aff_*` 线程）、`special_tuned.yaml`、
+  `fas_whitelist.yaml` 仅 ChiRi 机型产生，非 ChiRi 与「无法判定」在界面上是两种不同的表达。
 - **日志一律取尾部窗口**（daemon.log 单文件 50MB、status.csv 8MB），禁止整文件读取。
 
 ## 无设备预览

@@ -23,7 +23,8 @@ describe('paths 安全校验', () => {
   })
 
   it('文件名校验不允许目录分隔', () => {
-    expect(isSafeFileName('devimp_a.b_0913-120000.log')).toBe(true)
+    expect(isSafeFileName('main_a.b_0913-120000.log')).toBe(true)
+    expect(isSafeFileName('aff_0913-120000.log')).toBe(true)
     expect(isSafeFileName('a/b')).toBe(false)
     expect(isSafeFileName('..')).toBe(false)
   })

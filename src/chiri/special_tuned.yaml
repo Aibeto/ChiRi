@@ -29,6 +29,11 @@ tv.danmaku.bili:playback:playback
 # 兜底：bilibili 家族（HD/国际版/概念版等，忽略大小写）
 re:(?i)(bilibili|danmaku\.bili):playback:playback
 
+# 椒盐音乐（本地播放器；2026-09-22 8550 实测 28min 连续长稳态媒体、2.24W：
+# little cap 66.2/u0.64 已贴负载，prime 26.9/u0.16 余量大——playback 贴负载收紧
+# 对它是纯收益；本地音乐无视频解码、GPU 占用低（12%），掉帧风险小）
+com.salt.music:playback:playback
+
 # daily 组已移除（2026-09-17 晚，按上机实测反馈）：不是所有程序都需要特调——
 # 桌面/聊天/资讯/工具属高频短交互，特调接管收益低、侵入高（实测这批应用在
 # daily 下的功耗与 CLG 基线相当，但它们对跟手性更敏感）。特调只保留长稳态

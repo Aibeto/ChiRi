@@ -36,7 +36,6 @@
   const devRecord = $derived(Boolean(value('dev_record', false)))
   const fasEnabled = $derived(Boolean(value('fas_enabled', true)))
   const scenemodeEnabled = $derived(Boolean(value('scenemode_enabled', true)))
-  const threadBind = $derived(Boolean(value('thread_bind', true)))
   const notifyOn = $derived(Boolean(value('notify', true)))
 
   /** 实验室接管的开关：置灰不可切换（守护进程正按实验室定义写它，手改也会被写回去） */
@@ -129,7 +128,6 @@
         <span class="ak-field__hint">{t('config.daemonLanguage.hint')}</span>
       </label>
 
-      <!-- 2026-09-17 副标题按需求注释：hint={t('config.devRecord.hint')} -->
       <ToggleField
         label={t('config.devRecord')}
         checked={devRecord}
@@ -154,15 +152,6 @@
         pending={app.draft.scenemode_enabled !== undefined}
         disabled={!app.metaValid || takeover.has('scenemode_enabled')}
         onchange={next => app.setDraft('scenemode_enabled', next)}
-      />
-
-      <ToggleField
-        label={t('config.threadBind')}
-        hint={hint('thread_bind', t('config.threadBind.hint'))}
-        checked={threadBind}
-        pending={app.draft.thread_bind !== undefined}
-        disabled={!app.metaValid || takeover.has('thread_bind')}
-        onchange={next => app.setDraft('thread_bind', next)}
       />
 
       <!-- 常驻状态通知：功能未完成，长期置灰（保留开关位置，文案见 config.notify.hint） -->

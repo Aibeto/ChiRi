@@ -22,7 +22,7 @@
 /// `/sys/devices/system/cpu/cpuN/core_ctl`（每个 policy 只注册一份，天然去重）。
 /// 直接 sysfs 离线不依赖 core_ctl 节点（core_ctl 不可用的机型也能用，
 /// 由 `CoreCtl.scenemode_offline` 配置独立门控）。
-use crate::chiri::affinity::set_tid_affinity;
+use crate::chiri::affinity::{io_result_tag, set_tid_affinity};
 use crate::chiri::get_cpu_policies;
 use log::{debug, info, warn};
 use std::fs;
@@ -58,8 +58,13 @@ pub struct CoreCtlManager {
     state: u8,
     /// scenemode 下被本模块下线的 CPU 及其原始 online 值（恢复用）
     offlined: Vec<(u32, String)>,
-    /// scenemode 下守护进程自身线程是否已钉到专用小核
+    /// scenemode 下守护进程自身线程是否已**全部**钉到专用小核（部分失败为
+    /// false，下次触发重试钉定）
     self_pinned: bool,
+    /// 实际钉住的自身 tid 清单（**只记成功**）：unpin_self 按它逐个恢复——
+    /// 旧实现以 self_pinned 总开关跳过恢复，部分钉定失败时成功钉住的线程
+    /// 会永久滞留单核掩码
+    self_pinned_tids: Vec<i32>,
     /// scenemode 独占给调度服务的小核（None = 未独占/设备无 cpuset 时降级）
     reserved_core: Option<usize>,
     /// 独占时被移除核的业务 cpuset 组快照（(组名, 原始 cpus)，退出恢复用）
@@ -103,6 +108,7 @@ impl CoreCtlManager {
             state: STATE_NONE,
             offlined: Vec::new(),
             self_pinned: false,
+            self_pinned_tids: Vec::new(),
             reserved_core: None,
             reserved_cpusets: Vec::new(),
             self_cpuset_group: None,
@@ -203,7 +209,22 @@ impl CoreCtlManager {
                 self.discover();
                 for c in &self.clusters {
                     let path = format!("{}/min_cpus", c.dir);
-                    if crate::utils::try_write_file(&path, &c.cluster_size.to_string()).is_err() {
+                    let val = c.cluster_size.to_string();
+                    let res = fs::write(&path, &val);
+                    if crate::logger::diag_active() {
+                        crate::logger::aff_action(
+                            "corectl",
+                            0,
+                            0,
+                            "-",
+                            "-",
+                            "min_cpus",
+                            &val,
+                            &io_result_tag(&res),
+                            &path,
+                        );
+                    }
+                    if res.is_err() {
                         warn!(
                             "{}",
                             t_with_args("corectl-write-failed", &fluent_args!("path" => path))
@@ -251,7 +272,21 @@ impl CoreCtlManager {
             if orig != "1" {
                 continue;
             }
-            if crate::utils::try_write_file(&path, "0").is_err() {
+            let res = fs::write(&path, "0");
+            if crate::logger::diag_active() {
+                crate::logger::aff_action(
+                    "corectl",
+                    0,
+                    0,
+                    "-",
+                    "-",
+                    "online",
+                    "0",
+                    &io_result_tag(&res),
+                    &path,
+                );
+            }
+            if res.is_err() {
                 warn!(
                     "{}",
                     t_with_args("corectl-write-failed", &fluent_args!("path" => path))
@@ -305,12 +340,30 @@ impl CoreCtlManager {
             return;
         };
         let mut all_ok = true;
+        // 成功清单每次重建（防重复累积）：失败 tid 不入清单（掩码未变无需恢复）
+        let mut pinned = Vec::new();
         for tid in self_tids() {
-            if !set_tid_affinity(tid, &[core]) {
-                all_ok = false;
+            let res = set_tid_affinity(tid, &[core]);
+            if crate::logger::diag_active() {
+                crate::logger::aff_action(
+                    "self_pin",
+                    std::process::id() as i32,
+                    tid,
+                    "-",
+                    "-",
+                    &core.to_string(),
+                    "-",
+                    &io_result_tag(&res),
+                    "scenemode",
+                );
+            }
+            match res {
+                Ok(()) => pinned.push(tid),
+                Err(_) => all_ok = false,
             }
         }
         self.self_pinned = all_ok;
+        self.self_pinned_tids = pinned;
         debug!(
             "{}",
             t_with_args(
@@ -320,15 +373,38 @@ impl CoreCtlManager {
         );
     }
 
-    /// 解除专用核钉定：守护进程线程恢复全核掩码
+    /// 解除专用核钉定：把 pin_self_dedicated **实际钉住**的线程恢复全核掩码。
+    /// 按成功清单逐个恢复（不再以 self_pinned 总开关短路）：部分钉定失败时
+    /// self_pinned 为 false，但已钉住的 tid 若不恢复会永久滞留单核掩码。
+    /// 恢复失败且线程仍在（非 ESRCH）的 tid 留在清单里，下次 unpin 重试。
     fn unpin_self(&mut self) {
-        if !self.self_pinned {
+        if self.self_pinned_tids.is_empty() {
+            self.self_pinned = false;
             return;
         }
         let ranges = crate::common::chiri_core_ranges();
         let all: Vec<usize> = (0..ranges.prime.end.max(ranges.big.end)).collect();
-        for tid in self_tids() {
-            let _ = set_tid_affinity(tid, &all);
+        for tid in std::mem::take(&mut self.self_pinned_tids) {
+            let res = set_tid_affinity(tid, &all);
+            if crate::logger::diag_active() {
+                crate::logger::aff_action(
+                    "self_unpin",
+                    std::process::id() as i32,
+                    tid,
+                    "-",
+                    "-",
+                    "full",
+                    "-",
+                    &io_result_tag(&res),
+                    "scenemode",
+                );
+            }
+            // ESRCH = 线程已消亡，无从重试也不需要恢复；其余失败留清单重试
+            if let Err(e) = &res {
+                if e.raw_os_error() != Some(libc::ESRCH) {
+                    self.self_pinned_tids.push(tid);
+                }
+            }
         }
         self.self_pinned = false;
     }
@@ -349,7 +425,19 @@ impl CoreCtlManager {
                 }
             }
         }
-        let _ = crate::utils::write_nodes(&items, "corectl-reassert-offline");
+        let written = crate::utils::write_nodes(&items, "corectl-reassert-offline");
+        if crate::logger::diag_active() {
+            for (path, value) in &items {
+                let result = if written.iter().any(|w| w == path) {
+                    "ok"
+                } else {
+                    "e0"
+                };
+                crate::logger::aff_action(
+                    "corectl", 0, 0, "-", "-", "reassert", value, result, path,
+                );
+            }
+        }
         if let Some(core) = self.reserved_core {
             crate::chiri::affinity::exclude_core_from_cpusets(core, &mut self.reserved_cpusets);
         }
@@ -366,12 +454,27 @@ impl CoreCtlManager {
         let mut failed = Vec::new();
         for (cpu, orig) in offlined {
             let path = format!("/sys/devices/system/cpu/cpu{}/online", cpu);
+            // 判定保持原口径：以回读为真值（原 try_write_file 恒返 Ok，
+            // is_ok() 项恒真），写入结果只落 @A 帧观测
             let write_back = |p: &str, v: &str| {
-                crate::utils::try_write_file(p, v).is_ok()
-                    && fs::read_to_string(p)
-                        .ok()
-                        .map(|s| s.trim() == v)
-                        .unwrap_or(false)
+                let res = fs::write(p, v);
+                if crate::logger::diag_active() {
+                    crate::logger::aff_action(
+                        "corectl",
+                        0,
+                        0,
+                        "-",
+                        "-",
+                        "online",
+                        v,
+                        &io_result_tag(&res),
+                        p,
+                    );
+                }
+                fs::read_to_string(p)
+                    .ok()
+                    .map(|s| s.trim() == v)
+                    .unwrap_or(false)
             };
             if !write_back(&path, &orig) && !write_back(&path, &orig) {
                 // 周期重试期间每次尝试都会经过这里，降为 debug 防刷屏；
@@ -428,12 +531,27 @@ impl CoreCtlManager {
     // [restore]
     pub fn force_online_all(&mut self) {
         let ranges = crate::common::chiri_core_ranges();
+        // 判定保持原口径：以回读为真值（原 try_write_file 恒返 Ok），写入
+        // 结果只落 @A 帧观测（与 restore_online 同款）
         let write_back = |path: &str| {
-            crate::utils::try_write_file(path, "1").is_ok()
-                && fs::read_to_string(path)
-                    .ok()
-                    .map(|s| s.trim() == "1")
-                    .unwrap_or(false)
+            let res = fs::write(path, "1");
+            if crate::logger::diag_active() {
+                crate::logger::aff_action(
+                    "corectl",
+                    0,
+                    0,
+                    "-",
+                    "-",
+                    "online",
+                    "1",
+                    &io_result_tag(&res),
+                    path,
+                );
+            }
+            fs::read_to_string(path)
+                .ok()
+                .map(|s| s.trim() == "1")
+                .unwrap_or(false)
         };
         for cpu in ranges
             .little
@@ -466,7 +584,20 @@ impl CoreCtlManager {
     fn restore_min_cpus(&mut self) {
         for c in &self.clusters {
             let path = format!("{}/min_cpus", c.dir);
-            let _ = crate::utils::try_write_file(&path, &c.min_cpus);
+            let res = fs::write(&path, &c.min_cpus);
+            if crate::logger::diag_active() {
+                crate::logger::aff_action(
+                    "corectl",
+                    0,
+                    0,
+                    "-",
+                    "-",
+                    "min_cpus",
+                    &c.min_cpus,
+                    &io_result_tag(&res),
+                    &path,
+                );
+            }
         }
         if !self.clusters.is_empty() {
             info!("{}", t("corectl-boost-off"));

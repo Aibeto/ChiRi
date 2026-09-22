@@ -38,8 +38,8 @@ export const LAB_TAKEOVER: Record<LabModeKey, readonly string[]> = {
   vector: ['fas_enabled', 'scenemode_enabled'],
   contingency: ['fas_enabled', 'scenemode_enabled'],
   babel: ['fas_enabled', 'scenemode_enabled'],
-  // frozen（待春归）比其它实验室模式多接管一个 thread_bind：它要把线程亲和/绑核与
-  // core_ctl 交还系统（不再迁移线程），这是「停掉额外开销」的一部分
+  // frozen（待春归）多接管 thread_bind（实验室专用闸）：把线程亲和/绑核与 core_ctl
+  // 交还系统（不再迁移线程），这是「停掉额外开销」的一部分
   frozen: ['fas_enabled', 'scenemode_enabled', 'thread_bind']
 }
 

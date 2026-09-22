@@ -243,14 +243,20 @@ impl TunedGovernor {
             );
             info!(
                 "{}",
-                t_with_args("tuned-activated", &fluent_args!("mode" => self.mode.clone()))
+                t_with_args(
+                    "tuned-activated",
+                    &fluent_args!("mode" => self.mode.clone())
+                )
             );
             // 特调激活通知 Monitor 层切换到 40ms 快速采样
             self.ak_active.store(true, Ordering::Relaxed);
         } else {
             warn!(
                 "{}",
-                t_with_args("tuned-no-clusters", &fluent_args!("mode" => self.mode.clone()))
+                t_with_args(
+                    "tuned-no-clusters",
+                    &fluent_args!("mode" => self.mode.clone())
+                )
             );
         }
         self.active
@@ -261,7 +267,10 @@ impl TunedGovernor {
         if self.active {
             info!(
                 "{}",
-                t_with_args("tuned-deactivated", &fluent_args!("mode" => self.mode.clone()))
+                t_with_args(
+                    "tuned-deactivated",
+                    &fluent_args!("mode" => self.mode.clone())
+                )
             );
         }
         self.active = false;
@@ -339,7 +348,10 @@ impl TunedGovernor {
         self.cfg.normalize();
         debug!(
             "{}",
-            t_with_args("tuned-config-reloaded", &fluent_args!("mode" => self.mode.clone()))
+            t_with_args(
+                "tuned-config-reloaded",
+                &fluent_args!("mode" => self.mode.clone())
+            )
         );
     }
 
@@ -366,8 +378,8 @@ impl TunedGovernor {
         let now = Instant::now();
         let cfg = self.cfg.clone();
 
-        // devimp tick 行数据（每核心组一行）：cluster / util / decision / cur_max / hw_max
-        let mut devimp_rows: Vec<(&'static str, String, &str, u32, u32)> = Vec::new();
+        // main_ tick 行数据（每核心组一行）：cluster / util / decision / cur_max / hw_max
+        let mut main_rows: Vec<(&'static str, String, &str, u32, u32)> = Vec::new();
 
         for c in &mut self.clusters {
             let range: &std::ops::Range<usize> = if c.core_name == "little" {
@@ -455,7 +467,7 @@ impl TunedGovernor {
                 decision = "hold";
             }
 
-            devimp_rows.push((
+            main_rows.push((
                 c.core_name,
                 format!("{:.2}", util),
                 decision,
@@ -464,15 +476,15 @@ impl TunedGovernor {
             ));
         }
 
-        // devimp tick 行（开发记录开启时才有 IO）：
+        // main_ tick 行（开发记录开启时才有 IO）：
         // cur_freq_khz 列写当前动态 max（kHz），max_freq_khz 列写硬件最高（kHz），
         // 与旧版一致；over/under 列无档位阈值语义，恒 0。
         // **util 列写决策用的负载**：util_smoothing < 1 时为 EMA 平滑后的值
         // （见上方 util 计算处的注释）——2026-09-17 起语义变化，离线回放该列时
         // 不能再当原始 util 二次平滑。
-        if crate::logger::devimp_active() {
-            for (name, util, decision, cur_max, hw_max) in &devimp_rows {
-                crate::logger::devimp_tick(
+        if crate::logger::diag_active() {
+            for (name, util, decision, cur_max, hw_max) in &main_rows {
+                crate::logger::main_tick(
                     name,
                     util,
                     0,
@@ -491,10 +503,10 @@ impl TunedGovernor {
         }
 
         self.log_counter += 1;
-        // debug 心跳（独立于 devimp，日志通道随时可用）：每 25 tick 汇总各簇
-        // util/max，供 devimp 关闭时观测负载直拉行为
+        // debug 心跳（独立于开发诊断，日志通道随时可用）：每 25 tick 汇总各簇
+        // util/max，供诊断关闭时观测负载直拉行为
         if self.log_counter % 25 == 0 && log::log_enabled!(log::Level::Debug) {
-            let summary = devimp_rows
+            let summary = main_rows
                 .iter()
                 .map(|(name, util, _d, cur_max, _hw)| {
                     format!("{}={}MHz({})", name, cur_max / 1000, util)

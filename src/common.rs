@@ -1,4 +1,4 @@
-//! common.rs: [events] [paths] [soc_detect] [core_ranges] [special_tuned] [fas_whitelist] [aff_blacklist] [embedded] [external_meta]
+//! common.rs: [events] [proc_snap] [paths] [soc_detect] [core_ranges] [special_tuned] [fas_whitelist] [aff_blacklist] [embedded] [external_meta]
 
 use crate::monitor::config::RulesConfig;
 use include_dir::{Dir, include_dir};
@@ -54,6 +54,18 @@ pub enum DaemonEvent {
         /// cpufreq_transition 频率切换次数：调频活跃度（含热限频切换）
         freq_transitions: u32,
     },
+}
+
+// [proc_snap]
+/// 每秒进程快照条目（aff `@S` 帧供数，`cpu_monitor::snapshot_procs` 产出）。
+/// 全系统 TGID 级，util 来自 eBPF `TGID_RUN_TIME` 的 1s 窗口差分（不扫 /proc）。
+pub struct ProcSnap {
+    /// 进程 TGID
+    pub pid: u32,
+    /// 进程名（cmdline 首段优先，退化 comm，见 cpu_monitor::proc_name）
+    pub comm: String,
+    /// 1s 窗口内总 CPU 时间占比**百分比**：多核并行可 >100（320.0 ≈ 3.2 核满载）
+    pub util: f32,
 }
 
 // [paths]
@@ -639,6 +651,7 @@ pub fn is_affinity_blacklisted(cmdline: &str) -> bool {
 // 应用配置等）无需改动任何 .rs；必需文件缺失由 build.rs 断言，直接编译失败。
 // 已存在文件的改动由 rustc 的 include_bytes! 依赖跟踪触发重编译；目录增删由
 // build.rs 的 rerun-if-changed=module/config 触发。
+// ***-example.yaml 参考文件不放本目录**（会随之嵌入二进制）：一律放 mdocs/。
 
 // [embedded]
 static CONFIG_DIR: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/module/config");
@@ -735,6 +748,9 @@ struct MetaYamlFile {
     language: Option<String>,
     loglevel: Option<String>,
     dev_record: Option<bool>,
+    /// aff `@S` 每秒快照帧的 top-N 进程数（手改字段，WebUI 无开关），详见
+    /// ExternalMetaOverrides 同名字段
+    devimp_top_n: Option<usize>,
     fas_enabled: Option<bool>,
     scenemode_enabled: Option<bool>,
     /// 线程摆放总开关（affinity + core_ctl），详见 ExternalMetaOverrides
@@ -770,12 +786,16 @@ pub struct ExternalMetaOverrides {
     pub loglevel: Option<String>,
     pub language: Option<String>,
     pub dev_record: Option<bool>,
+    /// aff `@S` 每秒快照帧的 top-N 进程数（meta.yaml `devimp_top_n`，缺省 10）：
+    /// 每秒按 util 降序落盘前 N 个进程；前台树与被管进程不受 N 截断、恒定落盘。
+    /// 消费点：chiri Config::load 合并后由 `Meta::normalize` 钳到 1..=64
+    /// （0/超限不合法会被 clamp，不判整个文件非法）。
+    pub devimp_top_n: Option<usize>,
     pub fas_enabled: Option<bool>,
     pub scenemode_enabled: Option<bool>,
-    /// 线程摆放总开关：false = 关闭线程功能，CPU 亲和/绑核与 core_ctl 核心在线
-    /// 接管全部交还系统（**把所有绑定分配改成全核心**）。与机型内嵌 feature.yaml 的
-    /// `Affinity.enabled` / `CoreCtl.enabled` 取「与」——任一为假即视为关闭线程功能，
-    /// 见 chiri/config.rs::Config::load。
+    /// 线程摆放总闸（meta.yaml `thread_bind`）：**实验室 frozen 专用机制**——用户侧
+    /// 开关已移除，仅 frozen 模式写 false 交还线程亲和/绑核与 core_ctl。
+    /// 与机型内嵌 feature.yaml 的两个子开关取「与」，见 chiri/config.rs::Config::load。
     pub thread_bind: Option<bool>,
     /// PowerBase 总开关（meta.yaml `powerbase_enabled`，缺省 false）：开启后原本由
     /// CLG 接管的亮屏日常场合改由 PowerBase 接管（以放电功耗为指标）。
@@ -929,6 +949,7 @@ fn parse_disk_meta(text: &str) -> Option<ExternalMetaOverrides> {
             None => None,
         },
         dev_record: f.dev_record,
+        devimp_top_n: f.devimp_top_n,
         fas_enabled: f.fas_enabled,
         scenemode_enabled: f.scenemode_enabled,
         thread_bind: f.thread_bind,
@@ -1071,7 +1092,7 @@ pub(crate) fn replace_top_level_bool(content: &str, field: &str, value: bool) ->
     None
 }
 
-/// 一次写盘改掉 meta.yaml 的三个总开关（None = 该项不动）。
+/// 一次写盘改掉 meta.yaml 的总开关（None = 该项不动；thread_bind 仅实验室使用）。
 ///
 /// 返回 false 表示文件没有被改到期望状态（字段缺失 / 读写失败），调用方据此放弃
 /// 本次实验室套用。多个开关必须一次写完：分两次写会触发两轮 config_watcher 热重载，

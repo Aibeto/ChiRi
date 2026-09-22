@@ -57,6 +57,8 @@
 - `status.csv` ≤8MB + `.1`，每秒一行 **22 列**（末列 `fps` 仅 FAS 激活有值）；新增列一律追加末尾；全精度写入、显示层 `toFixed(1)`。两者都不可整读。
 - 启动：先判短会话（首行距启动 <30s → 清空不打包；解析失败按非短会话），再把上轮打包进 `logd/`（`pack.sh` 走外部 tar，**不得改**；导出 = logd→tar→**gzip**→删中间产物）。
 - 预算：`logd/`、`devimp/` 各自 >128MB 删本目录最旧到 <96MB（最新永不删）。写路径记账 ≥16MB 即 `exit(0)`。
+- **定版手段（离线第一件事）**：devimp 文件头三行 `# module=ChiRi Canary <ver> (versionCode N)` / `# soc=… board=… model=…` / `# android=… kernel=…` 一直存在；daemon.log 另有 `[Main] 模块版本:` 行（2026-09-22 新增）。**同名 tar 里可能混着不同版本/不同机型**，先定版再比数据。
+- devimp/ 双文件（2026-09-22 拆分，原 devimp*<pkg>* 单文件）：`main_<pkg>_<MMDD-HHmmss>.log`（44 列 CSV v2026-09-22，tick/snap/event）+ `aff_<MMDD-HHmmss>.log`（文本帧：@A 动作帧含 `result=ok|e{errno}`、@S 每秒快照帧 top-N〔meta `devimp_top_n` 缺省 10 clamp 1..=64〕+前台/被管线程下钻；`\x01` 保留二进制帧位）。目录/归档 tar/记账键保留 devimp 名；锁 6 把（+AFF_TH_STATE）；t 行 pid=0=归属未知、uclamp 恒 -1。
 
 ### PowerAVG
 
@@ -102,6 +104,9 @@
 - **帧指标口径**：eBPF 只有一个 uprobe（`Surface::queueBuffer`），`frame_delta_ns` = 相邻帧间隔；必须只投喂新产生的帧。
 - **息屏轴**：scenemode 停迁移 + cpuset 全核 + 只压 CLG 上限；判定走屏幕**投票仲裁**（`OFF_QUORUM=2`）。
 - **后台降权**：`AffinityConfig.background_uclamp_max_pct`（默认 50）钳后台/受限组 `cpu.uclamp.max`；`affinity_blacklist.yaml` 含 SystemUI/桌面。`thread_bind` 是线程摆放总闸。
+- **stat comm 口径（2026-09-23 修）**：`sample_one_tid` 以首 '(' 与末 ')' 定界 comm；旧 `text[1..close]` 混入「tid 尾部+` (`」致 KEY_THREAD_COMMS/黑名单精确匹配恒不命中，修复后已生效。
+- **FG util 口径（2026-09-23 修）**：`compute_tgid_util` 基线存 adj(raw+pending)、util = adj 差分/墙钟；旧「raw 差分+当前 pending」多算 pending(t0)，util 系统性高估。
+- **亲和/core_ctl 恢复写失败（2026-09-23）**：非 ESRCH 失败保留状态（home/计数/moved_group/自钉清单）待重试，成功或 ESRCH 才清；unpin_self 按成功 tid 清单恢复，勿用 self_pinned 总开关短路。
 
 ## 电池读数（遥测）
 
@@ -113,8 +118,9 @@
 ## 8550 实测结论
 
 - 整夜 5h default：亮屏均 1.35W；bili 1.27W；游戏 2.48W；息屏 0.07-0.09W。游戏段 65% 时间被 vendor 热限流（cap 70%）而 ChiRi 未参与。
-- **devimp 列语义**：`cur_freq_khz` = CLG 动态上限，`max_freq_khz` = 硬件最高；`batt_current_ma` 实为安培；wakeups/migrations 累计；`fps` 列全空。
+- **main\_（原 devimp）列语义**：`cur_freq_khz` = CLG 动态上限，`max_freq_khz` = 硬件最高；`batt_current_ma` 实为安培；wakeups/migrations 累计。（历史样本 fps 列全空——那是 status.csv 的列。）
 - 无平滑特调在抖动负载下上限均值反而高于 CLG；EMA + hr 1.0 才能把 little/big 压到 0.90-0.96。**调度层剩余空间个位数 %。**
+- **迁移率基线（2026-09-22 结案）**：亮屏 UI（cloudmusic/launcher）迁移 2500~5000/s 是 surfaceflinger/system_server 主导的**固有形态**（40 列无天花板的老包同样如此），视频稳态才 ~300/s——勿再拿亮屏 UI 对比视频稳态判「迁移异常」。**over/under 列语义**：组内 util 过 `up_threshold` / 低于 `down_threshold` 的核数（big 簇 0.1/3.6 = 负载集中在 1 核、其余空转）。
 
 ## WebUI
 
@@ -132,6 +138,7 @@
 - `cargo xtask build` 先跑 `webui/npm run build` 再拷 `webui/dist` 到模块 `webroot/`；硬约束 `base:'./'`+`type="module"`。CI Node 24。`module.prop` id = `chiri`。dist 由根 `build.rs` 嵌入（`restore_webroot` 启动补齐，缺则降级）。
 - **.gitignore 已合并为根单文件（2026-09-22）**：webui/、module/ 的子 .gitignore 已删除；根内新增 WebUI 段（`webui/` 前缀）与 Magisk 段；根 `/package.json`、`/package-lock.json` 刻意忽略（npm init 残留）。后续新增忽略规则一律进根文件。
 - `mdocs/` 只放项目原有文档；AI 产出放 `.codebuddy/docs/`（已忽略）；`.codebuddy/memory/` 跟踪。
+- **项目 skill 位置（2026-09-23 用户定）**：正式 = **`.agents/skills/<name>/`**（Agent Skills 开放标准，Cursor 官方识别 `.agents/skills/` 与 `.cursor/skills/` 两者，CodeBuddy 亦读）；`.codebuddy/skills/` 是 CodeBuddy 项目级**逐字镜像**，两份必须同步。现役 skill：`devimp-log-analysis`（含定版/40-48 列 schema 识别）。
 - 评估与准备 ≠ 批准开工。没说「开始改」就不建不改源码；改动前 `git status` 核对足迹，汇报给文件级清单。
 - **只改任务范围内的东西，不「顺手修」**：未提交改动、被注释的代码可能是用户 WIP。检查报错若指向用户正在编辑的文件，只报告不动手。汇报区分「我改的」与「工作区里已有的」。
 - **Yumi 权重归零（2026-09-20 用户声明）**：性能优化及同类工作中，`src/scheduler/` 与 Yumi 设备兼容**不再作为约束**，改动即使波及也可进行（通常只做类型适配，不主动改逻辑）。2026-09-22 Yumi 调度本体已删，`docs/agents/` 口径已同步，本条冲突消解。

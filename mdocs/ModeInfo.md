@@ -86,7 +86,7 @@
 FAS（帧感知调度）面向白名单游戏：帧事件驱动 per-policy 锁频（min=max），配合 PID 与 Jank 统计调优，governor 切 performance。失去前台后有 15 秒延迟期（`deactivate_delay_secs`），期内切回无缝续期，到期才释放、交回 CLG。FAS 期间 CLG / 特调 / vector 全部暂停，温控与触摸升频豁免。
 
 - 白名单：`module/config/normal/fas.yaml`（`包名: 配置名`）
-- 每应用配置：`module/config/normal/fas/<配置名>.yaml`（字段说明见 `fas-example.yaml`），未写字段取 `src/fas_types.rs` 默认值
+- 每应用配置：`module/config/normal/fas/<配置名>.yaml`（字段说明见 `mdocs/fas-example.yaml`），未写字段取 `src/fas_types.rs` 默认值
 - 当前条目：终末地 `com.hypergryph.endfield → endfield`
 - 新增游戏两步：`fas.yaml` 加一行 + 新建 `fas/<配置名>.yaml`，无需改代码
 

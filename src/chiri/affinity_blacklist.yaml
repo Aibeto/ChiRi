@@ -62,6 +62,23 @@ com.android.launcher
 com.android.launcher3
 com.miui.home
 
+# —— 输入法（2026-09-22 加：语音输入启动延迟豁免）——
+# 输入法是常驻可感知进程：语音面板打开时需要立刻冷启动录音/识别管线，被钉核/
+# 迁移/后台降权拖慢会直接表现为「按住说话后麦克风要等一会才启动」。
+# 全部保持全核、不做任何迁移与钉核。
+# 边界：cgroup 组级的 cpu.uclamp.max 钳制（background 组 50%）不受本名单影响
+# （组内无法按包豁免）；多数 ROM 的 IME 在 foreground 组，不吃该钳制。
+com.iflytek.inputmethod
+com.iflytek.inputmethod.miui
+com.sohu.inputmethod.sogou
+com.sohu.inputmethod.sogou.xiaomi
+com.baidu.input
+com.baidu.input_mi
+com.google.android.inputmethod.latin
+com.tencent.wetype
+# 正则兜底：主流输入法包名几乎都含 inputmethod，覆盖未知变体
+re:(?i)inputmethod
+
 # —— 应用黑名单（示例，默认注释；取消注释或按同格式追加）——
 # com.example.game
 # com.example.heavyapp:push

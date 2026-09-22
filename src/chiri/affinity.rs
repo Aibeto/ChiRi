@@ -24,7 +24,7 @@
 ///   候选复用状态做窗口 util（首窗为 0），**两窗防抖**（上次采样忙且本次仍忙，
 ///   期间采到低负载即清除标记）即 promote——不依赖两次采样间隔，分片稀疏
 ///   采样下仍有效；已 promote 线程数量少，每 2 轮复查 demote。
-/// - 在线核位图缓存每 4 轮刷新（热插拔不频繁），devimp core 日志每 2 轮一次。
+/// - 在线核位图缓存每 4 轮刷新（热插拔不频繁）。
 /// - 稳态（前台线程集不变、后台空闲）单轮 ≈ 1 read_dir + 0~64 stat + 低频辅助读。
 ///
 /// 选核：score = 逐核 util(最近 SystemLoadUpdate) + 本核钉线程数×0.2，取核池 ∩
@@ -75,12 +75,23 @@ const BG_DEMOTE_GROUPS: [&str; 2] = ["background", "restricted"];
 /// restricted 组由 init 按需创建（部分机型没有，或运行期才出现），写入失败本身
 /// 就是「该组不可用」的权威证据；预判会让日志与真实情况脱节，也把失败吞掉。
 /// 日志口径见 `utils::write_nodes`：单组失败 debug、全组失败 warn（一次）。
-fn write_bg_uclamp_max(val: &str) {
+/// 每节点补一条 @A uclamp 帧（write_nodes 只回成功列表，失败无 errno 记 e0）。
+fn write_bg_uclamp_max(val: &str, reason: &str) {
     let items: Vec<(String, String)> = BG_DEMOTE_GROUPS
         .iter()
         .map(|g| (format!("/dev/cpuctl/{g}/cpu.uclamp.max"), val.to_string()))
         .collect();
-    let _ = crate::utils::write_nodes(&items, "bg-uclamp-max");
+    let written = crate::utils::write_nodes(&items, "bg-uclamp-max");
+    if crate::logger::diag_active() {
+        for (path, _) in &items {
+            let result = if written.iter().any(|w| w == path) {
+                "ok"
+            } else {
+                "e0"
+            };
+            crate::logger::aff_action("uclamp", 0, 0, "-", "-", path, val, result, reason);
+        }
+    }
 }
 
 const REBALANCE_INTERVAL: Duration = Duration::from_secs(2);
@@ -89,10 +100,6 @@ const BG_SCAN_WINDOW: usize = 64;
 const BG_LIST_EVERY_ROUNDS: u64 = 2;
 const PROMOTED_REVIEW_EVERY_ROUNDS: u64 = 2;
 const ONLINE_EVERY_ROUNDS: u64 = 4;
-/// devimp 低频行（place/core）输出周期：2s/轮 × 4 = 8s 一轮。
-/// place 为前台线程全量快照（游戏可达数十线程），周期过长会丢放置变化
-/// 细节，过短则写入量过大——8s 是快照完整度与 IO 量的折衷
-const DEVL_ROW_EVERY_ROUNDS: u64 = 4;
 
 /// 线程迁移最小间隔（promote/demote 流程）：过于频繁的迁移带来 cache
 /// 冷却与调度抖动，负载窗口本身已做两窗/3 连防抖，这里只挡边界抖动
@@ -126,9 +133,6 @@ const MAX_PINS_PER_CORE: u32 = 3;
 /// 评估，不节流时终末地一局刷 1.1 万+ 行（约占 devimp 日志 41%）。每 tid
 /// 半分钟一条足以观测「长期滞留」，同时消除高频日志 IO
 const HOLD_LOG_COOLDOWN: Duration = Duration::from_secs(30);
-/// place 快照最小输出间隔：放置未变化时按该间隔输出一次心跳快照，
-/// 避免游戏周期性建/销线程导致签名永远变化、退化为无节流
-const PLACE_DUMP_MIN_INTERVAL: Duration = Duration::from_secs(30);
 const PROMOTE_UTIL_PCT: f32 = 25.0;
 const LITTLE_HIGH_WATER: f32 = 0.70;
 /// default 模式关键线程组绑定的解除水位（迟滞下沿，防乒乓）
@@ -191,6 +195,7 @@ fn read_cpuset_cpus(group: &str) -> Option<String> {
 
 /// 批量写 cpuset 组的 cpus（键 = 组名）：组是「同类多节点」（不同机型/框架暴露
 /// 的组不同）。日志口径见 `utils::write_nodes`——单组失败 debug、**全部**组失败才 warn。
+/// 每次批量写补一条 @A cpuset_cpus 汇总帧（dst=键列表、value=组数，不逐组落明细）。
 fn write_cpuset_cpus_items(items: &[(String, String)]) {
     let nodes: Vec<(String, String)> = items
         .iter()
@@ -198,13 +203,44 @@ fn write_cpuset_cpus_items(items: &[(String, String)]) {
         .collect();
     // 独立的告警键（cpuset-cpus vs cpuset-restore）：两者是不同的操作，共用一键会让
     // 「一边写成功」清掉「另一边全失败」的记录 → 2s 热路径反复报同一条 warn
-    let _ = crate::utils::write_nodes(&nodes, "cpuset-cpus");
+    let written = crate::utils::write_nodes(&nodes, "cpuset-cpus");
+    if !items.is_empty() && crate::logger::diag_active() {
+        let keys: Vec<&str> = items.iter().map(|(g, _)| g.as_str()).collect();
+        let all_ok = nodes.iter().all(|(p, _)| written.iter().any(|w| w == p));
+        crate::logger::aff_action(
+            "cpuset_cpus",
+            0,
+            0,
+            "-",
+            "-",
+            &keys.join(","),
+            &items.len().to_string(),
+            if all_ok { "ok" } else { "e0" },
+            "cpuset-cpus",
+        );
+    }
 }
 
 /// 批量写 cpuset（键 = **完整节点路径**）：快照回写用（快照记的就是路径）。
 /// 单点失败 debug、全部失败 warn——恢复期最怕「全都没写回去」还毫无痕迹。
+/// 每次批量写补一条 @A cpuset_cpus 汇总帧（同 write_cpuset_cpus_items 口径）。
 fn write_cpuset_paths_items(items: &[(String, String)]) {
-    let _ = crate::utils::write_nodes(items, "cpuset-restore");
+    let written = crate::utils::write_nodes(items, "cpuset-restore");
+    if !items.is_empty() && crate::logger::diag_active() {
+        let keys: Vec<&str> = items.iter().map(|(p, _)| p.as_str()).collect();
+        let all_ok = items.iter().all(|(p, _)| written.iter().any(|w| w == p));
+        crate::logger::aff_action(
+            "cpuset_cpus",
+            0,
+            0,
+            "-",
+            "-",
+            &keys.join(","),
+            &items.len().to_string(),
+            if all_ok { "ok" } else { "e0" },
+            "cpuset-restore",
+        );
+    }
 }
 
 /// 读 cpuset 组 tasks（返回组内全部 TID），替代 /proc 全量枚举
@@ -388,8 +424,29 @@ fn self_tids() -> Vec<i32> {
 /// 读取原组（此时不移动，独占退化为「尽力而为」）。
 pub(crate) fn move_self_to_cpuset_root() -> Option<String> {
     let orig = self_cpuset_group()?;
+    let mut last: std::io::Result<()> = Ok(());
+    let mut n = 0u32;
     for tid in self_tids() {
-        let _ = std::fs::write("/dev/cpuset/tasks", tid.to_string());
+        let r = std::fs::write("/dev/cpuset/tasks", tid.to_string());
+        // 首个失败 errno 为准（后续成功不覆盖失败），与 cleanup_thread 汇总口径一致
+        if last.is_ok() {
+            last = r;
+        }
+        n += 1;
+    }
+    if crate::logger::diag_active() {
+        let pid = std::process::id() as i32;
+        crate::logger::aff_action(
+            "move_group",
+            pid,
+            0,
+            "-",
+            "-",
+            "root",
+            &n.to_string(),
+            &io_result_tag(&last),
+            "self_root",
+        );
     }
     Some(orig)
 }
@@ -397,8 +454,29 @@ pub(crate) fn move_self_to_cpuset_root() -> Option<String> {
 /// 把守护进程自身全部线程移回原 cpuset 组（退出 scenemode）
 pub(crate) fn move_self_to_cpuset_group(group_path: &str) {
     let tasks = cpuset_tasks_path(group_path);
+    let mut last: std::io::Result<()> = Ok(());
+    let mut n = 0u32;
     for tid in self_tids() {
-        let _ = std::fs::write(&tasks, tid.to_string());
+        let r = std::fs::write(&tasks, tid.to_string());
+        // 首个失败 errno 为准（后续成功不覆盖失败），与 cleanup_thread 汇总口径一致
+        if last.is_ok() {
+            last = r;
+        }
+        n += 1;
+    }
+    if crate::logger::diag_active() {
+        let pid = std::process::id() as i32;
+        crate::logger::aff_action(
+            "move_group",
+            pid,
+            0,
+            "-",
+            "-",
+            group_path,
+            &n.to_string(),
+            &io_result_tag(&last),
+            "self_group",
+        );
     }
 }
 
@@ -407,9 +485,10 @@ pub(crate) fn move_self_to_cpuset_group(group_path: &str) {
 /// 强转 `*const cpu_set_t` 是未对齐指针，依赖 libc 包装器不解引用的运气，不可靠）。
 /// 经 `libc::CPU_SET` 置位（bionic 64 位下 cpu_set_t = [u64; 16]，支持 1024 CPU）；
 /// CPU_SET 内部数组索引无越界检查，超出容量直接跳过（与原字节掩码防护等价）。
-/// 成功返回 true；线程已退出（ESRCH）等错误返回 false。
+/// 成功返回 `Ok(())`；线程已退出（ESRCH）等失败返回 `Err`（errno 在失败当刻取得，
+/// 供调用方格式化 `@A result=e{errno}`，失败后的 return/重试语义由调用方保持原样）。
 /// 供 core_ctl 的 scenemode 专用核自钉复用。
-pub(crate) fn set_tid_affinity(tid: i32, cpu_ids: &[usize]) -> bool {
+pub(crate) fn set_tid_affinity(tid: i32, cpu_ids: &[usize]) -> std::io::Result<()> {
     let mut mask: libc::cpu_set_t = unsafe { std::mem::zeroed() };
     let max_cpu = std::mem::size_of::<libc::cpu_set_t>() * 8;
     for &c in cpu_ids {
@@ -419,24 +498,53 @@ pub(crate) fn set_tid_affinity(tid: i32, cpu_ids: &[usize]) -> bool {
     }
     // AppOptR 式短路：当前掩码与期望一致时跳过 sched_setaffinity，重复钉定
     // 变为一次无副作用的读（周期 rebalance 与 core_ctl 复用点都会高频命中）
-    // SAFETY: curr 为 zeroed 的合法 cpu_set_t，sched_getaffinity 仅写入该缓冲；
-    // 两个 cpu_set_t 按整块内存逐字节比较，不依赖内部字段布局
-    unsafe {
-        let mut curr: libc::cpu_set_t = std::mem::zeroed();
-        if libc::sched_getaffinity(tid, std::mem::size_of::<libc::cpu_set_t>(), &mut curr) == 0 {
-            let size = std::mem::size_of::<libc::cpu_set_t>();
-            let curr_bytes =
-                std::slice::from_raw_parts(&curr as *const libc::cpu_set_t as *const u8, size);
-            let mask_bytes =
-                std::slice::from_raw_parts(&mask as *const libc::cpu_set_t as *const u8, size);
-            if curr_bytes == mask_bytes {
-                return true;
-            }
+    if let Some(curr) = read_tid_mask(tid) {
+        let mut want: Vec<usize> = cpu_ids.iter().copied().filter(|&c| c < max_cpu).collect();
+        want.sort_unstable();
+        want.dedup();
+        if curr == want {
+            return Ok(());
         }
     }
     let ret =
         unsafe { libc::sched_setaffinity(tid, std::mem::size_of::<libc::cpu_set_t>(), &mask) };
-    ret == 0
+    if ret == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+/// 读单线程当前 CPU 亲和掩码（sched_getaffinity），返回置位核号（升序）；
+/// 线程已退出（ESRCH）等失败返回 None。快照取数与 set_tid_affinity 短路共用。
+pub fn read_tid_mask(tid: i32) -> Option<Vec<usize>> {
+    // SAFETY: curr 为 zeroed 的合法 cpu_set_t，sched_getaffinity 仅写入该缓冲；
+    // 再按字节位展开为核号，不依赖 cpu_set_t 内部字段布局
+    unsafe {
+        let mut curr: libc::cpu_set_t = std::mem::zeroed();
+        if libc::sched_getaffinity(tid, std::mem::size_of::<libc::cpu_set_t>(), &mut curr) != 0 {
+            return None;
+        }
+        let size = std::mem::size_of::<libc::cpu_set_t>();
+        let bytes = std::slice::from_raw_parts(&curr as *const libc::cpu_set_t as *const u8, size);
+        let mut out = Vec::new();
+        for (i, b) in bytes.iter().enumerate() {
+            for bit in 0..8 {
+                if b & (1 << bit) != 0 {
+                    out.push(i * 8 + bit);
+                }
+            }
+        }
+        Some(out)
+    }
+}
+
+/// 写入/亲和结果 → `@A` 帧的 result 值（`ok` / `e{errno}`，errno 不可得时 `e0`）
+pub(crate) fn io_result_tag(res: &std::io::Result<()>) -> String {
+    match res {
+        Ok(()) => "ok".to_string(),
+        Err(e) => format!("e{}", e.raw_os_error().unwrap_or(0)),
+    }
 }
 
 // [sys_probe]
@@ -508,25 +616,52 @@ fn online_bitmap(max_cpu: usize) -> Vec<bool> {
     }
 }
 
-/// 单线程 stat 采样
-struct ThreadSample {
-    comm: String,
-    ticks: u64,
+/// 单线程 stat 采样（快照取数复用）
+/// 写内核节点并保留与 utils::try_write_file 等价的失败日志（节点缺失 debug、
+/// 其它 warn）；差别仅在返回真实 io 结果，供 @A 帧格式化 errno——诊断关闭时
+/// 失败可观测性不降级（@A 有 diag_active 闸门，日志没有）。
+fn logged_write(path: &str, val: &str) -> std::io::Result<()> {
+    let res = std::fs::write(path, val);
+    if let Err(e) = &res {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            log::debug!("write skipped (node missing): {path}");
+        } else {
+            log::warn!("Failed to write to {path}: {e}");
+        }
+    }
+    res
 }
 
-fn sample_one_tid(tid: i32) -> Option<ThreadSample> {
+pub struct ThreadSample {
+    pub comm: String,
+    pub ticks: u64,
+    /// 当前所在核（stat 第 39 字段 processor，`)` 后第 36 段 0 基）；读不到 -1。
+    /// 与 comm/ticks 同一次 stat 读取顺带解析，避免调用方为核号二次读 /proc
+    pub processor: i32,
+}
+
+pub fn sample_one_tid(tid: i32) -> Option<ThreadSample> {
     let text = std::fs::read_to_string(format!("/proc/{tid}/stat")).ok()?;
+    // comm 以首 '(' 与末 ')' 定界（comm 自身可含 '(' / 空格，故闭侧用 rfind）。
+    // 2026-09-23 修：原先 `text[1..close]` 从下标 1 切起，把「tid 尾部+` (`」
+    // 混进 comm（如 tid 12345 得到 "2345 (RenderThread"），KEY_THREAD_COMMS /
+    // 亲和黑名单的全等匹配因此恒不命中（is_key_thread / is_affinity_blacklisted
+    // 形同虚设）、@A/@S 帧 comm 字段失真
+    let open = text.find('(')?;
     let close = text.rfind(')')?;
     let rest = &text[close + 1..];
-    // 单次遍历同时取 utime / stime（`)` 之后的第 11 / 12 个字段，0 基）与字段总数：
-    // 原先 collect 成 Vec<&str> 只为取这两个下标，每个 tid 白付一次 Vec 分配与整段收集
+    // 单次遍历同时取 utime / stime（`)` 之后的第 11 / 12 个字段，0 基）、
+    // processor（第 36 段，0 基）与字段总数：
+    // 原先 collect 成 Vec<&str> 只为取这几个下标，每个 tid 白付一次 Vec 分配与整段收集
     let mut utime: Option<u64> = None;
     let mut stime: Option<u64> = None;
+    let mut processor: Option<i32> = None;
     let mut count = 0usize;
     for (i, tok) in rest.split_whitespace().enumerate() {
         match i {
             11 => utime = tok.parse().ok(),
             12 => stime = tok.parse().ok(),
+            36 => processor = tok.parse().ok(),
             _ => {}
         }
         count = i + 1;
@@ -536,8 +671,9 @@ fn sample_one_tid(tid: i32) -> Option<ThreadSample> {
     }
     let ticks: u64 = utime.unwrap_or(0) + stime.unwrap_or(0);
     Some(ThreadSample {
-        comm: text[1..close].to_string(),
+        comm: text[open + 1..close].to_string(),
         ticks,
+        processor: processor.unwrap_or(-1),
     })
 }
 
@@ -642,10 +778,6 @@ pub struct AffinityManager {
     /// 抑制 prime 放置——FAS/特调都希望 prime 承接负载，且 akmode 用 schedutil
     /// 动态上限、85 对调频只有负效应，故激活期写 100，退出时还原
     boost_uclamp_prev: Option<String>,
-    /// 上次 place 快照签名（tid:home 串），配合 last_place_dump 做变更检测
-    last_place_sig: String,
-    /// 上次 place 快照输出时刻
-    last_place_dump: Instant,
     /// 实验室静态分组（contingency/babel）：当前模式（None = 未启用）
     lab_static_mode: Option<String>,
     /// 静态分组改动过的 (组名, 原 cpus) 快照，退出时恢复
@@ -676,8 +808,6 @@ impl AffinityManager {
             key_bind_active: false,
             fg_cursor: 0,
             boost_uclamp_prev: None,
-            last_place_sig: String::new(),
-            last_place_dump: Instant::now() - PLACE_DUMP_MIN_INTERVAL,
             lab_static_mode: None,
             lab_group_snapshot: Vec::new(),
         }
@@ -737,7 +867,7 @@ impl AffinityManager {
     ) {
         if !cfg.enabled {
             if self.is_active() {
-                self.release();
+                self.release_impl("disabled");
             }
             return;
         }
@@ -810,15 +940,13 @@ impl AffinityManager {
 
     //  工具
 
-    fn cluster_of(&self, cpu: usize) -> &'static str {
-        let ranges = crate::common::chiri_core_ranges();
-        if ranges.prime.contains(&cpu) {
-            "prime"
-        } else if ranges.big.contains(&cpu) {
-            "big"
-        } else {
-            "little"
-        }
+    /// 线程名（状态表缓存；无缓存/为空返回 "-"，@A 帧 comm 字段用）
+    fn thread_comm(&self, tid: i32) -> &str {
+        self.threads
+            .get(&tid)
+            .map(|st| st.comm.as_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or("-")
     }
 
     /// 选核：核池 ∩ 在线核，取 score=逐核 util+钉核数×0.2 最低者（含当前占用）
@@ -881,7 +1009,8 @@ impl AffinityManager {
     }
 
     /// 钉线程到单核。`pkg` 由调用方传入（前台为缓存的 fg_cmdline，后台为 "-"），
-    /// 避免每次钉核都重读 /proc cmdline。
+    /// 避免每次钉核都重读 /proc cmdline。成败均落 @A 帧；失败保持原语义直接
+    /// return（不置状态，下次重试）。
     fn pin_core(
         &mut self,
         tid: i32,
@@ -891,7 +1020,22 @@ impl AffinityManager {
         pkg: &str,
         reason: &str,
     ) {
-        if !set_tid_affinity(tid, &[core]) {
+        let res = set_tid_affinity(tid, &[core]);
+        if crate::logger::diag_active() {
+            let comm = self.thread_comm(tid);
+            crate::logger::aff_action(
+                "pin",
+                pid,
+                tid,
+                pkg,
+                comm,
+                &core.to_string(),
+                &fmt_home(prev_home),
+                &io_result_tag(&res),
+                reason,
+            );
+        }
+        if res.is_err() {
             return;
         }
         if prev_home >= 0 {
@@ -907,95 +1051,160 @@ impl AffinityManager {
             st.home = core as i16;
             st.last_move = Instant::now();
         }
-        crate::logger::devimp_aff(
-            if pid == 0 { "promote" } else { "pin" },
-            pid,
-            pkg,
-            tid,
-            "-",
-            &fmt_home(prev_home),
-            &core.to_string(),
-            "-",
-            reason,
-        );
     }
 
     /// 解除单核钉定：恢复全核掩码。`pkg` 由调用方传入（当前前台线程传缓存
     /// fg_cmdline；cleanup/demote 场景 pid 可能已不属于当前前台，传 "-" 以免
-    /// 日志错误归属）。
-    fn unpin_core(&mut self, tid: i32, prev_home: i16, pid: i32, pkg: &str) {
+    /// 日志错误归属）。状态更新只在掩码恢复成功、或线程已消亡（ESRCH，无从
+    /// 重试）时进行——写失败保留 home/钉核计数，内核掩码与状态表不分叉，
+    /// 后续 rebalance 的 `home >= 0` 分支 / cleanup 路径会重试恢复。
+    fn unpin_core(&mut self, tid: i32, prev_home: i16, pid: i32, pkg: &str) -> std::io::Result<()> {
         let ranges = crate::common::chiri_core_ranges();
         let all: Vec<usize> = (0..ranges.prime.end.max(ranges.big.end)).collect();
-        if prev_home >= 0 {
-            self.add_pinned(prev_home as usize, -1);
+        let res = set_tid_affinity(tid, &all);
+        if crate::logger::diag_active() {
+            let comm = self.thread_comm(tid);
+            crate::logger::aff_action(
+                "restore",
+                pid,
+                tid,
+                pkg,
+                comm,
+                "full",
+                "-",
+                &io_result_tag(&res),
+                "reset",
+            );
         }
-        if let Some(st) = self.threads.get_mut(&tid) {
-            st.home = -1;
-            st.promoted = false;
-            st.low_streak = 0;
-            st.last_busy = None;
+        let gone = res.as_ref().err().and_then(|e| e.raw_os_error()) == Some(libc::ESRCH);
+        if res.is_ok() || gone {
+            if prev_home >= 0 {
+                self.add_pinned(prev_home as usize, -1);
+            }
+            if let Some(st) = self.threads.get_mut(&tid) {
+                st.home = -1;
+                st.promoted = false;
+                st.low_streak = 0;
+                st.last_busy = None;
+            }
         }
-        if set_tid_affinity(tid, &all) {
-            crate::logger::devimp_aff("restore", pid, pkg, tid, "-", "-", "full", "-", "reset");
-        }
+        res
     }
 
-    fn move_tid_group(&self, tid: i32, group: &str) -> bool {
-        crate::utils::try_write_file(&format!("/dev/cpuset/{group}/tasks"), &tid.to_string())
-            .is_ok()
+    /// 迁移线程到指定 cpuset 组（写 /dev/cpuset/&lt;组&gt;/tasks）。
+    /// 直接 std::fs::write 捕获 io 结果——底层 try_write_file 恒返 Ok 会把
+    /// errno 吞掉，无法给 @A 帧供 result；写入行为与原先一致。
+    fn move_tid_group(&self, tid: i32, group: &str) -> std::io::Result<()> {
+        logged_write(&format!("/dev/cpuset/{group}/tasks"), &tid.to_string())
     }
 
     /// 关键线程组掩码兜底的还原：恢复全核掩码并清 group_bind。
-    /// 不触碰单核钉定计数（组绑定从未占用）。线程未做组绑定时为无操作
-    fn restore_group_mask(&mut self, tid: i32, pid: i32, pkg: &str) {
+    /// 不触碰单核钉定计数（组绑定从未占用）。线程未做组绑定时为无操作。
+    /// 失败保持原语义：不置 group_bind（下次重试），仅补 @A 帧。
+    fn restore_group_mask(&mut self, tid: i32, pid: i32, pkg: &str) -> std::io::Result<()> {
         let pinned = self
             .threads
             .get(&tid)
             .map(|st| st.group_bind != GroupBind::None)
             .unwrap_or(false);
         if !pinned {
-            return;
+            return Ok(());
         }
         let max_cpu = {
             let ranges = crate::common::chiri_core_ranges();
             ranges.prime.end.max(ranges.big.end)
         };
         let all: Vec<usize> = (0..max_cpu).collect();
-        if set_tid_affinity(tid, &all) {
+        let res = set_tid_affinity(tid, &all);
+        if crate::logger::diag_active() {
+            let comm = self.thread_comm(tid);
+            crate::logger::aff_action(
+                "restore",
+                pid,
+                tid,
+                pkg,
+                comm,
+                "full",
+                "-",
+                &io_result_tag(&res),
+                "fg_group_reset",
+            );
+        }
+        if res.is_ok() {
             if let Some(st) = self.threads.get_mut(&tid) {
                 // Key/Busy 统一归位；单枚举保证不会出现「绑定位与忙标记不一致」
                 st.group_bind = GroupBind::None;
             }
-            crate::logger::devimp_aff(
-                "restore",
-                pid,
-                pkg,
-                tid,
-                "-",
-                "-",
-                "full",
-                "-",
-                "fg_group_reset",
-            );
         }
+        res
     }
 
-    /// 清理线程：迁回原组 + 恢复全核 + 移除状态
-    fn cleanup_thread(&mut self, tid: i32) {
+    /// 清理线程：迁回原组 + 恢复全核 + 移除状态。恢复动作逐条落 @A 帧，
+    /// 末尾一条 act=bind_release 汇总帧（reason = 触发场景）；返回首个失败
+    /// errno（全成功 None）供 release 汇总。恢复写失败且线程仍在（非 ESRCH）
+    /// 时**保留状态条目**——掩码/组还在被管态，清条目 = 状态表与内核永久分叉；
+    /// 保留后 departed/gone/stale 清理路径会再次触发本函数重试。
+    fn cleanup_thread(&mut self, tid: i32, reason: &str) -> Option<i32> {
         let (moved, orig, home, pid) = match self.threads.get(&tid) {
             Some(st) => (st.moved_group, st.orig_group, st.home, st.pid),
-            None => return,
+            None => return None,
         };
+        let mut err: Option<i32> = None;
+        // 任一恢复写失败且非 ESRCH → 保留条目待重试
+        let mut retain = false;
         if moved && !orig.is_empty() {
-            let _ = self.move_tid_group(tid, orig);
+            let res = self.move_tid_group(tid, orig);
+            if crate::logger::diag_active() {
+                let comm = self.thread_comm(tid);
+                crate::logger::aff_action(
+                    "move_group",
+                    pid,
+                    tid,
+                    "-",
+                    comm,
+                    orig,
+                    "-",
+                    &io_result_tag(&res),
+                    reason,
+                );
+            }
+            if let Err(e) = &res {
+                err = err.or(Some(e.raw_os_error().unwrap_or(0)));
+                retain |= e.raw_os_error() != Some(libc::ESRCH);
+            }
         }
-        if home >= 0 {
-            self.unpin_core(tid, home, pid, "-");
+        let res = if home >= 0 {
+            self.unpin_core(tid, home, pid, "-")
         } else {
             // 组掩码兜底的关键线程在此恢复全核（内部无绑定时为无操作）
-            self.restore_group_mask(tid, pid, "-");
+            self.restore_group_mask(tid, pid, "-")
+        };
+        if let Err(e) = &res {
+            err = err.or(Some(e.raw_os_error().unwrap_or(0)));
+            retain |= e.raw_os_error() != Some(libc::ESRCH);
         }
-        self.threads.remove(&tid);
+        if crate::logger::diag_active() {
+            let comm = self.thread_comm(tid);
+            let result = match err {
+                None => "ok".to_string(),
+                Some(n) => format!("e{n}"),
+            };
+            crate::logger::aff_action(
+                "bind_release",
+                pid,
+                tid,
+                "-",
+                comm,
+                "-",
+                "-",
+                &result,
+                reason,
+            );
+        }
+        if !retain {
+            self.threads.remove(&tid);
+        }
+        err
     }
 
     // [rebalance]
@@ -1040,7 +1249,7 @@ impl AffinityManager {
             .map(|(tid, _)| *tid)
             .collect();
         for tid in departed {
-            self.cleanup_thread(tid);
+            self.cleanup_thread(tid, "departed");
         }
 
         // —— 前台：每轮 1 次 read_dir，新增线程才读 stat ——
@@ -1159,14 +1368,25 @@ impl AffinityManager {
                                     {
                                         // set_tid_affinity 形参是切片，直接借用 perf_pool，
                                         // 不再为每次调用复制一份 Vec
-                                        if set_tid_affinity(tid, &perf_pool) {
+                                        let res = set_tid_affinity(tid, &perf_pool);
+                                        if crate::logger::diag_active() {
+                                            let comm = self.thread_comm(tid);
+                                            crate::logger::aff_action(
+                                                "pin",
+                                                fg_pid,
+                                                tid,
+                                                &pkg,
+                                                comm,
+                                                "group",
+                                                "-",
+                                                &io_result_tag(&res),
+                                                "fg_group",
+                                            );
+                                        }
+                                        if res.is_ok() {
                                             if let Some(st) = self.threads.get_mut(&tid) {
                                                 st.group_bind = GroupBind::Key;
                                             }
-                                            crate::logger::devimp_aff(
-                                                "pin", fg_pid, &pkg, tid, "-", "-", "group", "-",
-                                                "fg_group",
-                                            );
                                         }
                                     }
                                 } else {
@@ -1236,7 +1456,7 @@ impl AffinityManager {
                                                         >= HOLD_LOG_COOLDOWN
                                                     {
                                                         st.last_hold_log = now;
-                                                        crate::logger::devimp_event(
+                                                        crate::logger::main_event(
                                                             "overload_hold",
                                                             &pkg,
                                                             &format!(
@@ -1255,7 +1475,7 @@ impl AffinityManager {
                                     }
                                 }
                             } else if home >= 0 {
-                                self.unpin_core(tid, home, fg_pid, &pkg);
+                                let _ = self.unpin_core(tid, home, fg_pid, &pkg);
                             } else if group_bind == GroupBind::Key {
                                 // 组掩码兜底恢复：boost 退出，或 default 压力
                                 // 解除/息屏（key_pressure 活跃时保持绑定）；
@@ -1263,7 +1483,7 @@ impl AffinityManager {
                                 // 不在此处释放——否则小核压力随升核解除后
                                 // 下一轮即 restore，与采样块滞回形成乒乓
                                 if !key_pressure {
-                                    self.restore_group_mask(tid, fg_pid, &pkg);
+                                    let _ = self.restore_group_mask(tid, fg_pid, &pkg);
                                 }
                             } else if key_pressure && is_key {
                                 // little 高水位的 default 模式：关键线程组绑定
@@ -1271,21 +1491,25 @@ impl AffinityManager {
                                 // 不同触发条件）。不钉单核、不占钉核计数，
                                 // EAS 在性能核组内继续自调度省电摆放
                                 // （形参是切片，直接借用，不再每次复制 Vec）
-                                if set_tid_affinity(tid, &perf_pool) {
+                                let res = set_tid_affinity(tid, &perf_pool);
+                                if crate::logger::diag_active() {
+                                    let comm = self.thread_comm(tid);
+                                    crate::logger::aff_action(
+                                        "pin",
+                                        fg_pid,
+                                        tid,
+                                        &pkg,
+                                        comm,
+                                        "group",
+                                        "-",
+                                        &io_result_tag(&res),
+                                        "normal_press",
+                                    );
+                                }
+                                if res.is_ok() {
                                     if let Some(st) = self.threads.get_mut(&tid) {
                                         st.group_bind = GroupBind::Key;
                                     }
-                                    crate::logger::devimp_aff(
-                                        "pin",
-                                        fg_pid,
-                                        &pkg,
-                                        tid,
-                                        "-",
-                                        "-",
-                                        "group",
-                                        "-",
-                                        "normal_press",
-                                    );
                                 }
                             }
                         }
@@ -1297,7 +1521,7 @@ impl AffinityManager {
                             .map(|(tid, _)| *tid)
                             .collect();
                         for tid in gone {
-                            self.cleanup_thread(tid);
+                            self.cleanup_thread(tid, "gone");
                         }
 
                         // —— default 小核高水位：非关键前台线程升核（限量采样） ——
@@ -1316,7 +1540,7 @@ impl AffinityManager {
                             .map(|(tid, _)| *tid)
                             .collect();
                         for tid in gone {
-                            self.cleanup_thread(tid);
+                            self.cleanup_thread(tid, "gone");
                         }
                     }
                 }
@@ -1399,7 +1623,7 @@ impl AffinityManager {
                                                 >= HOLD_LOG_COOLDOWN
                                             {
                                                 st.last_hold_log = now;
-                                                crate::logger::devimp_event(
+                                                crate::logger::main_event(
                                                     "overload_hold",
                                                     "-",
                                                     &format!(
@@ -1546,9 +1770,26 @@ impl AffinityManager {
                         };
                         if let Some(util) = busy {
                             // 移入 top-app 使 big 核可见，再按当前核心占用选核钉定
-                            let moved = self.move_tid_group(*tid, GROUP_TOP_APP);
+                            let move_res = self.move_tid_group(*tid, GROUP_TOP_APP);
+                            if crate::logger::diag_active() {
+                                let comm = self.thread_comm(*tid);
+                                crate::logger::aff_action(
+                                    "move_group",
+                                    0,
+                                    *tid,
+                                    "-",
+                                    comm,
+                                    GROUP_TOP_APP,
+                                    "-",
+                                    &io_result_tag(&move_res),
+                                    "promote",
+                                );
+                            }
                             if let Some(st) = self.threads.get_mut(tid) {
-                                st.moved_group = moved;
+                                // 写入失败不置位（没真正迁入 top-app 组就无需迁回）——
+                                // 全仓唯一一处观测化顺带的语义修正（2026-09-22 审查记档，
+                                // 原 try_write_file 恒 Ok 时该项恒为 true）
+                                st.moved_group = move_res.is_ok();
                                 st.promoted = true;
                             }
                             // 选核与前台普通线程同口径：big 有未钉核只看 big，
@@ -1585,62 +1826,7 @@ impl AffinityManager {
             .map(|(tid, _)| *tid)
             .collect();
         for tid in stale {
-            self.cleanup_thread(tid);
-        }
-
-        // —— devimp 低频输出（每 DEVL_ROW_EVERY_ROUNDS 轮，全部复用缓存数据，
-        // 零新增文件读）：place 行 = 前台线程放置快照（包名/线程名/落点核均
-        // 来自缓存），core 行 = 逐核 util + 钉核计数 ——
-        if t % DEVL_ROW_EVERY_ROUNDS == 0 {
-            if fg_pid > 0 {
-                // place 行变更检测：签名（tid:home 序列）未变且未到心跳间隔
-                // 时跳过本轮输出。终末地等大型游戏 ~180 线程 × 每 8s 全量
-                // dump = 每秒 ~20 行的稳定写放大，且绝大多数轮次放置不变
-                let mut tids: Vec<i32> = self
-                    .threads
-                    .iter()
-                    .filter(|(_, st)| st.pid == fg_pid)
-                    .map(|(tid, _)| *tid)
-                    .collect();
-                tids.sort_unstable();
-                let mut sig = String::with_capacity(tids.len() * 12);
-                for tid in &tids {
-                    sig.push_str(&tid.to_string());
-                    sig.push(':');
-                    sig.push_str(&self.threads[tid].home.to_string());
-                    sig.push(';');
-                }
-                let changed = sig != self.last_place_sig;
-                let due = now.duration_since(self.last_place_dump) >= PLACE_DUMP_MIN_INTERVAL;
-                if changed || due {
-                    self.last_place_sig = sig;
-                    self.last_place_dump = now;
-                    for tid in &tids {
-                        let st = &self.threads[tid];
-                        let comm = if st.comm.is_empty() {
-                            "-"
-                        } else {
-                            st.comm.as_str()
-                        };
-                        crate::logger::devimp_place(
-                            fg_pid,
-                            &self.fg_cmdline,
-                            *tid,
-                            comm,
-                            st.home as i32,
-                            "-",
-                        );
-                    }
-                }
-            }
-            for cpu in 0..max_cpu {
-                let util = self
-                    .core_utils
-                    .get(cpu)
-                    .map(|u| format!("{:.0}", u * 100.0))
-                    .unwrap_or_else(|| "-".to_string());
-                crate::logger::devimp_core(self.cluster_of(cpu), cpu, &util, self.pinned_of(cpu));
-            }
+            self.cleanup_thread(tid, "stale");
         }
     }
 
@@ -1689,25 +1875,29 @@ impl AffinityManager {
             if sustained && !bound {
                 // 抬到性能核组（不钉单核，组内交给 EAS 自调度）
                 // perf_pool 本就是切片参数，直接传递（原 to_vec 是多余复制）
-                if set_tid_affinity(tid, perf_pool) {
-                    if let Some(st) = self.threads.get_mut(&tid) {
-                        st.group_bind = GroupBind::Busy;
-                    }
-                    crate::logger::devimp_aff(
+                let res = set_tid_affinity(tid, perf_pool);
+                if crate::logger::diag_active() {
+                    let comm = self.thread_comm(tid);
+                    crate::logger::aff_action(
                         "pin",
                         fg_pid,
-                        &pkg,
                         tid,
-                        "-",
-                        "-",
+                        &pkg,
+                        comm,
                         "group",
                         "-",
+                        &io_result_tag(&res),
                         "normal_busy",
                     );
                 }
+                if res.is_ok() {
+                    if let Some(st) = self.threads.get_mut(&tid) {
+                        st.group_bind = GroupBind::Busy;
+                    }
+                }
             } else if bound && low >= DEMOTE_STREAK {
                 // 空闲回落：恢复全核掩码（restore 内清 group_bind）
-                self.restore_group_mask(tid, fg_pid, &pkg);
+                let _ = self.restore_group_mask(tid, fg_pid, &pkg);
             }
         }
         self.fg_cursor = if end < n { end } else { 0 };
@@ -1731,13 +1921,31 @@ impl AffinityManager {
             None => return,
         };
         if moved && !orig.is_empty() {
-            let _ = self.move_tid_group(tid, orig);
-            if let Some(st) = self.threads.get_mut(&tid) {
-                st.moved_group = false;
+            let res = self.move_tid_group(tid, orig);
+            if crate::logger::diag_active() {
+                let comm = self.thread_comm(tid);
+                crate::logger::aff_action(
+                    "move_group",
+                    0,
+                    tid,
+                    "-",
+                    comm,
+                    orig,
+                    "-",
+                    &io_result_tag(&res),
+                    "demote",
+                );
+            }
+            // 写成功才清 moved_group：失败时组未迁回，标记保留供下次 demote 重试
+            // （无条件清除会让状态表与内核 cpuset 归属分叉）
+            if res.is_ok() {
+                if let Some(st) = self.threads.get_mut(&tid) {
+                    st.moved_group = false;
+                }
             }
         }
         if home >= 0 {
-            self.unpin_core(tid, home, 0, "-");
+            let _ = self.unpin_core(tid, home, 0, "-");
         }
         debug!(
             "{}",
@@ -1822,10 +2030,21 @@ impl AffinityManager {
 
     fn apply_uclamp(&self, cfg: &AffinityConfig) {
         if cfg.top_app_uclamp_min_pct > 0 && self.sys.cpuctl_top_app_exist {
-            let _ = crate::utils::try_write_file(
-                "/dev/cpuctl/top-app/cpu.uclamp.min",
-                &cfg.top_app_uclamp_min_pct.to_string(),
-            );
+            let val = cfg.top_app_uclamp_min_pct.to_string();
+            let res = logged_write("/dev/cpuctl/top-app/cpu.uclamp.min", &val);
+            if crate::logger::diag_active() {
+                crate::logger::aff_action(
+                    "uclamp",
+                    0,
+                    0,
+                    "-",
+                    "-",
+                    "/dev/cpuctl/top-app/cpu.uclamp.min",
+                    &val,
+                    &io_result_tag(&res),
+                    "apply_min",
+                );
+            }
         }
     }
 
@@ -1833,9 +2052,7 @@ impl AffinityManager {
         if let Some(snap) = &self.snapshot {
             let items: Vec<(String, String)> = snap
                 .iter()
-                .filter(|(path, _)| {
-                    path.contains(GROUP_TOP_APP) || path.contains(GROUP_FOREGROUND)
-                })
+                .filter(|(path, _)| path.contains(GROUP_TOP_APP) || path.contains(GROUP_FOREGROUND))
                 .cloned()
                 .collect();
             write_cpuset_paths_items(&items);
@@ -1845,7 +2062,20 @@ impl AffinityManager {
     fn restore_uclamp(&self) {
         if let Some(v) = &self.uclamp_snapshot {
             if !v.is_empty() {
-                let _ = crate::utils::try_write_file("/dev/cpuctl/top-app/cpu.uclamp.min", v);
+                let res = logged_write("/dev/cpuctl/top-app/cpu.uclamp.min", v);
+                if crate::logger::diag_active() {
+                    crate::logger::aff_action(
+                        "uclamp",
+                        0,
+                        0,
+                        "-",
+                        "-",
+                        "/dev/cpuctl/top-app/cpu.uclamp.min",
+                        v,
+                        &io_result_tag(&res),
+                        "restore_min",
+                    );
+                }
             }
         }
     }
@@ -1877,7 +2107,23 @@ impl AffinityManager {
             }
         }
         let val = format!("{pct}.00");
-        if crate::utils::try_write_file(UCLAMP_MAX_PATH, &val).is_ok() {
+        let res = logged_write(UCLAMP_MAX_PATH, &val);
+        if crate::logger::diag_active() {
+            crate::logger::aff_action(
+                "uclamp",
+                0,
+                0,
+                "-",
+                "-",
+                UCLAMP_MAX_PATH,
+                &val,
+                &io_result_tag(&res),
+                "apply_max",
+            );
+        }
+        // 回读验证保持原判定口径（原 try_write_file 恒 Ok、验证块恒进，
+        // 改造后不以写入返回值决定是否验证）
+        {
             let applied = std::fs::read_to_string(UCLAMP_MAX_PATH)
                 .ok()
                 .and_then(|s| s.trim().parse::<f32>().ok())
@@ -1912,18 +2158,31 @@ impl AffinityManager {
         if pct == 0 {
             return;
         }
-        write_bg_uclamp_max(&format!("{pct}.00"));
+        write_bg_uclamp_max(&format!("{pct}.00"), "bg_apply");
     }
 
     /// 还原后台组 uclamp.max 为内核默认（"max"）：释放与关闭总闸时调用
     fn restore_bg_uclamp_max(&self) {
-        write_bg_uclamp_max("max");
+        write_bg_uclamp_max("max", "bg_restore");
     }
 
     fn restore_uclamp_max(&self) {
         if let Some(v) = &self.uclamp_max_snapshot {
             if !v.is_empty() {
-                let _ = crate::utils::try_write_file(UCLAMP_MAX_PATH, v);
+                let res = logged_write(UCLAMP_MAX_PATH, v);
+                if crate::logger::diag_active() {
+                    crate::logger::aff_action(
+                        "uclamp",
+                        0,
+                        0,
+                        "-",
+                        "-",
+                        UCLAMP_MAX_PATH,
+                        v,
+                        &io_result_tag(&res),
+                        "restore_max",
+                    );
+                }
             }
         }
     }
@@ -1961,10 +2220,36 @@ impl AffinityManager {
             }
             // 每轮重写（非幂等短路）：与 mode file/fast_lock 的周期重写同口径，
             // 兼作防外部守护进程篡改的再断言——特调期间每 2s 收敛回 100
-            let _ = crate::utils::try_write_file(UCLAMP_MAX_PATH, "100.00");
+            let res = logged_write(UCLAMP_MAX_PATH, "100.00");
+            if crate::logger::diag_active() {
+                crate::logger::aff_action(
+                    "uclamp",
+                    0,
+                    0,
+                    "-",
+                    "-",
+                    UCLAMP_MAX_PATH,
+                    "100.00",
+                    &io_result_tag(&res),
+                    "override",
+                );
+            }
         } else if let Some(prev) = self.boost_uclamp_prev.take() {
             if self.applied_kind == KIND_BOOST && !prev.is_empty() {
-                let _ = crate::utils::try_write_file(UCLAMP_MAX_PATH, &prev);
+                let res = logged_write(UCLAMP_MAX_PATH, &prev);
+                if crate::logger::diag_active() {
+                    crate::logger::aff_action(
+                        "uclamp",
+                        0,
+                        0,
+                        "-",
+                        "-",
+                        UCLAMP_MAX_PATH,
+                        &prev,
+                        &io_result_tag(&res),
+                        "override_restore",
+                    );
+                }
             }
         }
     }
@@ -1977,9 +2262,18 @@ impl AffinityManager {
     }
 
     pub fn release(&mut self) {
+        self.release_impl("release");
+    }
+
+    /// 释放（bind_release 汇总帧的 reason 按场景区分：常规收尾 "release"、
+    /// 总闸关闭 "disabled"）。各恢复动作的帧由 write_cpuset_paths_items /
+    /// restore_* / cleanup_thread 自行落，这里补一条 act=bind_release 汇总帧
+    /// （result = 各线程恢复写入的首个失败 errno，全成功 ok）。
+    fn release_impl(&mut self, reason: &str) {
         let tids: Vec<i32> = self.threads.keys().copied().collect();
+        let mut err: Option<i32> = None;
         for tid in tids {
-            self.cleanup_thread(tid);
+            err = err.or(self.cleanup_thread(tid, reason));
         }
         if let Some(snap) = self.snapshot.take() {
             write_cpuset_paths_items(&snap);
@@ -1992,6 +2286,42 @@ impl AffinityManager {
         self.last_boost = false;
         self.bg_cursor = 0;
         self.bg_checked.clear();
+        if crate::logger::diag_active() {
+            let result = match err {
+                None => "ok".to_string(),
+                Some(n) => format!("e{n}"),
+            };
+            crate::logger::aff_action("bind_release", 0, 0, "-", "-", "-", "-", &result, reason);
+        }
         info!("{}", t("affinity-released"));
+    }
+
+    /// 快照取数：导出线程状态表 (tid, pid, home, pinned)。
+    /// pid 未知（后台候选建档）填 0；pinned = 单核钉定或性能核组绑定。
+    pub fn thread_diag(&self) -> Vec<(i32, i32, i16, bool)> {
+        self.threads
+            .iter()
+            .map(|(tid, st)| {
+                (
+                    *tid,
+                    st.pid,
+                    st.home,
+                    st.home >= 0 || st.group_bind != GroupBind::None,
+                )
+            })
+            .collect()
+    }
+
+    /// 快照取数：被管线程所属 pid 集合（去重排序；无 pid 信息的不计）
+    pub fn managed_pids(&self) -> Vec<i32> {
+        let mut pids: Vec<i32> = self
+            .threads
+            .values()
+            .map(|st| st.pid)
+            .filter(|&p| p > 0)
+            .collect();
+        pids.sort_unstable();
+        pids.dedup();
+        pids
     }
 }

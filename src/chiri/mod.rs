@@ -1,4 +1,4 @@
-//! mod.rs: [consts] [thermal] [policies] [affinity] [threads] [config_watcher] [ipc_main] [ipc_state] [evt_loop] [evt_screen] [evt_mode] [evt_pkg_switch] [evt_load] [evt_frame] [evt_reload] [evt_bpf] [panic_recovery]
+//! mod.rs: [consts] [thermal] [policies] [aff_snap] [affinity] [threads] [config_watcher] [ipc_main] [ipc_state] [evt_loop] [evt_screen] [evt_mode] [evt_pkg_switch] [evt_load] [evt_frame] [evt_reload] [evt_bpf] [panic_recovery]
 
 use anyhow::Result;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -233,11 +233,11 @@ pub fn get_cpu_policies() -> Vec<CpuPolicy> {
     policies
 }
 
-/// devimp snap 行用：各 policy 的**实际**当前频率 / 上限 / 下限 / 调速器
+/// main_ snap 行用：各 policy 的**实际**当前频率 / 上限 / 下限 / 调速器
 /// （`scaling_cur_freq` / `scaling_max_freq` / `scaling_min_freq` / `scaling_governor`）。
 /// 多 policy 以 `;` 分隔，每项 `policy<id>:<值>`；节点读不到写 `-`。
-/// **只在 devimp 开启时调用**（每秒一次 sysfs 读），不做缓存——这些值会被内核
-/// governor 与 TunedGovernor 改写，缓存只会给出过期数据。与 devimp 既有的
+/// **只在诊断开启时调用**（每秒一次 sysfs 读），不做缓存——这些值会被内核
+/// governor 与 TunedGovernor 改写，缓存只会给出过期数据。与 tick 行既有的
 /// `cur_freq_khz`/`max_freq_khz`（调度器决策值）互补：那两列是「我们写了多少」，
 /// 这里是「内核现在实际是多少」。
 pub fn cpu_freq_snapshot() -> (String, String, String, String) {
@@ -446,6 +446,223 @@ fn apply_mode_takeover(
     }
 }
 
+// [aff_snap]
+/// @S 线程下钻的 stat 差分基线：tid → 上轮 ticks + 上次采样时刻。
+/// 与 cpu_monitor 的进程级基线（SnapState）分开，各自独立滚动。
+#[derive(Default)]
+struct AffThState {
+    /// 上次采样时刻（None = 首帧：只建基线、util 全 0）
+    last_at: Option<Instant>,
+    /// tid → 上轮 stat ticks（utime+stime）。每帧整体滚动重建，死线程条目随之清除
+    base: std::collections::HashMap<u32, u64>,
+}
+static AFF_TH_STATE: std::sync::OnceLock<Mutex<AffThState>> = std::sync::OnceLock::new();
+
+/// stat ticks → 秒的换算（USER_HZ，Android 恒 100）：只探测一次
+fn clk_tck() -> f32 {
+    static CLK_TCK: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *CLK_TCK.get_or_init(|| {
+        let v = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+        if v > 0 { v as f32 } else { 100.0 }
+    })
+}
+
+// （线程所在核 processor 由 affinity::sample_one_tid 同一次 stat 读取顺带解析，
+//  不再单独读 /proc/<tid>/stat——见 ThreadSample::processor）
+
+/// 核占用掩码 hex 位图：`read_tid_mask` 给出允许核列表（如 0..7 全核），转成
+/// 位图 hex（8 核全占 = `ff`）；查不到（线程消亡等）写 `-`
+fn mask_hex(pid: i32) -> String {
+    let Some(cpus) = affinity::read_tid_mask(pid) else {
+        return "-".to_string();
+    };
+    let mut bits: u64 = 0;
+    for c in cpus {
+        if c < 64 {
+            bits |= 1u64 << c;
+        }
+    }
+    format!("{bits:x}")
+}
+
+/// @S 每秒进程/线程快照帧（`devimp/aff_<ts>.log`）组装：top-N 进程 + 前台树/
+/// 被管进程线程下钻。只在 `diag_active()` 时由 1s 块调用（与 main_snap 同门控，
+/// 关闭路径零开销），拼好的行数组交 `logger::aff_snapshot`（帧头计数由行反推）。
+///
+/// 落盘集合 = util top-N（N = meta.devimp_top_n）∪ 前台进程+全部线程 ∪ 被管
+/// 进程+被管线程；后两者 rank=0、util=0 也落盘。前台子进程无现成枚举手段，
+/// 只落前台进程+线程（不硬造 /proc 遍历）。
+///
+/// 行格式（util 一律整数百分比）：
+/// - 进程：`p <rank> <pid> <pkg|comm> u=<util%> mask=<核占用hex> home=<核|-1>`
+/// - 线程：`t <pid> <tid> <comm> u=<util%> core=<核|-1> home=<核|-1> pin=<0|1> uclamp=-1`
+///
+/// 数据来源与成本：进程 util 走 `snapshot_procs`（eBPF map 差分）；线程 util 走
+/// `sample_one_tid` stat 差分（只对下钻线程，约几十次小文件读）；核掩码只对落盘
+/// 进程查 `read_tid_mask`；home/pin 直取 AffinityManager 状态表；uclamp 不下钻恒 -1。
+fn build_aff_snapshot(
+    mgr: &affinity::AffinityManager,
+    fg_pid: i32,
+    fg_pkg: &str,
+    top_n: usize,
+) -> Vec<String> {
+    use std::collections::{HashMap, HashSet};
+
+    // 被管线程状态（home/pin）一次取完；进程级 home 从这里派生
+    let diag = mgr.thread_diag();
+    let mut th_state: HashMap<u32, (i16, bool)> = HashMap::with_capacity(diag.len());
+    let mut pid_home: HashMap<u32, i16> = HashMap::new();
+    for (tid, pid, home, pinned) in &diag {
+        th_state.insert(*tid as u32, (*home, *pinned));
+        // 进程级 home（确定性归属，与 HashMap 遍历序无关）：取最小有效 home，
+        // 全无有效记录落 -1——多钉线程进程的 p 行 home 不再逐帧漂移
+        let slot = pid_home.entry(*pid as u32).or_insert(-1);
+        if *home >= 0 && (*slot < 0 || *home < *slot) {
+            *slot = *home;
+        }
+    }
+
+    // ── 线程下钻集合 = 前台树全量 ∪ 被管线程（按 tid 去重，稳定排序）──
+    let mut tids: Vec<(u32, u32)> = Vec::new(); // (pid, tid)
+    let mut seen_tid: HashSet<u32> = HashSet::new();
+    if fg_pid > 0 {
+        for tid in crate::monitor::cpu_monitor::get_thread_tids(fg_pid as u32) {
+            if seen_tid.insert(tid) {
+                tids.push((fg_pid as u32, tid));
+            }
+        }
+    }
+    for (tid, pid, _, _) in &diag {
+        if seen_tid.insert(*tid as u32) {
+            tids.push((*pid as u32, *tid as u32));
+        }
+    }
+    tids.sort_unstable();
+
+    // 线程采样：stat 差分（首见/首帧只建基线 util=0）+ comm；core 取 stat 的
+    // processor 字段（读不到 -1）。采样失败（线程已退出）即不落行
+    let mut th_rows: Vec<(u32, u32, String, i32, i32)> = Vec::with_capacity(tids.len());
+    {
+        let mut st = AFF_TH_STATE
+            .get_or_init(|| Mutex::new(AffThState::default()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let now = Instant::now();
+        let win_secs = st
+            .last_at
+            .map(|t| now.duration_since(t).as_secs_f32())
+            .unwrap_or(0.0);
+        st.last_at = Some(now);
+        let mut next_base = HashMap::with_capacity(tids.len());
+        for &(pid, tid) in &tids {
+            let Some(s) = affinity::sample_one_tid(tid as i32) else {
+                continue;
+            };
+            // 单线程只能跑在一个核上：util ≤ 100%（采样抖动由 clamp 兜底）
+            let util_pct = match st.base.get(&tid) {
+                Some(&prev) if win_secs > 0.0 && s.ticks >= prev => {
+                    (((s.ticks - prev) as f32 / clk_tck()) / win_secs * 100.0).clamp(0.0, 100.0)
+                }
+                _ => 0.0,
+            };
+            next_base.insert(tid, s.ticks);
+            th_rows.push((
+                pid,
+                tid,
+                crate::logger::aff_token(&s.comm),
+                util_pct.round() as i32,
+                s.processor,
+            ));
+        }
+        st.base = next_base;
+    }
+    // 被管进程的 comm 兜底（不在进程快照里时用其任一线程 comm）
+    let mut pid_comm: HashMap<u32, &str> = HashMap::new();
+    for (pid, _, comm, _, _) in &th_rows {
+        pid_comm.entry(*pid).or_insert(comm.as_str());
+    }
+
+    // ── 进程集合：util top-N ∪ 前台进程 ∪ 被管进程 ──
+    let mut procs = crate::monitor::cpu_monitor::snapshot_procs();
+    // util 降序 + pid 升序 tie-break：等 util（常见于大量 util=0 的冷进程）时
+    // 行序与 top-N 成员不随 BPF map 遍历序逐帧抖动
+    procs.sort_by(|a, b| {
+        b.util
+            .partial_cmp(&a.util)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.pid.cmp(&b.pid))
+    });
+    // config normalize 已钳 1..=64；此处兜底还要接住 Config::load 失败降级路径
+    // （derive Default 的 devimp_top_n=0，未经 normalize）——0 按缺省 10 恢复
+    let top_n = if top_n == 0 { 10 } else { top_n.clamp(1, 64) };
+    let top_len = top_n.min(procs.len());
+    let proc_of: HashMap<u32, _> = procs.iter().map(|p| (p.pid, p)).collect();
+    let mut extra: Vec<u32> = Vec::new();
+    let mut seen_pid: HashSet<u32> = HashSet::new();
+    for p in procs.iter().take(top_len) {
+        seen_pid.insert(p.pid);
+    }
+    if fg_pid > 0 && seen_pid.insert(fg_pid as u32) {
+        extra.push(fg_pid as u32);
+    }
+    let mut managed: Vec<u32> = mgr.managed_pids().into_iter().map(|p| p as u32).collect();
+    managed.sort_unstable();
+    for pid in managed {
+        if seen_pid.insert(pid) {
+            extra.push(pid);
+        }
+    }
+
+    // ── 拼行：p 行在前（top-N rank=1..N 按 util 降序，补位行 rank=0），t 行随后 ──
+    let mut rows: Vec<String> = Vec::with_capacity(top_len + extra.len() + th_rows.len());
+    for (rank, p) in procs.iter().take(top_len).enumerate() {
+        let name = if p.pid as i32 == fg_pid && !fg_pkg.is_empty() {
+            fg_pkg
+        } else {
+            p.comm.as_str()
+        };
+        // comm/cmdline 可含空白与控制字符（含换行会拆帧），过 aff_token 净化
+        let name = crate::logger::aff_token(name);
+        rows.push(format!(
+            "p {} {} {} u={} mask={} home={}",
+            rank + 1,
+            p.pid,
+            name,
+            p.util.round() as i32,
+            mask_hex(p.pid as i32),
+            pid_home.get(&p.pid).copied().unwrap_or(-1),
+        ));
+    }
+    for pid in extra {
+        let (name, util) = match proc_of.get(&pid) {
+            Some(p) => (p.comm.as_str(), p.util),
+            // 快照里没有（不在 TGID map 的冷进程）：comm 兜底用其下钻线程的 comm
+            None => (pid_comm.get(&pid).copied().unwrap_or("-"), 0.0),
+        };
+        // 前台进程优先写包名（pkg|comm 口径）；comm 同样净化（防拆帧）
+        let name = if pid as i32 == fg_pid && !fg_pkg.is_empty() {
+            fg_pkg
+        } else {
+            name
+        };
+        let name = crate::logger::aff_token(name);
+        let u = util.round() as i32; // 与 t 行取整口径一致（round，非 {:.0} 的向偶取整）
+        rows.push(format!(
+            "p 0 {pid} {name} u={u} mask={} home={}",
+            mask_hex(pid as i32),
+            pid_home.get(&pid).copied().unwrap_or(-1),
+        ));
+    }
+    for (pid, tid, comm, util_pct, core) in &th_rows {
+        let (home, pinned) = th_state.get(tid).copied().unwrap_or((-1, false));
+        rows.push(format!(
+            "t {pid} {tid} {comm} u={util_pct} core={core} home={home} pin={} uclamp=-1",
+            if pinned { 1 } else { 0 }
+        ));
+    }
+    rows
+}
+
 // [affinity]
 /// 应用 CPU 亲和布局与 core_ctl 在线策略（ChiRi 专属，跟随模式/屏幕/前台 PID）。
 /// 内部带去重：布局与 PID 未变化时无 sysfs 写入，可安全周期性调用。
@@ -466,9 +683,8 @@ fn apply_affinity_and_corectl(
     // governor/GPU 由调用方 sync（sync_lab_governor_gpu）。周期重入即纠偏
     // （框架写回的 top-app/foreground 会被重写）。core_ctl 交回系统（NONE）。
     if mode == "contingency" || mode == "babel" {
-        // thread_bind=false（线程调整关闭）时不接管摆放：lab 静态分组本质是
-        // 线程/核心摆放，与普通亲和一样受总闸约束（config.affinity.enabled 已在
-        // Config::load 与 meta.thread_bind 取与），否则 lab 模式下总闸关不掉
+        // lab 静态分组本质是线程/核心摆放，与普通亲和一样受总闸约束（机型子开关与
+        // meta.thread_bind 在 Config::load 取「与」——后者是实验室 frozen 专用闸）
         if config.affinity.enabled {
             affinity.lab_static_apply(mode);
         } else {
@@ -950,13 +1166,13 @@ pub fn start_scheduler_thread(
                     }
                 }
                 // 开发记录开关初始同步：**与停摆无关**（停摆只停调度，采集照常），
-                // 必须先于下面的 halted 门控——停摆启动时若跳过，devimp 会用 logger
-                // 的默认值，与 meta.dev_record 配置不一致
+                // 必须先于下面的 halted 门控——停摆启动时若跳过，诊断记录会用
+                // logger 的默认值，与 meta.dev_record 配置不一致
                 {
                     let cfg = config_clone.read().unwrap();
-                    crate::logger::set_devimp_active(cfg.meta.dev_record);
+                    crate::logger::set_diag_active(cfg.meta.dev_record);
                 }
-                crate::logger::set_devimp_mode(&current_mode);
+                crate::logger::set_diag_mode(&current_mode);
                 // 启动即按初始模式应用亲和布局与 core_ctl 在线策略。
                 // **停摆启动时跳过**：DOWN 的语义是「调度不工作、一切交回系统」，此时
                 // 接管亲和布局等于停摆期还在写 cpuset；而 `halted` 初值就是 is_down()，
@@ -1037,7 +1253,7 @@ pub fn start_scheduler_thread(
                         // 是被 ChiRi 改过的系统，而不是系统自身。
                         CpuScheduler::restore_system_tweaks();
                         *mode_clone.lock().unwrap() = crate::down::DOWN_MODE.to_string();
-                        crate::logger::set_devimp_mode(crate::down::DOWN_MODE);
+                        crate::logger::set_diag_mode(crate::down::DOWN_MODE);
                         let _ = utils::try_write_file(
                             &mode_file_path,
                             crate::down::DOWN_MODE.as_bytes(),
@@ -1057,7 +1273,7 @@ pub fn start_scheduler_thread(
                             live_mode
                         };
                         *mode_clone.lock().unwrap() = resume_mode.clone();
-                        crate::logger::set_devimp_mode(&resume_mode);
+                        crate::logger::set_diag_mode(&resume_mode);
                         let _ = std::fs::remove_file(&mode_file_path);
                         // 停摆期 governors 全被 release 过，退出时**必须按恢复出来的模式重新
                         // 接管**：只复位内存模式不够——ModeChange 只在「模式真的变了」时才重
@@ -1181,11 +1397,11 @@ pub fn start_scheduler_thread(
                 // 停摆期间配置照重载（meta 的日志开关等仍要生效），只是不下发到调度器
                 let config_dirty = dirty_ipc.swap(false, Ordering::AcqRel);
                 if config_dirty {
-                    // devimp 采集开关与停摆无关（停摆只停调度）：无条件同步，
+                    // 诊断采集开关与停摆无关（停摆只停调度）：无条件同步，
                     // 保证停摆期间改 meta.dev_record 也即时生效（与 down.rs
                     // 「采集照常」的语义一致）
                     let cfg = config_clone.read().unwrap();
-                    crate::logger::set_devimp_active(cfg.meta.dev_record);
+                    crate::logger::set_diag_active(cfg.meta.dev_record);
                 }
                 if config_dirty && !halted && is_screen_on {
                     let current_mode = mode_clone.lock().unwrap().clone();
@@ -1219,8 +1435,8 @@ pub fn start_scheduler_thread(
                     drop(config_lock);
                     // 亲和布局/core_ctl 可能随新配置开关变化，刷新一次
                     let cfg = config_clone.read().unwrap();
-                    crate::logger::set_devimp_active(cfg.meta.dev_record);
-                    crate::logger::set_devimp_mode(&current_mode);
+                    crate::logger::set_diag_active(cfg.meta.dev_record);
+                    crate::logger::set_diag_mode(&current_mode);
                     apply_affinity_and_corectl(
                         &mut affinity_mgr,
                         &mut corectl_mgr,
@@ -1239,7 +1455,7 @@ pub fn start_scheduler_thread(
                 if !halted && last_thermal_check.elapsed() >= THERMAL_CHECK_INTERVAL {
                     let cfg = config_clone.read().unwrap();
                     let current_mode = mode_clone.lock().unwrap().clone();
-                    crate::logger::set_devimp_active(cfg.meta.dev_record);
+                    crate::logger::set_diag_active(cfg.meta.dev_record);
                     apply_affinity_and_corectl(
                         &mut affinity_mgr,
                         &mut corectl_mgr,
@@ -1286,9 +1502,9 @@ pub fn start_scheduler_thread(
                     // 前台包名实时取自 app_detect（含同模式切换；ModeChange 仅在
                     // 模式变化时才有事件，用事件维护会写过期包名）
                     let fg_package = crate::monitor::app_detect::get_current_package();
-                    // devimp 按前台包名分组：包名变化即切换新诊断文件（内部去重；
-                    // 空包名不切换，避免启动初期/瞬时空读反复开文件）
-                    crate::logger::set_devimp_package(&fg_package);
+                    // 诊断日志按前台包名分组：包名变化即切换新 main_ 诊断文件
+                    // （内部去重；空包名不切换，避免启动初期/瞬时空读反复开文件）
+                    crate::logger::set_diag_package(&fg_package);
                     // 充放电状态：1s 一次读 status 节点（电流符号厂商方向不一，不可靠）
                     let charge_state = read_battery_charge_state();
                     // fps 预留列：仅 FAS 激活时取活跃实例的窗口均值，
@@ -1395,9 +1611,9 @@ pub fn start_scheduler_thread(
                         });
                     }
                     // 开发记录 snap 行（1s）：环境上下文（开启 dev_record 才有 IO；
-                    // 前台包名由 set_devimp_package 已同步，行内自动填充）
-                    if crate::logger::devimp_active() {
-                        // 频率/调速器快照只在 devimp 开启时采集（常态零开销）；
+                    // 前台包名由 set_diag_package 已同步，行内自动填充）
+                    if crate::logger::diag_active() {
+                        // 频率/调速器快照只在诊断开启时采集（常态零开销）；
                         // 不缓存——内核与其它进程随时会改这些值。
                         // CPU 每秒采（cpufreq 节点读取廉价）；GPU 受 `GPU_SNAPSHOT_ENABLED`
                         // 总开关控制（当前关闭，见其注释）、开启时再叠加 `gpu_snapshot_due()`
@@ -1410,7 +1626,7 @@ pub fn start_scheduler_thread(
                         } else {
                             ("-".to_string(), "-".to_string(), "-".to_string(), "-".to_string())
                         };
-                        crate::logger::devimp_snap(
+                        crate::logger::main_snap(
                             is_screen_on,
                             &fmt_opt(last_batt_temp, 1),
                             &fmt_opt(last_cpu_temp, 1),
@@ -1435,6 +1651,18 @@ pub fn start_scheduler_thread(
                             &gpu_min,
                             &gpu_gov,
                         );
+                        // @S 每秒进程/线程快照（aff_* 线程流文件）：top-N 进程 +
+                        // 前台树/被管进程线程下钻。与上面的 main_snap 同 diag_active
+                        // 门控（关闭路径零开销）；开启时成本为 map 遍历 + 少量 /proc
+                        // 与几十次 getaffinity/stat 读，毫秒级
+                        let snap_top_n = config_clone.read().unwrap().meta.devimp_top_n;
+                        let rows = build_aff_snapshot(
+                            &affinity_mgr,
+                            crate::monitor::app_detect::get_current_pid(),
+                            &fg_package,
+                            snap_top_n,
+                        );
+                        crate::logger::aff_snapshot(&rows);
                     }
                     if telemetry_log_counter % 20 == 0 && log::log_enabled!(log::Level::Debug) {
                         log::debug!(
@@ -1465,7 +1693,7 @@ pub fn start_scheduler_thread(
                     if !halted && fas_mgr.tick() {
                         if let Some(mode) = pending_mode_after_fas.take() {
                             *mode_clone.lock().unwrap() = mode.clone();
-                            crate::logger::set_devimp_mode(&mode);
+                            crate::logger::set_diag_mode(&mode);
                             let _ = utils::try_write_file(&mode_file_path, mode.as_bytes());
                             // governor/GPU：目标若是 contingency/babel 则接管，否则恢复
                             sync_lab_governor_gpu(&mode, &mut governor_guard, &mut gpu_guard, &mut fast_lock);
@@ -1630,7 +1858,7 @@ pub fn start_scheduler_thread(
                                                 false,
                                             );
                                         }
-                                        crate::logger::devimp_event("scene_exit", "-", "fas_activate_preempt");
+                                        crate::logger::main_event("scene_exit", "-", "fas_activate_preempt");
                                     }
                                     ak_governor.release();
                                     fast_lock.release();
@@ -1741,7 +1969,7 @@ pub fn start_scheduler_thread(
                                     )
                                 )
                             );
-                            crate::logger::devimp_event(
+                            crate::logger::main_event(
                                 "thermal_change",
                                 "-",
                                 &format!(
@@ -2049,7 +2277,7 @@ pub fn start_scheduler_thread(
                                 else { cpu_governor.release(); }
                             }
                         }
-                        crate::logger::devimp_event("screen", "-", if is_screen_on { "on" } else { "off" });
+                        crate::logger::main_event("screen", "-", if is_screen_on { "on" } else { "off" });
                     },
 
                     // [evt_mode] 
@@ -2087,8 +2315,8 @@ pub fn start_scheduler_thread(
                             *current_mode_lock = mode.clone();
                             drop(current_mode_lock);
 
-                            crate::logger::set_devimp_mode(&mode);
-                            crate::logger::devimp_event(
+                            crate::logger::set_diag_mode(&mode);
+                            crate::logger::main_event(
                                 "mode_change",
                                 &package_name,
                                 &format!("{old_mode}->{mode}"),
@@ -2394,7 +2622,7 @@ pub fn start_scheduler_thread(
                                 cpu_governor.init_policies(&doze_cfg);
                             }
                             log::info!("{}", t("scheduler-scene-mode-exit-switch"));
-                            crate::logger::devimp_event("scene_exit", "-", "switch_off");
+                            crate::logger::main_event("scene_exit", "-", "switch_off");
                         }
                         if !is_screen_on
                             && crate::common::scenemode_enabled()
@@ -2442,7 +2670,7 @@ pub fn start_scheduler_thread(
                                         if standby_max >= SCENEMODE_SAT_UTIL && !long_off {
                                             if !scene_hold_logged {
                                                 scene_hold_logged = true;
-                                                crate::logger::devimp_event(
+                                                crate::logger::main_event(
                                                     "scene_hold",
                                                     "-",
                                                     &format!("util={:.0}", standby_max * 100.0),
@@ -2549,7 +2777,7 @@ pub fn start_scheduler_thread(
                                             &fluent_args!("util" => format!("{:.0}", standby_max * 100.0))
                                         )
                                     );
-                                    crate::logger::devimp_event(
+                                    crate::logger::main_event(
                                         "scene_exit",
                                         "-",
                                         "saturation->reduce+300s",
@@ -2635,8 +2863,8 @@ pub fn start_scheduler_thread(
                         // 亲和/core_ctl 与配置联动（开关变化时切换布局；内部去重）
                         {
                             let cfg = config_clone.read().unwrap();
-                            crate::logger::set_devimp_active(cfg.meta.dev_record);
-                            crate::logger::set_devimp_mode(&current_mode);
+                            crate::logger::set_diag_active(cfg.meta.dev_record);
+                            crate::logger::set_diag_mode(&current_mode);
                             apply_affinity_and_corectl(
                                 &mut affinity_mgr,
                                 &mut corectl_mgr,
@@ -2648,7 +2876,7 @@ pub fn start_scheduler_thread(
                                 scene_mode_active,
                             );
                         }
-                        crate::logger::devimp_event("config_reload", "-", "rules.yaml");
+                        crate::logger::main_event("config_reload", "-", "rules.yaml");
                     }
 
                     // [evt_bpf] 

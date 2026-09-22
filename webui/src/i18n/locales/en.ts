@@ -71,7 +71,7 @@ export default {
   'overview.delete.action': 'Delete history logs',
   'overview.delete.confirm.title': 'Delete history logs?',
   'overview.delete.confirm.message':
-    'Clears the logd archives and the devimp diagnostic files; the current session logs stay',
+    'Clears the logd archives; the current session logs and devimp diagnostic files stay',
   'overview.export.notice.session':
     'Archives from previous runs only; the current session is not included',
   'overview.export.notice.busy':
@@ -104,8 +104,7 @@ export default {
   'config.fasEnabled.hint': 'Frame-interval-aware scheduling',
   'config.scenemodeEnabled': 'Screen-off scene mode',
   'config.scenemodeEnabled.hint': 'When off, screen-off never enters scenemode',
-  'config.threadBind': 'Thread tuning',
-  'config.threadBind.hint': 'Turn this off when other thread-placement tools are in use to reduce conflicts',
+
   'config.notify': 'Ongoing status notification',
   'config.notify.hint': 'Not implemented yet',
   'battery.title': 'Battery readings',
@@ -234,6 +233,7 @@ export default {
   // 2026-09-17 commented out: log panel subtitle hidden per request
   // 'logs.window': 'Showing the most recent window only (fixed byte window, never the whole file)',
   'logs.archive': 'The previous run is packed into logd/; history is only available from those archives',
+  'logs.devimp': 'Diagnostic logs (main_ decisions / aff_ threads)',
   'logs.empty': 'No content yet',
   'logs.missing': 'File not created yet',
   'logs.lines': '{n} lines',

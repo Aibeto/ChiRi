@@ -1395,7 +1395,7 @@ per_app_profiles:
 core_temp_threshold: 45.0
 ```
 
-`module/config/normal/fas-example.yaml` 仅作文档用途，不参与编译加载；其中的 `verify_freq_interval_secs: 3` 与 `target_fps: [30,60,120]` 为示例值，不代表实际配置。
+`mdocs/fas-example.yaml`（原 `module/config/normal/fas-example.yaml`，2026-09-22 起移出嵌入目录）仅作文档用途，不参与编译加载；其中的 `verify_freq_interval_secs: 3` 与 `target_fps: [30,60,120]` 为示例值，不代表实际配置。
 
 ### 5.4 fast_lock（vector 模式）
 
@@ -2038,6 +2038,8 @@ i18n/en.ftl
 
 ## 9. 日志与诊断
 
+> 历史快照（2026-09-22 起 devimp 拆分为 main_/aff_ 双文件、锁增为六把），以 docs/agents/02-convention.md 为准；本节原文保留不改写。
+
 ### 9.1 三个日志文件
 
 | 文件                                | 用途               | 轮转                     |
@@ -2085,23 +2087,26 @@ i18n/en.ftl
 
 **新增列必须追加在末尾**。WebUI 的 `STATUS_COLUMNS` 按列数过滤残缺行，往中间插入会打乱既有索引。
 
-### 9.4 devimp 的 48 列
+### 9.4 main 行的 44 列（原 devimp 行）
 
-devimp 是开发诊断日志，按前台包名分组。文件名 `devimp_<包名>_<MMDD-HHmmss>.log`，包名段过滤为字母数字和 `. _ -`，截断到 64 字符。没有包名时用 `nopkg`。
+main 行（文件仍名 `devimp_<包名>_<MMDD-HHmmss>.log`，代码内改称 main）是开发诊断日志，按前台包名分组。
+包名段过滤为字母数字和 `. _ -`，截断到 64 字符。没有包名时用 `nopkg`。
 
-行类型：
+**2026-09-23 重写（48 → 44 列）**：删掉 `from_core`、`to_core`、`util_pct`、`pinned` 四列
+（其余列相对顺序不变），`place` / `aff` / `core` 三类行迁出到同目录下的独立 aff 文件
+（`AFF_HEADER` 为 1 列标识行）。离线分析脚本若按旧索引取列需同步：
+`max_util` 现在在列 10、`cur_freq_khz` 在列 15。
+
+行类型（main 文件内保留的四种）：
 
 | type    | 含义                                 | 写入频率                        |
 | ------- | ------------------------------------ | ------------------------------- |
 | `tick`  | 每个决策 tick × 每个核心组的调频轨迹 | 按签名变化才写，无变化 2 秒心跳 |
 | `snap`  | 1 秒环境上下文                       | 1 秒一行                        |
-| `place` | 前台线程的落点核快照                 | 每 4 轮（8 秒）                 |
-| `aff`   | 亲和迁移动作                         | 发生即写                        |
-| `core`  | 逐核 util 与钉核计数                 | 每 4 轮（8 秒）                 |
 | `tgtop` | 全系统 top 消耗者                    | 30 秒一轮，最多 5 行            |
 | `event` | 模式/屏幕/热/配置/FAS 生命周期变化   | 发生即写                        |
 
-48 列的字段名依次为 `ts`、`type`、`mode`、`screen_on`、`pid`、`package`、`tid`、`comm`、`cluster`、`core`、`from_core`、`to_core`、`util_pct`、`max_util`、`over_cores`、`under_cores`、`cur_perf`、`tgt_perf`、`cur_freq_khz`、`max_freq_khz`、`decision`、`deb_up`、`deb_down`、`reason`、`pinned`、`thermal_cap_pct`、`touch`、`psi_cpu`、`psi_io`、`psi_mem`、`gpu_busy`、`batt_v`、`batt_i`、`batt_p`、`wakeups`、`migrations`、`freq_trans`、`batt_temp`、`cpu_temp`、`clg_active`、`cpu_cur_khz`、`cpu_max_khz`、`cpu_min_khz`、`cpu_governor`、`gpu_cur_khz`、`gpu_max_khz`、`gpu_min_khz`、`gpu_governor`。
+44 列的字段名依次为 `ts`、`type`、`mode`、`screen_on`、`pid`、`package`、`tid`、`comm`、`cluster`、`core`、`max_util`、`over_cores`、`under_cores`、`cur_perf`、`tgt_perf`、`cur_freq_khz`、`max_freq_khz`、`decision`、`deb_up`、`deb_down`、`reason`、`thermal_cap_pct`、`touch`、`psi_cpu`、`psi_io`、`psi_mem`、`gpu_busy`、`batt_v`、`batt_i`、`batt_p`、`wakeups`、`migrations`、`freq_trans`、`batt_temp`、`cpu_temp`、`clg_active`、`cpu_cur_khz`、`cpu_max_khz`、`cpu_min_khz`、`cpu_governor`、`gpu_cur_khz`、`gpu_max_khz`、`gpu_min_khz`、`gpu_governor`。
 
 末 8 列（2026-09-21 新增，**追加在末尾**，仅 `snap` 行填充，其余行类型留 `-`）记录**内核当前实际值**，
 与既有的 `cur_freq_khz` / `max_freq_khz`（调度器写入的决策值）互补：那两列是「我们写了多少」，

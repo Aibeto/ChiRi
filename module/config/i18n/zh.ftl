@@ -6,7 +6,6 @@ scheduler-module-start-failed = 启动调度器模块失败: { $error }
 monitor-module-crashed = 监控模块崩溃: { $error }
 monitor-module-started = 监控模块已启动
 monitor-starting = 正在启动 chiri-monitor 模块...
-monitor-initial-config-failed = [Main] 读取初始配置失败: { $error }. 正在使用默认值。
 monitor-screen-watcher-failed = [Main] 屏幕状态监控线程崩溃: { $error }
 monitor-config-watcher-failed = [Main] 配置监控线程崩溃: { $error }
 monitor-fps-crashed = [Main] FPS 监控崩溃: { $error }
@@ -17,6 +16,7 @@ monitor-rlimit-memlock-failed = [Main] 提升 RLIMIT_MEMLOCK 失败，eBPF Map �
 main-chdir = [Main] 切换工作目录到: { $dir }
 main-module-root = [Main] 模块根目录: { $path }
 main-config-loaded = [Main] 已读取配置: { $path } (loglevel={ $loglevel }, language={ $language })
+main-module-version = [Main] 模块版本: { $name } { $version } (versionCode { $code }) | SoC { $soc } | kernel { $kernel }
 main-chiri-scheduler-selected = [Main] 检测到特定处理器，已启用 Chiri 专用调度器
 main-no-chiri-scheduler = [Main] 本处理器不在 Chiri 支持列表内，调度不接管 CPU（仅监控/WebUI/日志）
 main-special-tuned-exported = [Main] 已导出 { $count } 个内部特调白名单条目到 special_tuned.yaml
@@ -36,7 +36,6 @@ monitor-thread-start-app-detect = [Main] 启动应用检测主循环...
 app-detect-config-watch = [AppDetect] 开始监控配置文件: { $path }
 app-detect-change-detected = [AppDetect] 检测到变更，正在防抖 (100ms)...
 app-detect-reloading = [AppDetect] 防抖结束。正在重载配置...
-app-detect-load-failed = [AppDetect] 失败: { $error }。使用默认值
 app-detect-reload-success = [AppDetect] 配置重载成功
 app-detect-loop-started = [AppDetect] 应用检测循环已启动 (3000ms 轮询)
 app-detect-screen-changed = [AppDetect] 屏幕状态变更: { $old } -> { $new }
@@ -86,12 +85,7 @@ cpu-monitor-tick-log = [CPU Monitor] 核心=[{ $cores }] 前台pid={ $pid } 前�
 cpu-monitor-channel-closed = [CPU Monitor] 通道已关闭，退出循环。
 fps-monitor-init = [FPS Monitor] 正在初始化 eBPF FPS 监控...
 fps-monitor-attached = [FPS Monitor] 已挂载 uprobe 到 PID: { $pid }
-fps-monitor-attach-failed = [FPS Monitor] 未能挂载任何 Uprobe 符号！
 fps-monitor-attach-failed-initial = [FPS Monitor] 初始挂载失败: { $error }
-fps-monitor-init-no-pid = [FPS Monitor] 前台 PID 未知，等待前台应用启动...
-fps-monitor-pid-filter-updated = [FPS Monitor] 目标 PID 已更新: { $old } -> { $new }
-fps-monitor-pid-switching = [FPS Monitor] 正在切换目标 PID: { $pid }
-fps-monitor-pid-switched = [FPS Monitor] 已切换到目标 PID: { $pid }
 fps-monitor-pid-switch-failed = [FPS Monitor] PID 切换失败: { $error }
 fps-monitor-started = [FPS Monitor] eBPF FPS 监控启动成功（per-PID uprobe 模式）
 fps-monitor-passive = [FPS Monitor] FAS 未激活，探针待机（不挂载 uprobe，零开销）
@@ -104,7 +98,6 @@ fps-monitor-frames-dropped = [FPS Monitor] 事件通道拥塞，已丢弃 { $cou
 # --- Scheduler ---
 scheduler-ipc-started = [Scheduler] IPC 通道监听器已启动
 scheduler-mode-change-request = [Scheduler] 模式变更请求: { $old } -> { $new } (包名: { $pkg }, 温度: { $temp })
-scheduler-apply-failed = [Scheduler] 应用设置失败: { $error }
 scheduler-channel-closed = [Scheduler] 通道已关闭！线程退出
 scheduler-ipc-panic = [Scheduler] IPC 线程发生 panic，正在释放 CPU 控制权。
 scheduler-ipc-restart = [Scheduler] 已清理到安全态并重启调度循环（第 { $count } 次）。
@@ -139,7 +132,6 @@ down-heartbeat = [Down] 停摆生效中（已 { $mins } 分钟）：调度保持
 config-reloading = [Config] 检测到配置文件变更，正在重载...
 config-reloaded-success = [Config] 配置重载成功
 config-reload-fail = [Config] 配置重载失败: { $error }
-config-special-load-failed = [Config] 特调配置文件读取失败: { $path } ({ $error }) — 特调不可用，白名单应用回退 CLG
 config-special-parse-failed = [Config] 特调配置文件解析失败: { $path } ({ $error }) — 特调不可用，白名单应用回退 CLG
 config-special-merged = [Config] 已合并特调配置文件: { $path }
 
@@ -164,7 +156,6 @@ battery-status-unknown = [Battery] status 节点取值不认识（原文: { $raw
 power-avg-skip = [PowerAVG] 本轮取样未计入（原因: { $reason }），PowerAVG.chr 保持原值；取样条件＝电池放电，平均模式还要求亮屏
 telemetry-raw-snapshot = [Telemetry] 首次读数快照（用于核对单位）：私有节点电压原始值={ $v }、电流原始值={ $i }，当前校准 电压÷{ $vd }、电流÷{ $cd } → V={ $v }/{ $vd }、A={ $i }/{ $cd }
 config-watch-error = [Config] 监控配置目录失败: { $error }
-config-apply-mode-failed = [Config] 应用重载的模式设置失败: { $error }
 config-apply-tweaks-failed = [Config] 应用重载的系统微调失败: { $error }
 
 # --- SysFS (共享 FastWriter) ---
@@ -237,7 +228,6 @@ fas-floor-rescue = [FAS] 触底救援 | 卡在地板 { $frames }帧 P={ $old }, 
 fas-tick-log = [FAS] { $target }fps 平均:{ $avg } | { $ms }ms ema:{ $ema } | 误差:{ $err_ema }/{ $err_inst } | { $act } | P:{ $perf } 前台利用率:{ $util }{ $cd }{ $damp }{ $temp }{ $offset }
 fas-set-game = [FAS] 设置游戏 | 包名={ $pkg } | 档位={ $gears } | 目标={ $target }fps
 fas-no-profile = [FAS] 未找到 '{ $pkg }' 的专属配置，使用全局档位 { $gears }
-fas-ignore-write = [FAS] P{ $pid } 忽略写入 = { $ignore }
 fas-pid-reloaded = [FAS] PID 系数热重载: Kp={ $kp } Ki={ $ki } Kd={ $kd }
 fas-rules-reloaded = [FAS] 规则已热重载 (冗余={ $margin }, 地板={ $floor }, 天花板={ $ceil }, 配置数={ $profiles })
 fas-policy-writer-invalid = [FAS] P{ $pid } 策略写入器无效 (max_valid: { $max_valid }, min_valid: { $min_valid })，已跳过。
@@ -258,8 +248,6 @@ scheduler-fas-init-failed = [Scheduler] FAS 实例初始化失败，已回退 CL
 scheduler-fas-cooldown = [Scheduler] FAS 初始化失败已冷却，{ $secs } 秒内由 CLG 接管
 
 # --- Scheduler: Settings ---
-apply-settings-for-mode = 正在应用模式: { $mode }
-settings-applied-success = 模式 '{ $mode }' 的设置已成功应用
 apply-cpu-idle-governor-start = CPU 空闲调速器设置已完成
 apply-io-settings-start = I/O 设置已完成
 main-config-watch-thread-create = 主配置监控线程已创建
@@ -267,8 +255,8 @@ main-config-watch-thread-create = 主配置监控线程已创建
 # --- Fast Lock ---
 fast-activated = [Fast] 极速模式已激活，所有核心锁定最高频
 fast-deactivated = [Fast] 极速模式已解除，系统频率恢复
-fast-init = [Fast] policy { $pid } 锁频 { $max_khz } kHz
-fast-rewrite = [Fast] policy { $pid } 重写 { $max_khz } kHz
+fast-init = [Fast] policy { $pid } 锁频 { $khz } kHz（target）
+fast-rewrite = [Fast] policy { $pid } 重写 { $khz } kHz（target）
 fast-writer-invalid = [Fast] policy { $pid } 写入器无效 (max_valid: { $max_valid }, min_valid: { $min_valid })，已跳过
 fast-restore = [Fast] policy { $pid } 恢复 governor={ $governor } min={ $min } max={ $max }
 fast-watchdog-release = [Fast] 负载源超时 ({ $secs }s)，释放极速锁频
@@ -296,14 +284,8 @@ rhine-lock-note-no-backup = rhine-back.chr 缺失（上次启用时的原始状�
 # --- Affinity（CPU 亲和与线程迁移）---
 affinity-boost-applied = [Affinity] boost 布局已应用: top-app/foreground → { $big }，后台分组 → { $little }
 affinity-normal-restore = [Affinity] 已恢复正常亲和布局（后台保持压小核）
-affinity-pin-threads = [Affinity] 前台 pid={ $pid } 线程迁移: { $pinned }/{ $total }
-affinity-pin-failed = [Affinity] 前台 pid={ $pid } 无可迁移线程（进程可能已退出）
-affinity-threads-restored = [Affinity] 已恢复 pid={ $pid } 的 { $count } 个线程全核亲和
-affinity-pin-core = [Affinity] 线程 { $tid } 已钉到核 { $core }（{ $reason }）
-affinity-blacklisted = [Affinity] 进程命中黑名单跳过迁移: pid={ $pid } { $name }
 affinity-promoted = [Affinity] 后台线程 { $tid } 已提升到大核（util { $util }%）
 affinity-demoted = [Affinity] 后台线程 { $tid } 已降回小核组（util { $util }%）
-affinity-write-failed = [Affinity] cpuset 写入失败: { $path }
 affinity-uclamp-unavailable = [Affinity] top_app_uclamp_max_pct 不可用已自动纠正（内核 { $version }，原因: { $reason }；uclamp 需内核 >= 5.3 且节点可写）
 affinity-released = [Affinity] 已释放接管，恢复系统原始亲和配置
 

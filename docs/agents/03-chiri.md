@@ -58,6 +58,8 @@ WebUI 侧：
 
 - FAS 模式下 CLG/特调/vector 全部暂停（三 governor release 后接管）；激活失败（load_policies 后无可用 policy）→ 300s 冷却（`FAS_COOLDOWN`，镜像 TUNED_COOLDOWN）+ CLG default 回退；进入 fas 的回退分支也先释放三 governor（可能从特调/极速切入）。
 
+- **前台 util 口径（2026-09-23 修正）**：TGID 主路径 `compute_tgid_util` 以 adj = raw + pending 差分算 util（与线程级降级路径 `compute_thread_level_util` 同口径，基线存 adj）；旧写法「raw 差分 + 当前 pending」把上一轮 pending(t0) 重复计入（恒等式 consumed(t)=raw(t)+pending(t)），前台 util 系统性高估、FAS 输入失真，勿改回。
+
 - 移除的调度（FAS 活跃期间豁免）：ChiRi 热保护仅当 `mode=="fas" && fas_mgr.is_active()` 时跳过（fas 模式但实例未活跃——息屏已释放/冷却/初始化失败——照常生效，否则 CLG doze 期间失去热保护；FAS 活跃时温度由 FasManager 每 3s 独立读传感器喂引擎内部限温，endfield 配置 core_temp_threshold=0 即关闭；1s 遥测温度读数保留）；触摸升频不参与（fas 非 boost，`is_boost_mode` 不含 fas）；scenemode 进入判定按 `!fas_mgr.is_active()` 门控（FAS 活跃即不进入——息屏保持接管后 fas 模式天然屏蔽 scenemode，FAS 失效后正常进入）；config_dirty/ConfigReload 的 CLG 分支对 fas 模式守卫（FAS 配置编译期嵌入静态）。
 
 - 息屏释放已完全移除（2026-09，原 C4 doze 更早已废弃删除）：原 `ScreenStateChange(false)` 在非特调分支统一 `ak/vector release` + （fas 活跃时）`fas_mgr.deactivate_active()` → 走 CLG doze → scenemode 全局接管。现 FAS 与屏幕状态完全解耦：**FAS 激活/去激活仅由前台包名驱动**，息屏保持接管（fas 活跃时跳过 doze）、boost 布局全时段生效、1s 兜底与 FrameUpdate 喂帧无 is_screen_on 门控、ModeChange 息屏 fas 特殊分支删除。仅 FAS 失效（初始化冷却/异常）后息屏才走 doze → scenemode：亮屏恢复分支的 fas arm 对失效场景激活 CLG default（唯一恢复路径），1s 兜底在冷却结束后重新激活 FAS（activate 复用保留实例 + apply_freqs，activate 前 release 全部 governor，且若 scenemode 激活先恢复全部在线核）。勿改回「息屏 enter_doze 写低频锁、亮屏 exit_doze 恢复」：锁屏前台无帧事件时 apply_freqs 恢复路径不触发（且被 freq_hold_frames 挡 2 拍），全簇锁死最低频表现为亮屏 0.2fps。
@@ -74,7 +76,7 @@ WebUI 侧：
 
 - 上限语义下 `perf_floor/perf_ceil/perf_init` 约束的是上限（空闲实际频率由 schedutil 决定），`perf_floor` 允许被热保护击穿。
 
-- **`util_smoothing`（2026-09-22 新增，CLG 决策负载 EMA）**：抖动负载下 max_util 每 tick 大幅摆动 → target_perf 翻摆、决策方向反复翻转、`scaling_max_freq` 高频改写（8550 QQ 实测大核 2048 tick 反转 458 次）。EMA 滤波（语义同 tuned 的 `util_smoothing`，1.0=关闭、缺省即关闭=逐位等价）后反转降约五成、写频降三成。default/reduce 配 0.5，boost 保持 1.0（响应优先）；α 0.35 可再降抖动但上限均值抬升更多。devimp `max_util` 列写**平滑前**原始值，离线回放可自行试验系数。字段新增须同步：`config.rs` 字段+缺省+normalize+Default、`feature.yaml` 全部 SoC 文件（SoC 文件整份覆盖根，只改根不生效）、`config-example.yaml`。
+- **`util_smoothing`（2026-09-22 新增，CLG 决策负载 EMA）**：抖动负载下 max*util 每 tick 大幅摆动 → target_perf 翻摆、决策方向反复翻转、`scaling_max_freq` 高频改写（8550 QQ 实测大核 2048 tick 反转 458 次）。EMA 滤波（语义同 tuned 的 `util_smoothing`，1.0=关闭、缺省即关闭=逐位等价）后反转降约五成、写频降三成。default/reduce 配 0.5，boost 保持 1.0（响应优先）；α 0.35 可再降抖动但上限均值抬升更多。main* `max_util` 列为双语义：CLG 行写**平滑前**原始值（离线回放可自行试验系数）；tuned（akmode）行写平滑后的决策负载（2026-09-17 起语义变化）——离线回放按行来源/decision 区分，tuned 行不可再当原始 util 二次平滑。字段新增须同步：`config.rs` 字段+缺省+normalize+Default、`feature.yaml` 全部 SoC 文件（SoC 文件整份覆盖根，只改根不生效）、`config-example.yaml`。
 
 - 全局省电向（2026-09-20，用户要求「除 sgameGlobal 外所有场景功耗减半」+「不能限制最高性能释放」硬性约束）：**perf_ceil 一律保持硬性原值（reduce 0.60 / default 1.0 / boost 1.0），禁止用压 ceiling 省电**。省电路径 = 提升升频门槛与降地板：default 档 up_threshold 0.72→0.78、perf_floor 0.10→0.05、perf_init 0.40→0.25、headroom_factor 1.20→1.05、down_fast_threshold 0.25；boost headroom 1.40→1.25（保留相对性能优势）；reduce perf_init 0.25→0.20、headroom 1.05。`module/config/feature.yaml`（根）是未命中 SoC 目录机型的 ChiRi 兜底配置与代码默认值来源。**sgameGlobal（FAS 配置）唯一豁免**：改档位参数不得连带改动其 FAS 语义。（2026-09-22 用户复盘后更新：日常档加了天花板 default `perf_ceil` 0.80 + `per_cluster` little 0.70 / prime 0.65，交互由 touch_boost 兜——「禁止压 ceiling」条款对 CLG 日常档已解除，FAS 豁免不变。）
 
@@ -134,7 +136,7 @@ WebUI 侧：
 
 ### 极速模式（fast）
 
-- vector 档用专属锁频器、不读 yaml、停用 CLG：`src/chiri/fast.rs` 的 `FastLock` 与 CLG 完全独立，vector 档下由 `mod.rs` 的 scheduler_ipc 先 `cpu_governor.release()` 再 `fast_lock.init()` 接管（**六个入口都不能漏**：启动 / 亮屏恢复 / ModeChange / ConfigReload / DOWN 退出 / panic 自愈——vector 不注册 CLG 参数，漏掉就是频率零接管且无任何告警）。**frozen（待春归）复用同一条通路、共享这六个入口**，差别只在 `fast_lock.init(true)` 锁到**硬件最低频**（vector 是最高频）；额外地，frozen 会停掉一切额外开销：devimp 与 status.csv 停写（闸门在 `logger.rs` 的 `devimp_active()` 与 `status_log_snapshot()`，只保留 daemon.log 便于排错），线程亲和/绑核与 core_ctl 由 rhine 的 `thread_bind: false` 交还系统（不再迁移线程）。
+- vector 档用专属锁频器、不读 yaml、停用 CLG：`src/chiri/fast.rs` 的 `FastLock` 与 CLG 完全独立，vector 档下由 `mod.rs` 的 scheduler\*ipc 先 `cpu_governor.release()` 再 `fast_lock.init()` 接管（**六个入口都不能漏**：启动 / 亮屏恢复 / ModeChange / ConfigReload / DOWN 退出 / panic 自愈——vector 不注册 CLG 参数，漏掉就是频率零接管且无任何告警）。**frozen（待春归）复用同一条通路、共享这六个入口**，差别只在 `fast_lock.init(true)` 锁到**硬件最低频**（vector 是最高频）；额外地，frozen 会停掉一切额外开销：devimp 诊断日志与 status.csv 停写（闸门在 `logger.rs` 的 `diag_active()` 与 `status_log_snapshot()`，只保留 daemon.log 便于排错）——frozen 下 main\_ 与 aff\_（含 `@S` 快照）同停（同一 `diag_active()` 闸门），线程亲和/绑核与 core_ctl 由 rhine 的 `thread_bind: false` 交还系统（不再迁移线程）。
 
 - **PowerBase（Stardust 家族，meta.yaml `powerbase_enabled`，默认关）只替换「谁来调频」**：开启后原本由 CLG 接管的档位（reduce/default/boost）改由 `src/chiri/power_base.rs` 以**放电功耗**为指标调频——功耗低于 feature 里的 `target_power_w` 时放宽升频；达到或超过时守住不升，除非「满占用核心占比 ≥ `overload_cores_pct` 且持续 `overload_hold_ms`」；降频恒激进（不看功耗）；触摸窗口内允许突破功率上限。**模式名与所有外部接口一律不变**（`current_mode.chr` 仍是 default/boost，rules / WebUI / 通知都不受影响）。接管点有两处：`apply_mode_takeover`（主路径，即时）与调度循环每轮的兜底纠正块（覆盖启动块 / ConfigReload / 亮屏恢复 / lab 重建四条旁路——它们直接 init CLG，不兜就会「CLG 与 PowerBase 抢写 scaling_max_freq」或「切换后没人接管」）。affinity 的 promote 阈值在开启时翻倍（积极性减半）。**已知 TODO**：触摸突破当前恒 false——CLG 的 `AtomicTouchState` 是它私有字段，需另备共享标志。**热保护对它无效是预期行为**（thermal 靠压 CLG 上限工作）。
 
@@ -162,7 +164,7 @@ WebUI 侧：
 
   - 后台动态亲和（**不把后台全压小核**——小核过载能效灾难）：忙线程 promote 到 big、回落 demote。候选 TID 从三个后台 cpuset 的 `tasks` 文件读取（**不做 /proc 全量枚举**），每 2 轮刷新、按游标分片每轮只深扫 64 个；窗口 util = ticks 差分，**两窗防抖**（上次采样忙且本次仍忙、期间采到低负载即清标记）即 promote，不依赖采样间隔。promote 先把 TID 移入 top-app（cpuset v1 按 TID 记账）再按当前核心占用选核钉定（`pick_core_pref`：big 有未钉核只看 big、钉满溢出 prime，与前台普通线程同口径——游戏场景 big 是关键线程主场，后台忙线程不挤占但也不排队）。已 promote 线程每 2 轮复查：util 连续 3 次 < 5% → demote；线程仍忙（≥5%）且所在核心 util > 70%（`CORE_OVERLOAD_UTIL`）→ 换低占用核（`bg_overload`，带 4s 迁移防抖）。过载重钉统一口径（前台 `home_overload` / 后台 `bg_overload` 共用）：**候选 = 全性能池（big∪prime）最低分核 + 双滞回**（分数差 ≥ `OVERLOAD_MARGIN` 且目标核 util 严格低于 home）+ 反跳回冷却（`RETURN_COOLDOWN` 16s 禁回刚迁离核）。旧「big 池内选核 + 目标核 util ≤ 70% 硬门槛」在整体高载时必然静止——8475 实测 FAS 下大核 86-90% 排队、prime 空转 45%、26 分钟 85 次 `overload_hold`；全员过载时把负载摊向低载核（含 prime）仍有收益，乒乓由防抖+冷却兜底。**后台迁移仅亮屏**。
 
-  - 在线核位图每 4 轮读一次并缓存（核热插拔不频繁）；devimp core 行每 2 轮一次。
+  - 在线核位图每 4 轮读一次并缓存（核热插拔不频繁）；place/core 行已随 aff\_ 拆分移除（2026-09-22）。
 
   - **多应用快速切换**：每轮再平衡开头按 pid 归属立即清理旧前台线程（`pid>0 且 ≠ 当前 fg_pid` → 解钉恢复全核），不等 30s 失联——否则旧应用转后台后（Android 会短暂把它留在 top-app/foreground cpuset）其单核掩码与大核相交继续生效，8550 仅一颗 prime 会让新旧前台关键线程同核互踩，连续切换还会令 core_pinned 计数漂移累积。过滤器幂等、零文件 IO；后台 promote 线程（pid==0）不受影响。模式变化的切换经 ModeChange → force 立即重平衡；同模式切换（无事件）依赖 2s 周期块发现，钉核延迟 ≤2s（可接受，切换清理在同一轮完成，新前台钉核时 core_pinned 已准确）。
 
@@ -176,6 +178,8 @@ WebUI 侧：
 
 - normal/doze 布局：top-app/foreground/uclamp 恢复快照，后台保持压小核 + bg uclamp 降权持续（两态都写）；boost 退出/开关关闭/调度线程收尾 `release()` 全量还原（已钉线程恢复全核，经 `demote_tid_group` 写回进程当前 cpuset 组）。同模式 App 切换不发 ModeChange 事件，靠 scheduler_ipc 2s 周期刷新兜底重迁移（manager 内部按 KIND/PID/boost 去重）。
 
+- **恢复写失败保留状态（2026-09-23）**：`unpin_core`/`cleanup_thread`/`demote` 的内核写失败且非 ESRCH 时**保留状态**（home/钉核计数/moved_group/条目）待 departed、gone、stale 等清理路径重试，成功或 ESRCH（线程消亡、无从重试）才清；改回「写失败仍清状态」会让内核掩码/组归属与状态表永久分叉（掩码仍单核而状态记全核，再无重试路径）。stat comm 解析口径同日修正：`sample_one_tid` 以首 '(' 与末 ')' 定界 comm（旧 `text[1..close]` 把「tid 尾部+` (`」混进 comm，`KEY_THREAD_COMMS` 与 `affinity_blacklist` 的精确匹配恒不命中；修复后关键线程白名单/黑名单逐线程兜底恢复生效）。
+
 - 配置段 `Affinity`（enabled/top_app_uclamp_min_pct/top_app_uclamp_max_pct/pin_foreground_threads/background_uclamp_max_pct），三份 SoC yaml 已带（背景降权默认 50；root feature.yaml 无 Affinity 段、走 serde 默认）。
 
 ### core_ctl 核心在线接管（ChiRi 专属）
@@ -187,6 +191,8 @@ WebUI 侧：
 - **Scenemode 离线核（[已暂停] 息屏深度省电）**：`CoreCtl.scenemode_offline` 门控（8550/8475 true，8998 内核 4.4 默认 false）。进入 scenemode 时先解除 boost（min_cpus 抬着会让厂商 core_ctl 重新拉起被下线的核——两者互斥由 `apply_affinity_and_corectl` 保证），下线目标由 `scenemode_targets()` 计算：**小核 + 大核全开常驻**（频率上限由 scenemode CLG 配置统一压制），**仅 prime 整簇下线**消除空转漏电流；逐核写 online=0 回读验证，失败跳过（warn），已在 offlined 中的核防重复登记。**独占一颗小核给调度服务**（编号最大的 little——三步实现：① `affinity::exclude_core_from_cpusets` 把该核从全部业务 cpuset 组（top-app/foreground/background/system-background/restricted）的 cpus 移除，其他进程/新进程（继承组掩码）均不可调度到该核；② 自身全部线程移入 cpuset 根组（根组含全部在线核，sched_setaffinity 才不会被原组掩码二次过滤）；③ 全线程自钉到该核）；设备无 /dev/cpuset 时降级为仅自钉。维持期每 2s 纠偏：重新下线被外部拉起的核 + `exclude_core_from_cpusets` 重写被框架 CpusetManager 加回保留核的组（快照只记首次原始值，防框架中间值覆盖）。**退出恢复 `restore_online` 失败的核必须保留在 offlined 中由 STATE_NONE 分支每 2s 重试**——此前失败即 clear、状态机回 NONE 再无重试路径，写回被内核拒绝的核永久离线；全部恢复后才释放独占（cpuset 快照还原 + 自身线程移回原组 + 解除自钉），重新下线前先把残留核拉回在线（否则 online=0 被跳过记录、核永远失去恢复登记）。
 
 - **scenemode 饱和退出**：常驻簇（小核∪大核）max_util 持续 10s ≥ 70%（`SCENEMODE_SAT_UTIL/SECS`，util 是忙时占比与频率无关，饱和即真饱和）→ 视为后台负载压不死常驻核：一次性退回 reduce 的 CLG 配置 + 立即恢复全部在线核 + 释放独占小核，并进入 **300s 冷却**（`SCENEMODE_COOLDOWN`，期间 scenemode 入口被门控不得重进，防反复拉锯）；冷却结束后息屏条件仍满足则自然重进。
+
+- **自钉/解钉按成功清单（2026-09-23）**：`pin_self_dedicated` 记录实际钉住的自身 tid 清单（`self_pinned_tids`，只记成功），`unpin_self` 按清单逐个恢复全核（非 ESRCH 失败留清单下次重试）；勿用 `self_pinned` 总开关短路恢复——部分钉定失败时 `self_pinned=false` 会让 unpin 整体跳过，已钉住的线程永久滞留单核掩码。
 
 - 为什么选核排除离线核而不"按需唤醒"：唤醒大核要拉电压轨/重建 L2，为后台线程点亮大核净亏能；直接写 online 会与厂商热插拔守护进程打架（对方再下线，ping-pong）。需要更多在线核时的正确姿势是抬 core_ctl min_cpus（Boost 态）。scenemode 是唯一反向使用 online 写入的场景（目标恰恰是让 prime 睡死，小核+大核常驻保住待命响应）。
 
@@ -213,4 +219,4 @@ WebUI 侧：
 
 - Sched 内核参数微调（2026-09-20，借鉴 LittleYouran CTS 的 Scheduler 段）：feature.yaml 新增 `Sched` 段（enabled + params map），`scheduler.rs::apply_sched_params` 按 `SCHED_ALLOWED_PARAMS` 白名单写 `/proc/sys/kernel/<key>`（越界键 warn 跳过、空值跳过，随 apply_system_tweaks 热重载生效）。8550/8475/8998 默认开启 `sched_migration_cost_ns: 200000` / `sched_nr_migrate: 27`（骁龙 855 八核经验值：迁移更及时、单轮迁移量收敛）。i18n：`sched-tuning-applied` / `sched-tuning-key-rejected`。DOWN 停摆期间随其余一次性调整一并不下发（进入时按快照还原已写的节点），退出停摆补发。
 
-- **子进程名一律预处理为主包名（2026-09-20，借鉴 CTS 的 AppModeConfig::resolve，用户口径）**：`com.xx:push` 本质上是 `com.xx`（子进程与所属包在调度语义上就是同一个应用；厂商框架把 cmdline 首段写成 `pkg:proc` 同理），所以**归一到主包名再放进整个调度计算，下游走原本的算法与流程**，不做进程级粒度区分。归一在两侧各做一次、口径一致：① 前台名在**唯一入口** `app_detect::set_current_package` 归一（此后 `get_current_package()`、ModeChange/PackageSwitch 事件、devimp 分组、通知、亲和拿到的都是主包名）；② 规则键在 `deserialize_app_modes` 归一（冲突时保留后者并打 `rule-key-conflict`，不静默丢规则）。因此 `determine_mode` 里就是原本的 `app_modes.get(pkg)` 精确查表，**没有回退链**——回退链会让「规则键粒度」与「运行期粒度」两套语义并存。i18n：`app-detect-pkg-normalized`（debug）/ `rule-key-normalized` / `rule-key-conflict`。
+- **子进程名一律预处理为主包名（2026-09-20，借鉴 CTS 的 AppModeConfig::resolve，用户口径）**：`com.xx:push` 本质上是 `com.xx`（子进程与所属包在调度语义上就是同一个应用；厂商框架把 cmdline 首段写成 `pkg:proc` 同理），所以**归一到主包名再放进整个调度计算，下游走原本的算法与流程**，不做进程级粒度区分。归一在两侧各做一次、口径一致：① 前台名在**唯一入口** `app_detect::set_current_package` 归一（此后 `get_current_package()`、ModeChange/PackageSwitch 事件、main\_ 分组、通知、亲和拿到的都是主包名）；② 规则键在 `deserialize_app_modes` 归一（冲突时保留后者并打 `rule-key-conflict`，不静默丢规则）。因此 `determine_mode` 里就是原本的 `app_modes.get(pkg)` 精确查表，**没有回退链**——回退链会让「规则键粒度」与「运行期粒度」两套语义并存。i18n：`app-detect-pkg-normalized`（debug）/ `rule-key-normalized` / `rule-key-conflict`。

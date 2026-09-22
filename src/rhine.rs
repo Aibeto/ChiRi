@@ -59,8 +59,8 @@ pub struct RhineModeDef {
     /// 运行时开关：false = 关闭所有场景特调（akmode 白名单判定失效）
     #[serde(default)]
     pub special_tuned: Option<bool>,
-    /// 改写生效 meta.yaml 的 thread_bind：false = 关闭线程功能（CPU 亲和/绑核与
-    /// core_ctl 核心在线接管全部交还系统，**所有绑定分配改成全核心**）
+    /// 改写生效 meta.yaml 的 thread_bind：**实验室 frozen 专用**（用户侧开关已移除、
+    /// 线程功能默认常开）——false = 交还线程亲和/绑核与 core_ctl（不再迁移线程）
     #[serde(default)]
     pub thread_bind: Option<bool>,
 }

@@ -99,8 +99,7 @@ export default {
   'config.fasEnabled.hint': '帧时间间隔感知调度',
   'config.scenemodeEnabled': 'SceneMode',
   'config.scenemodeEnabled.hint': '趁月亮还未听到 趁灯火还未睡着',
-  'config.threadBind': '线程调整',
-  'config.threadBind.hint': '使用其他线程分配程序时请关闭以减少冲突',
+
   'config.notify': '常驻状态通知',
   'config.notify.hint': '功能未完成',
   'battery.title': '电池读数',
@@ -228,6 +227,7 @@ export default {
   // 2026-09-17 注释：日志面板副标题按需求隐藏
   // 'logs.window': '仅显示最近一段（每次读取固定字节窗口，不加载整个文件）',
   'logs.archive': '上一轮日志已打包进 logd/，历史记录只能从归档包中查看',
+  'logs.devimp': '诊断日志（main_ 决策 / aff_ 线程）',
   'logs.empty': '暂无内容',
   'logs.missing': '文件尚未生成',
   'logs.lines': '{n} 行',

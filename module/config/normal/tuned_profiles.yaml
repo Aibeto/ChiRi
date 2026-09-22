@@ -1,7 +1,7 @@
 # tuned_profiles.yaml: [default-profile] [tuned-profiles]
 # 特调参数组：缺省参数段（akmode）+ 按模式名分派的参数组（tuned_profiles）
 # 编译期嵌入二进制（module/config 目录整体 include_dir!），磁盘副本不加载。
-# 字段说明见 tuned_profiles-example.yaml；未写字段取代码默认值。
+# 字段说明见 mdocs/tuned_profiles-example.yaml（example 文件不随构建嵌入）；未写字段取代码默认值。
 #
 # 无档位连续控制：每个负载 tick（40ms）按核心组实时负载直接计算
 # scaling_max_freq 目标上限，升频立即执行、降频 hysteresis + down_hold_ms
@@ -11,7 +11,7 @@
 akmode:
   headroom: 1.15
   perf_floor: 0.0
-  # 2026-09-22 8745 明日方舟实测调整（全局生效，游戏场景各 SoC 同向受益）：
+  # 2026-09-22 8475（原注释误写 8745）明日方舟实测调整（全局生效，游戏场景各 SoC 同向受益）：
   # 该场景 7.06 W、big 上限中位数 100%、gpu 74%——原本 headroom 1.15 且无天花板，
   # util 尖峰一来就是 1.0×1.15 → clamp 1.0 直接满频。
   # perf_ceil 0.95：留 5% 余量即可，不再让尖峰顶到 100%；

@@ -1,16 +1,16 @@
-//! logger.rs: [level] [appender] [loglimit] [init] [status] [devimp_state] [devrow] [devimp_writer] [devimp_api] [archive]
+//! logger.rs: [level] [appender] [loglimit] [init] [status] [devimp_state] [devrow] [devimp_writer] [devimp_api] [aff_writer] [aff_api] [archive]
 
 use crate::common;
 use crate::fluent_args;
 use crate::i18n::t_with_args;
 use anyhow::{Result, anyhow};
 use log::{LevelFilter, Log, Metadata, Record};
-use std::sync::OnceLock;
 use std::collections::HashMap;
 use std::fs;
 use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -172,7 +172,7 @@ impl SelfHealingAppender {
 // logd/（打包只在启动路径发生，故「打包」只能靠重启调度触发）。
 //
 // 为什么按写入字节记账而不是定期遍历目录：daemon 写日志只有三条路径
-// （daemon.log / status.csv / devimp 当前文件），写入即记账是纯事件驱动、不产生
+// （daemon.log / status.csv / devimp/ 当前诊断文件 main_* 与 aff_*），写入即记账是纯事件驱动、不产生
 // 任何 stat；而目录里也只有这几条路径在写（watchdog.pid 由 daemon 每 5s 自愈时写，
 // 量级为字节）。轮转/清理发生前（daemon.log 50MB、status.csv 8MB+备份、devimp
 // 单文件 128MB）累计写入量与目录实际大小一致，故累计值即目录增长量。
@@ -183,7 +183,7 @@ impl SelfHealingAppender {
 const LOG_RESTART_THRESHOLD_BYTES: u64 = 16 * 1024 * 1024;
 /// logs/ 本会话累计写入字节（daemon.log + status.csv）
 static LOGS_BYTES_WRITTEN: AtomicU64 = AtomicU64::new(0);
-/// devimp/ 本会话累计写入字节（当前诊断文件）
+/// devimp/ 本会话累计写入字节（当前诊断文件 main_* 与 aff_* 共用同一目录预算）
 static DEVIMP_BYTES_WRITTEN: AtomicU64 = AtomicU64::new(0);
 /// 已进入重启流程：日志落盘走同一写路径，置位后不再记账/重入
 static LOG_RESTARTING: AtomicBool = AtomicBool::new(false);
@@ -196,8 +196,8 @@ static LOG_RESTARTING: AtomicBool = AtomicBool::new(false);
 ///   都去读 /proc）；
 /// - 退出前打点的日志本身也走本函数（同一条写路径），以 `LOG_RESTARTING` 防重入；
 /// - **调用方不得持有 appender 锁**：本函数可能经 `log::info!` 重入 append，
-///   在持锁状态下调用会对同一把非重入 Mutex 死锁（status/devimp 路径各自的
-///   锁在调用前释放，append 路径见其函数内注释）。
+///   在持锁状态下调用会对同一把非重入 Mutex 死锁（status/main/aff 写入路径
+///   各自的锁在调用前释放，append 路径见其函数内注释）。
 fn note_write(counter: &AtomicU64, dir: &str, bytes: u64) {
     // 仅 Chiri 调度启用（非 ChiRi 无调度接管，不做自动重启；devimp 本就不产生）
     if !common::is_chiri_soc() {
@@ -324,7 +324,45 @@ pub fn init(level_str: &str) -> Result<()> {
     }))
     .map_err(|e| anyhow!("Logger already initialized: {e}"))?;
     log::set_max_level(level);
+    // 启动即落一行模块版本：排查现场时第一件事就是确认「这份日志是哪个版本跑的」，
+    // 旧版只能从 devimp 文件头的元信息注释里翻（且诊断采集默认不开），daemon.log 里没有
+    log_module_version();
     Ok(())
+}
+
+/// 模块版本信息：module.prop 的 name / version / versionCode + SoC + kernel。
+/// 缺失字段一律 `-`，绝不因读不到文件而 panic（日志路径零 panic 是硬约束）。
+fn log_module_version() {
+    let root = common::get_module_root();
+    let (mut name, mut ver, mut code) = (String::from("-"), String::from("-"), String::from("-"));
+    if let Ok(text) = fs::read_to_string(root.join("module.prop")) {
+        for line in text.lines() {
+            if let Some(v) = line.strip_prefix("name=") {
+                name = v.trim().to_string();
+            } else if let Some(v) = line.strip_prefix("version=") {
+                ver = v.trim().to_string();
+            } else if let Some(v) = line.strip_prefix("versionCode=") {
+                code = v.trim().to_string();
+            }
+        }
+    }
+    let soc = common::matched_soc_hint().unwrap_or("-");
+    let kernel = fs::read_to_string("/proc/sys/kernel/osrelease")
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|_| "-".to_string());
+    log::info!(
+        "{}",
+        t_with_args(
+            "main-module-version",
+            &fluent_args!(
+                "name" => name,
+                "version" => ver,
+                "code" => code,
+                "soc" => soc.to_string(),
+                "kernel" => kernel
+            )
+        )
+    );
 }
 
 /// 当前生效的日志等级（`update_level` 判变化用；启动时由 init 写入）
@@ -637,9 +675,10 @@ pub fn status_log_snapshot(
 }
 
 /// HH:MM:SS.mmm 格式**设备本地时间**（避免引入 chrono 依赖）。
-/// 时区统一（2026-09）：status.csv / devimp / daemon.log 全部为本地时间——
-/// 此前本函数按 `as_secs() % 86400` 输出 UTC，而 daemon.log 与 devimp 文件名
-/// 是本地时间，两路日志相差时区，离线对齐必须人工换算（8550 整夜功耗分析踩坑）。
+/// 时区统一（2026-09）：status.csv / devimp/ / daemon.log 全部为本地时间——
+/// 此前本函数按 `as_secs() % 86400` 输出 UTC，而 daemon.log 与 devimp/ 下
+/// 诊断文件（main_* / aff_*）的文件名是本地时间，两路日志相差时区，离线对齐
+/// 必须人工换算（8550 整夜功耗分析踩坑）。
 /// 经 libc localtime_r 走系统时区；不可用时回退 UTC 原口径（仅丢时区正确性）。
 fn format_now() -> String {
     let now = std::time::SystemTime::now()
@@ -675,78 +714,84 @@ fn local_hms(_epoch: i64) -> Option<(u32, u32, u32)> {
     None
 }
 
-// 开发诊断日志（devimp/devimp_<前台包名>_<毫秒时间戳>.log）
+// 开发诊断日志（devimp/ 目录下双文件：main_<前台包名>_<MMDD-HHmmss>.log +
+// aff_<MMDD-HHmmss>.log；2026-09-22 拆分版，原单文件 devimp_<pkg>_<ts>.log 拆为
+// 「main* 主诊断 + aff* 线程流」）
 //
 // 供离线分析改善调度的按核诊断数据，与 status.csv 分离：
 // - 独立目录 `devimp/`（模块根，与 logs/ 平级），**启动时随 logs/ 一起归档**到
-//   logd/devimp_<MMDD-HHmmss>.zip（子线程异步打包），归档后新建空目录接住
-//   本进程写入；
-// - **按前台包名分组**：文件名 `devimp_<包名>_<MMDD-HHmmss>.log`（本地时间，
+//   logd/devimp_<MMDD-HHmmss>.tar（子线程异步打包），归档后新建空目录接住
+//   本进程写入（目录/归档/记账派生物保留 devimp 名）；
+// - **main_ 按前台包名分组**：文件名 `main_<包名>_<MMDD-HHmmss>.log`（本地时间，
 //   人眼可辨），首次写入惰性创建（整轮未开启 DEV 则不产生文件）；scheduler_ipc
-//   每秒经 set_devimp_package 同步前台包名，包名变化即关闭当前文件、下次写入
+//   每秒经 set_diag_package 同步前台包名，包名变化即关闭当前文件、下次写入
 //   以新包名 + 当前时间戳开新文件（同应用的分析数据聚合在同文件）；同秒重开
 //   以 -N 后缀去重；
-// - **文件头元信息**：新文件在 CSV 表头后写 `#` 注释行——模块名/版本、SoC、
-//   机型、Android 版本、内核版本，方便多设备/多版本日志离线辨别；
+// - **aff_ 单滚动文件不分包**：线程动作跨包、快照是全系统视角，按前台包分文件
+//   会把流切碎——文件名 `aff_<MMDD-HHmmss>.log`，帧式写入（@A 动作帧 / @S 快照
+//   帧，帧格式见 AFF_HEADER）；
+// - **文件头元信息**：新文件在表头/帧说明后写 `#` 注释行——模块名/版本、SoC、
+//   机型、Android 版本、内核版本，方便多设备/多版本日志离线辨别（diag_meta，
+//   两文件共用）；
 // - 无包名场景（启动初期尚未检测到前台应用）不触发切文件：继续写当前
-//   文件；尚无任何包名时文件名包名段为 `nopkg`（避免空段产生 `devimp__`）；
+//   文件；尚无任何包名时文件名包名段为 `nopkg`（避免空段产生 `main__`）；
 // - 单文件软上限 128MB：触顶自动换新时间戳文件继续写（修复旧版触顶后
 //   静默停写直到进程重启的问题），不丢数据不 panic；
-// - 启动时 devimp_prepare() 清理旧文件；写入巡检（每 256 行）在换新文件
-//   时同样清理，仅保留最近 DEVIMP_KEEP_FILES 份（文件名含包名段，字典序
-//   不再等于时间序，按文件 mtime 排序，当前活跃文件不清理）；
-// - 总开关 DEVIMP_ACTIVE 由 scheduler_ipc 按 Config.meta.dev_record 同步
+// - 启动时 diag_prepare() 清理旧文件；写入巡检（每 256 行）在换新文件
+//   时同样清理，仅保留最近 DEVIMP_KEEP_FILES 份（main_*.log 与 aff_*.log
+//   合并计数，文件名含包名段、字典序不再等于时间序，按文件 mtime 排序，
+//   当前活跃文件不清理；旧 devimp_*.log 不迁移，随启动归档自然过期）；
+// - 总开关 DIAG_ACTIVE 由 scheduler_ipc 按 Config.meta.dev_record 同步
 //   （meta 段允许外部修改的字段之一，WebUI 开关 + config_watcher 热重载），
-//   写入点（CLG/akmode Worker、亲和再平衡、事件分支）各自检查该标志。
+//   各写入点统一过 diag_active() 闸门，关闭时零 IO 零分配。
 //
-// CSV 宽表 + `type` 列，行类型与关键列：
+// main_ CSV 宽表 + `type` 列，行类型与关键列（44 列，v2026-09-22 拆分版；
+// place/aff/core/tgtop 行迁出至 aff_ 帧流后 main_ 只承载决策/状态/事件三类行）：
 // - tick（每决策 tick × 每核心组，**决策签名变化才写 + 2s 心跳**）：
-//   cluster/max_util/over/under/cur_perf/tgt_perf/cur_freq/max_freq/decision/
-//   deb_up/deb_down —— 调频决策轨迹；package 列自动填充前台包名
+//   cluster/max_util/over_cores/under_cores/cur_perf/tgt_perf/cur_freq_khz/
+//   max_freq_khz/decision/deb_up/deb_down —— 调频决策轨迹；package 列自动填充前台包名
 // - snap（1s）：环境上下文（PSI/GPU/电池/温度/热压制），关联决策与功耗
-// - place（每再平衡轮）：pid/package/tid/comm/core/util_pct —— 线程放置与占用率
-// - aff（事件驱动）：from_core/to_core/decision(动作)/reason —— 亲和迁移动作
-// - core（每再平衡轮 × 每核）：core/max_util/pinned —— 逐核负载与钉核计数
 // - event：decision(事件名)/reason —— 模式/屏幕/热/配置/触摸等状态变化
 
 /// 开发记录总开关（scheduler_ipc 按 Config.meta.dev_record 同步）
 // [devimp_state]
-static DEVIMP_ACTIVE: AtomicBool = AtomicBool::new(false);
+static DIAG_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 /// 当前生效模式名（scheduler_ipc 在启动/模式切换/周期刷新时同步），
-/// devimp 各行 mode 列自动填充，写入点无需感知模式
-static DEVIMP_MODE: Mutex<String> = Mutex::new(String::new());
+/// 诊断各行 mode 列自动填充，写入点无需感知模式
+static DIAG_MODE: Mutex<String> = Mutex::new(String::new());
 
-/// 当前前台包名（set_devimp_package 每秒同步，原始未清洗值），
-/// devimp 各行 package 列自动填充；行主体有更精确包名时（place/aff/event）
+/// 当前前台包名（set_diag_package 每秒同步，原始未清洗值），
+/// 诊断各行 package 列自动填充；行主体有更精确包名时（event）
 /// 由调用方覆盖。空 = 尚未检测到前台应用，package 列保持 "-"
-static DEVIMP_FG_PKG: Mutex<String> = Mutex::new(String::new());
+static DIAG_FG_PKG: Mutex<String> = Mutex::new(String::new());
 
 /// 设置开发记录总开关
-pub fn set_devimp_active(on: bool) {
-    DEVIMP_ACTIVE.store(on, Ordering::Relaxed);
+pub fn set_diag_active(on: bool) {
+    DIAG_ACTIVE.store(on, Ordering::Relaxed);
 }
 
-/// 同步当前模式名（devimp 行 mode 列填充用）
-pub fn set_devimp_mode(mode: &str) {
-    // frozen 标记顺带维护给 devimp_active() 高频读取（见那里的注释）
-    DEVIMP_FROZEN.store(mode == "frozen", Ordering::Relaxed);
-    if let Ok(mut m) = DEVIMP_MODE.lock() {
+/// 同步当前模式名（诊断行 mode 列填充用）
+pub fn set_diag_mode(mode: &str) {
+    // frozen 标记顺带维护给 diag_active() 高频读取（见那里的注释）
+    DIAG_FROZEN.store(mode == "frozen", Ordering::Relaxed);
+    if let Ok(mut m) = DIAG_MODE.lock() {
         *m = mode.to_string();
     }
 }
 
-/// 同步前台包名并按需切换 devimp 文件（scheduler_ipc 每秒调用，内部去重）。
+/// 同步前台包名并按需切换 main_ 文件（scheduler_ipc 每秒调用，内部去重）。
 ///
-/// - 包名与当前一致（对比写入器归属的包名段）：仅更新 DEVIMP_FG_PKG；
-/// - 包名变化：关闭当前文件，下次写入以「新包名 + 当前毫秒时间戳」开新文件
+/// - 包名与当前一致（对比写入器归属的包名段）：仅更新 DIAG_FG_PKG；
+/// - 包名变化：关闭当前文件，下次写入以「新包名 + 当前时间戳」开新文件
 ///   （同应用诊断数据聚合在同一文件，切换应用即分文件）；
 /// - **空包名（无包名特殊场景，如启动初期尚未检测到前台应用）不触发切换**，
 ///   继续写当前文件；包名从空变非空 / 非空变化才会开新文件；
-/// - 顺序敏感：先切文件（WRITER）后更新 DEVIMP_FG_PKG——FG_PKG 是行
+/// - aff_ 线程流单滚动文件不分包，不受包名切换影响；
+/// - 顺序敏感：先切文件（MAIN_WRITER）后更新 DIAG_FG_PKG——FG_PKG 是行
 ///   package 列数据源，晚于文件切换更新可保证切换边界处
 ///   「行的 package 列」与「所在文件」永不错位（详见函数体注释）。
-pub fn set_devimp_package(pkg: &str) {
+pub fn set_diag_package(pkg: &str) {
     let p = pkg.trim();
     if p.is_empty() {
         return;
@@ -765,9 +810,9 @@ pub fn set_devimp_package(pkg: &str) {
     };
     // ① 先切换文件（对比写入器当前归属的包名段）。WRITER 临界区内只做
     // writer 自身状态修改（文件 IO 与无锁操作），不获取任何其他锁——
-    // 锁序约定见 DEVIMP_WRITER 定义处
+    // 锁序约定见 MAIN_WRITER 定义处
     let pkg_switched = {
-        let mut w = DEVIMP_WRITER.lock().unwrap_or_else(|p| p.into_inner());
+        let mut w = MAIN_WRITER.lock().unwrap_or_else(|p| p.into_inner());
         if w.pkg_seg == seg {
             false
         } else {
@@ -780,150 +825,158 @@ pub fn set_devimp_package(pkg: &str) {
     };
     // tick 节流状态清零在 WRITER 锁释放后执行（新文件首 tick 即记录，不留心跳空窗）
     if pkg_switched {
-        devimp_tick_state_clear();
+        main_tick_state_clear();
     }
-    // ② 最后更新 DEVIMP_FG_PKG（各行的 package 列数据源，DevRow::new 读取）。
+    // ② 最后更新 DIAG_FG_PKG（各行的 package 列数据源，MainRow::new 读取）。
     // 顺序敏感：写线程构造行读 FG_PKG 与写行拿 WRITER 之间无原子性——
     // 若先更新 FG_PKG 再切文件，切换边界处写线程会读到新包名却写进旧文件，
     // 产生 1~2 行归属错位；先切文件后更新 FG_PKG 则任何时刻
     // 「行的 package 列」与「所在文件」一致（旧行旧文件 / 新行新文件）。
-    if let Ok(mut g) = DEVIMP_FG_PKG.lock() {
+    if let Ok(mut g) = DIAG_FG_PKG.lock() {
         *g = p.to_string();
     }
 }
 
-/// frozen（待春归）标记：由 `set_devimp_mode`（低频）维护，供 `devimp_active()` 高频读取。
-/// 单独存一份原子量，是为了让那条闸门不抢 `DEVIMP_MODE` 的锁（见函数内注释）。
-static DEVIMP_FROZEN: AtomicBool = AtomicBool::new(false);
+/// frozen（待春归）标记：由 `set_diag_mode`（低频）维护，供 `diag_active()` 高频读取。
+/// 单独存一份原子量，是为了让那条闸门不抢 `DIAG_MODE` 的锁（见函数内注释）。
+static DIAG_FROZEN: AtomicBool = AtomicBool::new(false);
 
-/// 开发记录是否开启（各写入点检查；关闭时不产生任何 IO）
-pub fn devimp_active() -> bool {
-    if !DEVIMP_ACTIVE.load(Ordering::Relaxed) {
+/// 开发记录是否开启（各写入点检查；关闭时不产生任何 IO/分配）
+pub fn diag_active() -> bool {
+    if !DIAG_ACTIVE.load(Ordering::Relaxed) {
         return false;
     }
     // frozen（待春归）：诊断记录是 40ms/tick 级别的高频写入，属于该模式要停掉的
     // 「额外开销」。按当前模式二次判定，避免只关 dev_record 开关后又在别处被打开。
-    // **只读原子量**：本函数是每条 devimp 行写入前的闸门（特调下可达 25 行/s/组），
-    // 这里不能去抢 DEVIMP_MODE 的锁——标记由 set_devimp_mode（低频）维护。
-    if DEVIMP_FROZEN.load(Ordering::Relaxed) {
+    // **只读原子量**：本函数是每条诊断行/帧写入前的闸门（特调下可达 25 行/s/组），
+    // 这里不能去抢 DIAG_MODE 的锁——标记由 set_diag_mode（低频）维护。
+    if DIAG_FROZEN.load(Ordering::Relaxed) {
         return false;
     }
     true
 }
 
-/// devimp 目录相对模块根的路径
+/// devimp 目录相对模块根的路径（目录/归档/记账派生物保留 devimp 名，
+/// main_* 与 aff_* 两种诊断文件同住此目录）
 const DEVIMP_DIR_REL: &str = "devimp";
 /// 保留的历史文件数（按文件 mtime 从旧到新删除，当前活跃文件除外）；
-/// 按包名分组后单轮会话可能产生多份文件，较旧版（一进程一文件）放宽
+/// 按包名分组后单轮会话可能产生多份文件，较旧版（一进程一文件）放宽。
+/// main_*.log 与 aff_*.log 合并计数
 const DEVIMP_KEEP_FILES: usize = 20;
-/// 单文件软上限：触顶换新时间戳文件继续写（不静默停写）
+/// 单文件软上限：触顶换新时间戳文件继续写（不静默停写），main_ / aff_ 同口径
 const DEVIMP_MAX_BYTES: u64 = 128 * 1024 * 1024;
-/// 每 N 行巡检一次（触顶换文件 + 被删自愈）
+/// 每 N 行巡检一次（触顶换文件 + 被删自愈），main_ / aff_ 同口径
 const DEVIMP_CHECK_EVERY: u64 = 256;
 /// tick 行无变化时的心跳间隔（决策签名不变时每 2s 仍写一条，保证时间轴连续）
-const DEVIMP_TICK_HEARTBEAT: Duration = Duration::from_secs(2);
+const MAIN_TICK_HEARTBEAT: Duration = Duration::from_secs(2);
 
 /// tick 行节流状态：cluster 名 → (上次写入的决策签名, 上次写入时刻)。
 /// 签名只含决策结果字段（decision/tgt_perf/cur_freq/max_freq/thermal/touch/
 /// 防抖进度），util/over/under 等每 tick 抖动的观测值不参与——稳态不写，
 /// 防抖与升降过渡期逐 tick 记录。写入量：CLG ~6 行/s、akmode 25 行/s/组
 /// → 稳态每组 0.5 行/s
-static DEVIMP_TICK_STATE: OnceLock<Mutex<HashMap<String, (String, Instant)>>> = OnceLock::new();
+static MAIN_TICK_STATE: OnceLock<Mutex<HashMap<String, (String, Instant)>>> = OnceLock::new();
 
-fn devimp_tick_state() -> &'static Mutex<HashMap<String, (String, Instant)>> {
-    DEVIMP_TICK_STATE.get_or_init(|| Mutex::new(HashMap::new()))
+fn main_tick_state() -> &'static Mutex<HashMap<String, (String, Instant)>> {
+    MAIN_TICK_STATE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 /// 清空 tick 节流状态（包名切换/触顶换新文件时调用：新文件首 tick 即记录，
 /// 不留心跳空窗）
-fn devimp_tick_state_clear() {
-    devimp_tick_state()
+fn main_tick_state_clear() {
+    main_tick_state()
         .lock()
         .unwrap_or_else(|p| p.into_inner())
         .clear();
 }
 
-/// CSV 表头（列 schema，40 列定长，行类型无关——tgtop/place/aff 等只是 type
-/// 列的取值，各自写既有列的子集、其余留 "-"，禁止按行类型增删列）。
-/// 列序由 devimp_tick / devimp_snap / devimp_place / devimp_aff /
-/// devimp_core / devimp_tgtop / devimp_event 的写入保证对齐
+/// CSV 表头（列 schema，**44 列，v2026-09-22 拆分版**，行类型无关——tick/snap/
+/// event 只是 type 列的取值，各自写既有列的子集、其余留 "-"，禁止按行类型增删列）。
+/// 48→44 列收缩：place/aff/core/tgtop 四类线程相关行迁出至 aff_ 帧流后，
+/// 删其专用列 from_core/to_core/util_pct/pinned，其余列相对顺序不变。
+/// 列序由 main_tick / main_snap / main_event 的写入保证对齐
 // [devrow]
-/// 列 40-47（2026-09-21 新增，追加在末尾而非插入中间，避免打乱既有列索引）：
+/// 列 36-43（原 48 列版的列 40-47，2026-09-21 新增，追加在末尾而非插入中间，
+/// 避免打乱既有列的索引；语义原样保留）：
 /// CPU 各 policy 与 GPU 各节点的**实际**频率/上下限/调速器。
 /// 多 policy（节点）用 `;` 分隔，每项 `policy<id>:<值>`（GPU 为 `<设备名>:<值>`），
 /// 读不到写 `-`。只在 snap 行填充（1s 整机快照），其余行类型留 `-`。
 /// 与既有 cur_freq_khz / max_freq_khz 的区别：那两列是 **TunedGovernor/CLG 的
 /// 决策值**（写进去的 scaling_max 与硬件最高），这几列是**内核当前实际值**。
-const DEVIMP_HEADER: &str = "ts,type,mode,screen_on,pid,package,tid,comm,cluster,core,from_core,to_core,util_pct,max_util,over_cores,under_cores,cur_perf,tgt_perf,cur_freq_khz,max_freq_khz,decision,deb_up,deb_down,reason,pinned,thermal_cap_pct,touch,psi_cpu,psi_io,psi_mem,gpu_busy,batt_v,batt_i,batt_p,wakeups,migrations,freq_trans,batt_temp,cpu_temp,clg_active,cpu_cur_khz,cpu_max_khz,cpu_min_khz,cpu_governor,gpu_cur_khz,gpu_max_khz,gpu_min_khz,gpu_governor";
+const MAIN_HEADER: &str = "ts,type,mode,screen_on,pid,package,tid,comm,cluster,core,max_util,over_cores,under_cores,cur_perf,tgt_perf,cur_freq_khz,max_freq_khz,decision,deb_up,deb_down,reason,thermal_cap_pct,touch,psi_cpu,psi_io,psi_mem,gpu_busy,batt_v,batt_i,batt_p,wakeups,migrations,freq_trans,batt_temp,cpu_temp,clg_active,cpu_cur_khz,cpu_max_khz,cpu_min_khz,cpu_governor,gpu_cur_khz,gpu_max_khz,gpu_min_khz,gpu_governor";
 
-// 列索引常量（DevRow.set 用，调用方按列语义取用）
-const D_TS: usize = 0;
-const D_TYPE: usize = 1;
-const D_MODE: usize = 2;
-const D_SCREEN: usize = 3;
-const D_PID: usize = 4;
-const D_PKG: usize = 5;
-const D_TID: usize = 6;
-const D_COMM: usize = 7;
-const D_CLUSTER: usize = 8;
-const D_CORE: usize = 9;
-const D_FROM: usize = 10;
-const D_TO: usize = 11;
-const D_UTIL: usize = 12;
-const D_MAXUTIL: usize = 13;
-const D_OVER: usize = 14;
-const D_UNDER: usize = 15;
-const D_CURPERF: usize = 16;
-const D_TGTPERF: usize = 17;
-const D_CURFREQ: usize = 18;
-const D_MAXFREQ: usize = 19;
-const D_DECISION: usize = 20;
-const D_DEBUP: usize = 21;
-const D_DEBDOWN: usize = 22;
-const D_REASON: usize = 23;
-const D_PINNED: usize = 24;
-const D_THERMAL: usize = 25;
-const D_TOUCH: usize = 26;
-const D_PSICPU: usize = 27;
-const D_PSIIIO: usize = 28;
-const D_PSIMEM: usize = 29;
-const D_GPU: usize = 30;
-const D_BATTV: usize = 31;
-const D_BATTI: usize = 32;
-const D_BATTP: usize = 33;
-const D_WAKEUPS: usize = 34;
-const D_MIGR: usize = 35;
-const D_FREQT: usize = 36;
-const D_BATTTEMP: usize = 37;
-const D_CPUTEMP: usize = 38;
-const D_CLGACT: usize = 39;
-// 40-47：CPU/GPU 实际频率与调速器（见 DEVIMP_HEADER 上方注释，仅 snap 行填充）
-const D_CPUCUR: usize = 40;
-const D_CPUMAX: usize = 41;
-const D_CPUMIN: usize = 42;
-const D_CPUGOV: usize = 43;
-const D_GPUCUR: usize = 44;
-const D_GPUMAX: usize = 45;
-const D_GPUMIN: usize = 46;
-const D_GPUGOV: usize = 47;
+// 列索引常量（MainRow.set 用，调用方按列语义取用；48→44 列重排，
+// 保持其余列相对顺序不变）
+const DM_TS: usize = 0;
+const DM_TYPE: usize = 1;
+const DM_MODE: usize = 2;
+const DM_SCREEN: usize = 3;
+/// pid/tid/comm/core 四列（列位保留）：place/aff/core 行迁出后暂无写入方，
+/// 常量保留供列位对齐与后续行类型使用
+#[allow(dead_code)]
+const DM_PID: usize = 4;
+const DM_PKG: usize = 5;
+#[allow(dead_code)]
+const DM_TID: usize = 6;
+#[allow(dead_code)]
+const DM_COMM: usize = 7;
+const DM_CLUSTER: usize = 8;
+#[allow(dead_code)]
+const DM_CORE: usize = 9;
+const DM_MAXUTIL: usize = 10;
+const DM_OVER: usize = 11;
+const DM_UNDER: usize = 12;
+const DM_CURPERF: usize = 13;
+const DM_TGTPERF: usize = 14;
+const DM_CURFREQ: usize = 15;
+const DM_MAXFREQ: usize = 16;
+const DM_DECISION: usize = 17;
+const DM_DEBUP: usize = 18;
+const DM_DEBDOWN: usize = 19;
+const DM_REASON: usize = 20;
+const DM_THERMAL: usize = 21;
+const DM_TOUCH: usize = 22;
+const DM_PSICPU: usize = 23;
+const DM_PSIIIO: usize = 24;
+const DM_PSIMEM: usize = 25;
+const DM_GPU: usize = 26;
+const DM_BATTV: usize = 27;
+const DM_BATTI: usize = 28;
+const DM_BATTP: usize = 29;
+const DM_WAKEUPS: usize = 30;
+const DM_MIGR: usize = 31;
+const DM_FREQT: usize = 32;
+const DM_BATTTEMP: usize = 33;
+const DM_CPUTEMP: usize = 34;
+const DM_CLGACT: usize = 35;
+// 36-43：CPU/GPU 实际频率与调速器（原 48 列版的 40-47，见 MAIN_HEADER 上方
+// 注释，仅 snap 行填充）
+const DM_CPUCUR: usize = 36;
+const DM_CPUMAX: usize = 37;
+const DM_CPUMIN: usize = 38;
+const DM_CPUGOV: usize = 39;
+const DM_GPUCUR: usize = 40;
+const DM_GPUMAX: usize = 41;
+const DM_GPUMIN: usize = 42;
+const DM_GPUGOV: usize = 43;
 
-/// 一行诊断记录（固定 48 列，未用列填 "-"），由各 devimp_* 函数填充
-struct DevRow([String; 48]);
+/// 一行诊断记录（固定 44 列，未用列填 "-"），由各 main_* 函数填充
+struct MainRow([String; 44]);
 
-impl DevRow {
-    /// 新建一行：ts/type/mode/package 已填（mode 读全局 DEVIMP_MODE，package
-    /// 读全局 DEVIMP_FG_PKG——当前前台包名，tick/core 等不感知包名的行类型
+impl MainRow {
+    /// 新建一行：ts/type/mode/package 已填（mode 读全局 DIAG_MODE，package
+    /// 读全局 DIAG_FG_PKG——当前前台包名，tick 等不感知包名的行类型
     /// 由这里补齐），其余置 "-"
     fn new(kind: &str) -> Self {
-        let mut row = DevRow(std::array::from_fn(|_| NA.to_string()));
-        row.0[D_TS] = format_now();
-        row.0[D_TYPE] = kind.to_string();
-        if let Ok(m) = DEVIMP_MODE.lock() {
-            row.0[D_MODE] = m.clone();
+        let mut row = MainRow(std::array::from_fn(|_| NA.to_string()));
+        row.0[DM_TS] = format_now();
+        row.0[DM_TYPE] = kind.to_string();
+        if let Ok(m) = DIAG_MODE.lock() {
+            row.0[DM_MODE] = m.clone();
         }
-        if let Ok(g) = DEVIMP_FG_PKG.lock() {
+        if let Ok(g) = DIAG_FG_PKG.lock() {
             if !g.is_empty() {
-                row.0[D_PKG] = g.clone();
+                row.0[DM_PKG] = g.clone();
             }
         }
         row
@@ -935,33 +988,35 @@ impl DevRow {
     }
 
     /// 覆盖 package 列：仅当调用方携带有效包名（非空且非 "-"）时覆盖自动
-    /// 填充值；空/"-" 视为未提供，保留前台包名（如 place 行 fg_cmdline 尚未
-    /// 缓存、event 行与具体包名无关）
+    /// 填充值；空/"-" 视为未提供，保留前台包名（如 event 行与具体包名无关）
     fn set_pkg(&mut self, pkg: &str) -> &mut Self {
         if !pkg.is_empty() && pkg != NA {
-            self.0[D_PKG] = pkg.to_string();
+            self.0[DM_PKG] = pkg.to_string();
         }
         self
     }
 }
 
 /// 常驻写入器：append 句柄 + 当前文件名 + 当前包名段 + 巡检计数。
-/// `cur_name` 为 None 时，下次写入按 `pkg_seg` + 当前毫秒时间戳确定新文件名
+/// `cur_name` 为 None 时，下次写入按 `pkg_seg` + 当前时间戳确定新文件名
 /// （包名切换与 128MB 触顶续写都走这条路径）。
 ///
-/// 锁序约定（防死锁）：devimp 共四把锁 —— `DEVIMP_MODE` / `DEVIMP_FG_PKG` /
-/// `DEVIMP_TICK_STATE` / `DEVIMP_WRITER`。约定：
+/// 锁序约定（防死锁）：诊断子系统共五把锁 —— `DIAG_MODE` / `DIAG_FG_PKG` /
+/// `MAIN_TICK_STATE` / `MAIN_WRITER` / `AFF_WRITER`（chiri/mod.rs 另有 @S 线程
+/// 差分基线锁 `AFF_TH_STATE`，取数期间仅做 /proc 读，不与任何写入器锁嵌套）。约定：
 /// 1. 各锁均为短临界区，**不嵌套持有**（获取下一个锁前必须释放上一个）；
 ///    历史上曾在 WRITER 临界区内清 TICK_STATE（包名切换/触顶），已移出；
-/// 2. WRITER 临界区内只允许文件 IO 与 writer 自身状态修改，不获取任何
-///    其他锁——它是写路径的汇合点（scheduler_ipc / CLG Worker / 亲和线程
-///    都会写入），嵌套获取最易构成环；
-/// 3. `DevRow::new`（MODE、FG_PKG 短持有）先于 `devimp_write_line`（WRITER）
+/// 2. WRITER（`MAIN_WRITER` / `AFF_WRITER` 同）临界区内只允许文件 IO 与
+///    writer 自身状态修改，不获取任何其他锁——它是写路径的汇合点
+///    （scheduler_ipc / CLG Worker / 亲和线程都会写入），嵌套获取最易构成环；
+/// 3. **两个写入器不嵌套持锁**：`MAIN_WRITER` 与 `AFF_WRITER` 互不同时持有，
+///    也不与其他任何锁同时持有（两份文件各自独立写入，无跨文件原子性需求）；
+/// 4. `MainRow::new`（MODE、FG_PKG 短持有）先于 `main_write_line`（WRITER）
 ///    完成，两段之间无重叠。
 /// 违反上述任一条都会引入死锁风险（如未来某线程反向先取 WRITER 再取
 /// FG_PKG）。
 // [devimp_writer]
-struct DevimpWriter {
+struct MainWriter {
     file: Option<fs::File>,
     /// 当前文件名（含包名段与文件创建时间戳）
     cur_name: Option<String>,
@@ -970,7 +1025,7 @@ struct DevimpWriter {
     since_check: u64,
 }
 
-static DEVIMP_WRITER: Mutex<DevimpWriter> = Mutex::new(DevimpWriter {
+static MAIN_WRITER: Mutex<MainWriter> = Mutex::new(MainWriter {
     file: None,
     cur_name: None,
     pkg_seg: String::new(),
@@ -1000,20 +1055,21 @@ fn filename_ts() -> String {
     )
 }
 
-/// 生成新文件名：`devimp_<包名段>_<MMDD-HHmmss>.log`（包名段空 → nopkg）。
+/// 生成新文件名：`main_<包名段>_<MMDD-HHmmss>.log`（包名段空 → nopkg）。
 /// 时间戳在每次开新文件时取当前本地时刻，同一包名触顶续写也会得到新文件名。
-/// 同秒内重开（极端：包名快速抖动）由 devimp_open 的存在性检测补 -N 后缀去重。
-fn devimp_new_name(pkg_seg: &str) -> String {
+/// 同秒内重开（极端：包名快速抖动）由 main_open 的存在性检测补 -N 后缀去重。
+fn main_new_name(pkg_seg: &str) -> String {
     if pkg_seg.is_empty() {
-        format!("devimp_nopkg_{}.log", filename_ts())
+        format!("main_nopkg_{}.log", filename_ts())
     } else {
-        format!("devimp_{pkg_seg}_{}.log", filename_ts())
+        format!("main_{pkg_seg}_{}.log", filename_ts())
     }
 }
 
-/// devimp 文件头元信息（`#` 注释行，CSV 解析跳过）：处理器型号、系统版本、
-/// 模块版本等，方便多设备/多版本日志离线比对。进程内只收集一次。
-fn devimp_meta() -> &'static String {
+/// 诊断文件头元信息（`#` 注释行，解析跳过，main_ / aff_ 两文件共用）：
+/// 处理器型号、系统版本、模块版本等，方便多设备/多版本日志离线比对。
+/// 进程内只收集一次。
+fn diag_meta() -> &'static String {
     static META: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     META.get_or_init(|| {
         let root = common::get_module_root();
@@ -1053,7 +1109,7 @@ fn devimp_meta() -> &'static String {
         }
         // getprop 拿跨分区属性的合并视图：ro.product.model 等常不在
         // /system/build.prop（Android 10+ 属 /product、/vendor 分区），直接读文件
-        // 会显示 "-"（devimp 头 model 曾因此读空）。getprop 为空时保留上面的
+        // 会显示 "-"（诊断文件头 model 曾因此读空）。getprop 为空时保留上面的
         // build.prop 解析值兜底。
         let gp = |k: &str| crate::common::getprop(k);
         let m = gp("ro.product.model");
@@ -1085,34 +1141,49 @@ fn devimp_meta() -> &'static String {
     })
 }
 
-/// devimp 文件头（CSV 表头 + `#` 元信息注释行）的**内存预拼接缓存**：
-/// 进程内只收集/拼接一次，每个新文件创建时直接一次 `write_all` 整块写入。
-fn devimp_file_head() -> &'static [u8] {
-    static HEAD: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
-    HEAD.get_or_init(|| {
-        let mut head = Vec::with_capacity(DEVIMP_HEADER.len() + devimp_meta().len());
-        head.extend_from_slice(DEVIMP_HEADER.as_bytes());
-        head.push(b'\n');
-        head.extend_from_slice(devimp_meta().as_bytes());
-        head
-    })
+/// 诊断文件头（schema 行/注释块 + `#` 元信息注释行）拼接，main_ 与 aff_ 共用
+/// （`schema` 分别传 [`MAIN_HEADER`] 的 CSV 表头与 [`AFF_HEADER`] 的帧格式说明）。
+/// 元信息 [`diag_meta`] 进程内只收集一次；拼接只发生在新建文件时（罕见），
+/// 每次现拼的分配开销可忽略。
+fn diag_file_head(schema: &str) -> Vec<u8> {
+    let mut head = Vec::with_capacity(schema.len() + diag_meta().len() + 1);
+    head.extend_from_slice(schema.as_bytes());
+    head.push(b'\n');
+    head.extend_from_slice(diag_meta().as_bytes());
+    head
 }
 
-/// 打开（或重建）诊断日志：create+append；空文件整块写入内存缓存的文件头
+/// aff_ 文件头：帧格式说明 + 元信息。元信息的 ts 说明行按文件改写——
+/// main_ 的 ts 列是 format_now（HH:MM:SS.mmm），aff_ 帧 `ts=` 是
+/// MMDD-HHmmss（与文件名同款），两文件不能共用同一句 ts 口径。
+fn aff_file_head() -> Vec<u8> {
+    let meta = diag_meta().replace(
+        "# ts-column=local format_now",
+        "# ts-column=local MMDD-HHmmss（帧 ts 字段，与文件名同款）",
+    );
+    let mut head = Vec::with_capacity(AFF_HEADER.len() + meta.len() + 1);
+    head.extend_from_slice(AFF_HEADER.as_bytes());
+    head.push(b'\n');
+    head.extend_from_slice(meta.as_bytes());
+    head
+}
+
+/// 打开（或重建）main_ 诊断日志：create+append；空文件整块写入文件头
 /// （CSV 表头 + `#` 元信息注释行——处理器/系统/模块版本等，方便离线辨别
-/// 日志来源，拼接结果进程内复用）。
+/// 日志来源）。
 /// `cur_name` 为空则按当前包名段 + 当前本地时间戳确定新文件名并记入写入器；
 /// MMDD-HHmmss 秒级精度存在同秒重开的理论碰撞（包名快速抖动），以 -N 后缀去重。
 /// 返回 None 表示打开失败（调用方下次写入时再试）。
-fn devimp_open(w: &mut DevimpWriter) -> Option<fs::File> {
+fn main_open(w: &mut MainWriter) -> Option<fs::File> {
     let dir = common::get_module_root().join(DEVIMP_DIR_REL);
     let _ = fs::create_dir_all(&dir);
     let name = match w.cur_name.clone() {
         Some(n) => n,
         None => {
-            let base = devimp_new_name(&w.pkg_seg);
+            let base = main_new_name(&w.pkg_seg);
             let stem = base.strip_suffix(".log").unwrap_or(&base);
             let mut name = base.clone();
+            let mut found = false;
             for n in 1..100u32 {
                 let candidate = if n == 1 {
                     base.clone()
@@ -1121,9 +1192,15 @@ fn devimp_open(w: &mut DevimpWriter) -> Option<fs::File> {
                 };
                 if !dir.join(&candidate).exists() {
                     name = candidate;
+                    found = true;
                     break;
                 }
                 name = candidate;
+            }
+            if !found {
+                // 99 个候选全部存在（同秒理论极限）：绝不复用已有文件追加
+                // （会不写文件头混流），用 pid 做最后唯一化
+                name = format!("{stem}-{}.log", std::process::id());
             }
             w.cur_name = Some(name.clone());
             name
@@ -1135,7 +1212,7 @@ fn devimp_open(w: &mut DevimpWriter) -> Option<fs::File> {
         .open(dir.join(&name))
         .ok()?;
     if f.metadata().map(|m| m.len()).unwrap_or(1) == 0 {
-        let _ = f.write_all(devimp_file_head());
+        let _ = f.write_all(&diag_file_head(MAIN_HEADER));
     }
     Some(f)
 }
@@ -1144,7 +1221,7 @@ fn devimp_open(w: &mut DevimpWriter) -> Option<fs::File> {
 /// （丢弃句柄后同名重建）、触顶换新文件后做容量清理。
 /// 返回是否发生触顶换文件（调用方在 WRITER 锁释放后据此清 tick 节流状态，
 /// 避免 WRITER 临界区内嵌套获取 TICK_STATE 锁）。
-fn devimp_check(w: &mut DevimpWriter) -> bool {
+fn main_check(w: &mut MainWriter) -> bool {
     let mut rotated = false;
     if let Some(name) = w.cur_name.clone() {
         let path = common::get_module_root().join(DEVIMP_DIR_REL).join(&name);
@@ -1161,26 +1238,29 @@ fn devimp_check(w: &mut DevimpWriter) -> bool {
         }
     }
     if w.file.is_none() {
-        let f = devimp_open(w);
+        let f = main_open(w);
         w.file = f;
         if rotated {
-            devimp_prune(w.cur_name.as_deref());
+            diag_prune(w.cur_name.as_deref());
         }
     }
     rotated
 }
 
-/// 容量清理：仅保留最近 DEVIMP_KEEP_FILES 份 devimp_*.log，从旧到新删除；
-/// `current` 为当前活跃文件名，不参与清理。文件名含包名段，字典序不再等于
-/// 时间序，因此按文件 mtime 排序。
-fn devimp_prune(current: Option<&str>) {
+/// 容量清理：仅保留最近 DEVIMP_KEEP_FILES 份诊断文件（`main_*.log` 与
+/// `aff_*.log` 两种前缀合并计数），从旧到新删除；`current` 为当前活跃文件名，
+/// 不参与清理。旧 `devimp_*.log` 不在过滤前缀内（不迁移，随启动归档自然
+/// 过期淘汰）。文件名含包名段，字典序不再等于时间序，因此按文件 mtime 排序。
+fn diag_prune(current: Option<&str>) {
     let dir = common::get_module_root().join(DEVIMP_DIR_REL);
     let mut files: Vec<(std::time::SystemTime, String)> = fs::read_dir(&dir)
         .map(|rd| {
             rd.flatten()
                 .filter_map(|e| {
                     let name = e.file_name().to_string_lossy().into_owned();
-                    if !name.starts_with("devimp_") || !name.ends_with(".log") {
+                    if !(name.starts_with("main_") || name.starts_with("aff_"))
+                        || !name.ends_with(".log")
+                    {
                         return None;
                     }
                     if Some(name.as_str()) == current {
@@ -1199,18 +1279,18 @@ fn devimp_prune(current: Option<&str>) {
     }
 }
 
-/// 写一行到 devimp 日志（未开启开关时不产生任何 IO）
-fn devimp_write_line(row: DevRow) {
-    if !devimp_active() {
+/// 写一行到 main_ 诊断日志（未开启开关时不产生任何 IO）
+fn main_write_line(row: MainRow) {
+    if !diag_active() {
         return;
     }
     let line = row.0.join(",");
     // WRITER 临界区内只做写入与巡检（文件 IO），不获取任何其他锁；
-    // 触顶换文件后的 tick 节流清零移到锁释放之后（锁序约定见 DEVIMP_WRITER）
+    // 触顶换文件后的 tick 节流清零移到锁释放之后（锁序约定见 MAIN_WRITER）
     let rotated = {
-        let mut w = DEVIMP_WRITER.lock().unwrap_or_else(|p| p.into_inner());
+        let mut w = MAIN_WRITER.lock().unwrap_or_else(|p| p.into_inner());
         if w.file.is_none() {
-            let f = devimp_open(&mut w);
+            let f = main_open(&mut w);
             w.file = f;
         }
         let write_ok = match w.file.as_mut() {
@@ -1222,7 +1302,7 @@ fn devimp_write_line(row: DevRow) {
         };
         if !write_ok {
             // 写失败（磁盘/句柄异常）：重开重试一次，仍失败则丢弃本行
-            let f = devimp_open(&mut w);
+            let f = main_open(&mut w);
             w.file = f;
             if let Some(f) = w.file.as_mut() {
                 let _ = f.write_all(line.as_bytes());
@@ -1232,14 +1312,14 @@ fn devimp_write_line(row: DevRow) {
         w.since_check += 1;
         if w.since_check >= DEVIMP_CHECK_EVERY {
             w.since_check = 0;
-            devimp_check(&mut w)
+            main_check(&mut w)
         } else {
             false
         }
     };
     if rotated {
         // 触顶换新文件：清 tick 节流状态（新文件首 tick 即记录，不留心跳空窗）
-        devimp_tick_state_clear();
+        main_tick_state_clear();
         // 触顶即新增了一个 128MB 级文件：顺手执行目录预算清理
         // （logd/ 与 devimp/ 各自独立计量，各自超 128MB 才从本目录最旧文件删到 <96MB）
         enforce_dir_limits(&common::get_module_root());
@@ -1249,15 +1329,15 @@ fn devimp_write_line(row: DevRow) {
     note_write(&DEVIMP_BYTES_WRITTEN, "devimp/", line.len() as u64 + 1);
 }
 
-/// 启动兜底清理：仅保留最近 DEVIMP_KEEP_FILES 份历史诊断文件（按文件 mtime
-/// 排序，超出从旧到新删除）。main.rs 启动时调用一次；正常路径下 devimp/ 已被
-/// 启动归档整体 rename 走并新建为空目录，此函数仅作为归档 rename 失败时的
-/// 兜底（旧文件保留在原目录时防止无限堆积）。
+/// 启动兜底清理：仅保留最近 DEVIMP_KEEP_FILES 份历史诊断文件（main_*.log 与
+/// aff_*.log 合并计数，按文件 mtime 排序，超出从旧到新删除）。main.rs 启动时
+/// 调用一次；正常路径下 devimp/ 已被启动归档整体 rename 走并新建为空目录，
+/// 此函数仅作为归档 rename 失败时的兜底（旧文件保留在原目录时防止无限堆积）。
 // [devimp_api]
-pub fn devimp_prepare() {
+pub fn diag_prepare() {
     let dir = common::get_module_root().join(DEVIMP_DIR_REL);
     let _ = fs::create_dir_all(&dir);
-    devimp_prune(None);
+    diag_prune(None);
 }
 
 /// 看门狗 PID（daemon 由看门狗 sh 前台拉起，`getppid()` 即其 PID）。
@@ -1308,7 +1388,7 @@ pub fn ensure_watchdog_pid_file() {
 /// util/over/under 等逐 tick 抖动的观测值不触发写入。稳态从 CLG ~6 行/s、
 /// akmode 25 行/s/组 降到每组 0.5 行/s，防抖与升降过渡期仍逐 tick 记录。
 #[allow(clippy::too_many_arguments)]
-pub fn devimp_tick(
+pub fn main_tick(
     cluster: &str,
     max_util: &str,
     over: u32,
@@ -1323,7 +1403,7 @@ pub fn devimp_tick(
     thermal_cap_pct: &str,
     touch_active: bool,
 ) {
-    if !devimp_active() {
+    if !diag_active() {
         return;
     }
     let sig = format!(
@@ -1331,12 +1411,10 @@ pub fn devimp_tick(
     );
     let now = Instant::now();
     let should_write = {
-        let mut st = devimp_tick_state()
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
+        let mut st = main_tick_state().lock().unwrap_or_else(|p| p.into_inner());
         match st.get_mut(cluster) {
             Some((last_sig, last_t)) => {
-                if *last_sig == sig && now.duration_since(*last_t) < DEVIMP_TICK_HEARTBEAT {
+                if *last_sig == sig && now.duration_since(*last_t) < MAIN_TICK_HEARTBEAT {
                     false
                 } else {
                     *last_sig = sig;
@@ -1353,27 +1431,27 @@ pub fn devimp_tick(
     if !should_write {
         return;
     }
-    let mut r = DevRow::new("tick");
-    r.set(D_CLUSTER, cluster)
-        .set(D_MAXUTIL, max_util)
-        .set(D_OVER, over.to_string())
-        .set(D_UNDER, under.to_string())
-        .set(D_CURPERF, cur_perf)
-        .set(D_TGTPERF, tgt_perf)
-        .set(D_CURFREQ, cur_freq_khz)
-        .set(D_MAXFREQ, max_freq_khz)
-        .set(D_DECISION, decision)
-        .set(D_DEBUP, deb_up.to_string())
-        .set(D_DEBDOWN, deb_down.to_string())
-        .set(D_THERMAL, thermal_cap_pct)
-        .set(D_TOUCH, if touch_active { "1" } else { "0" });
-    devimp_write_line(r);
+    let mut r = MainRow::new("tick");
+    r.set(DM_CLUSTER, cluster)
+        .set(DM_MAXUTIL, max_util)
+        .set(DM_OVER, over.to_string())
+        .set(DM_UNDER, under.to_string())
+        .set(DM_CURPERF, cur_perf)
+        .set(DM_TGTPERF, tgt_perf)
+        .set(DM_CURFREQ, cur_freq_khz)
+        .set(DM_MAXFREQ, max_freq_khz)
+        .set(DM_DECISION, decision)
+        .set(DM_DEBUP, deb_up.to_string())
+        .set(DM_DEBDOWN, deb_down.to_string())
+        .set(DM_THERMAL, thermal_cap_pct)
+        .set(DM_TOUCH, if touch_active { "1" } else { "0" });
+    main_write_line(r);
 }
 
-/// snap 行：1s 环境上下文（遥测 + 热保护；前台包名由 DevRow 自动填充，
-/// scheduler_ipc 每秒 set_devimp_package 与此处同值）
+/// snap 行：1s 环境上下文（遥测 + 热保护；前台包名由 MainRow 自动填充，
+/// scheduler_ipc 每秒 set_diag_package 与此处同值）
 #[allow(clippy::too_many_arguments)]
-pub fn devimp_snap(
+pub fn main_snap(
     screen_on: bool,
     batt_temp: &str,
     cpu_temp: &str,
@@ -1398,110 +1476,258 @@ pub fn devimp_snap(
     gpu_min: &str,
     gpu_gov: &str,
 ) {
-    let mut r = DevRow::new("snap");
-    r.set(D_SCREEN, if screen_on { "1" } else { "0" })
-        .set(D_BATTTEMP, batt_temp)
-        .set(D_CPUTEMP, cpu_temp)
-        .set(D_THERMAL, thermal_cap_pct)
-        .set(D_CLGACT, if clg_active { "1" } else { "0" })
-        .set(D_PSICPU, psi_cpu)
-        .set(D_PSIIIO, psi_io)
-        .set(D_PSIMEM, psi_mem)
-        .set(D_GPU, gpu_busy)
-        .set(D_BATTV, batt_v)
-        .set(D_BATTI, batt_i)
-        .set(D_BATTP, batt_p)
-        .set(D_WAKEUPS, wakeups.to_string())
-        .set(D_MIGR, migrations.to_string())
-        .set(D_FREQT, freq_trans.to_string())
-        // CPU/GPU 实际频率与调速器：内核当前值，区别于 D_CURFREQ/D_MAXFREQ 的决策值
-        .set(D_CPUCUR, cpu_cur)
-        .set(D_CPUMAX, cpu_max)
-        .set(D_CPUMIN, cpu_min)
-        .set(D_CPUGOV, cpu_gov)
-        .set(D_GPUCUR, gpu_cur)
-        .set(D_GPUMAX, gpu_max)
-        .set(D_GPUMIN, gpu_min)
-        .set(D_GPUGOV, gpu_gov);
-    devimp_write_line(r);
-}
-
-/// place 行：线程放置快照（低频，affinity 缓存数据输出：包名/线程名/落点核；
-/// fg_cmdline 未缓存时保留自动填充的前台包名）
-#[allow(clippy::too_many_arguments)]
-pub fn devimp_place(pid: i32, pkg: &str, tid: i32, comm: &str, core: i32, util_pct: &str) {
-    let mut r = DevRow::new("place");
-    r.set(D_PID, pid.to_string())
-        .set_pkg(pkg)
-        .set(D_TID, tid.to_string())
-        .set(D_COMM, comm)
-        .set(D_CORE, core.to_string())
-        .set(D_UTIL, util_pct);
-    devimp_write_line(r);
-}
-
-/// aff 行：亲和迁移动作（decision 列记动作：pin/promote/demote/restore/
-/// blacklist_skip/rebalance；reason 记触发原因）。pkg 无条件覆盖自动填充：
-/// 后台迁移行传 "-" 是刻意不归属前台包（避免把后台线程算进前台应用的
-/// 线程集合），与 place/event 的 set_pkg 语义不同
-#[allow(clippy::too_many_arguments)]
-pub fn devimp_aff(
-    action: &str,
-    pid: i32,
-    pkg: &str,
-    tid: i32,
-    comm: &str,
-    from_core: &str,
-    to_core: &str,
-    util_pct: &str,
-    reason: &str,
-) {
-    let mut r = DevRow::new("aff");
-    r.set(D_DECISION, action)
-        .set(D_PID, pid.to_string())
-        .set(D_PKG, pkg)
-        .set(D_TID, tid.to_string())
-        .set(D_COMM, comm)
-        .set(D_FROM, from_core)
-        .set(D_TO, to_core)
-        .set(D_UTIL, util_pct)
-        .set(D_REASON, reason);
-    devimp_write_line(r);
-}
-
-/// core 行：逐核负载与钉核计数（每再平衡轮 × 每核一行）
-pub fn devimp_core(cluster: &str, core: usize, util: &str, pinned: u32) {
-    let mut r = DevRow::new("core");
-    r.set(D_CLUSTER, cluster)
-        .set(D_CORE, core.to_string())
-        .set(D_MAXUTIL, util)
-        .set(D_PINNED, pinned.to_string());
-    devimp_write_line(r);
-}
-
-/// tgtop 行：全系统 top 消耗者快照（30s 一轮 × 每进程一行，最多 5 行/轮）。
-/// 用途：定位待机期「小核 util 长期 60%+」的元凶进程（8550 整夜功耗分析遗留
-/// 盲区——place 行只记前台应用线程，后台消耗者完全不可见）。
-/// 列语义复用：pid/tid = TGID，comm = 进程名（cmdline 首段优先），
-/// util_pct = 该窗口运行时间占比（多核并行可 >100%，如 320% ≈ 3.2 核满载），
-/// max_util = 窗口内运行时长增量（ms）。
-pub fn devimp_tgtop(tgid: u32, comm: &str, util_pct: &str, delta_ms: &str) {
-    let mut r = DevRow::new("tgtop");
-    r.set(D_PID, tgid.to_string())
-        .set(D_TID, tgid.to_string())
-        .set(D_COMM, comm)
-        .set(D_UTIL, util_pct)
-        .set(D_MAXUTIL, delta_ms);
-    devimp_write_line(r);
+    let mut r = MainRow::new("snap");
+    r.set(DM_SCREEN, if screen_on { "1" } else { "0" })
+        .set(DM_BATTTEMP, batt_temp)
+        .set(DM_CPUTEMP, cpu_temp)
+        .set(DM_THERMAL, thermal_cap_pct)
+        .set(DM_CLGACT, if clg_active { "1" } else { "0" })
+        .set(DM_PSICPU, psi_cpu)
+        .set(DM_PSIIIO, psi_io)
+        .set(DM_PSIMEM, psi_mem)
+        .set(DM_GPU, gpu_busy)
+        .set(DM_BATTV, batt_v)
+        .set(DM_BATTI, batt_i)
+        .set(DM_BATTP, batt_p)
+        .set(DM_WAKEUPS, wakeups.to_string())
+        .set(DM_MIGR, migrations.to_string())
+        .set(DM_FREQT, freq_trans.to_string())
+        // CPU/GPU 实际频率与调速器：内核当前值，区别于 DM_CURFREQ/DM_MAXFREQ 的决策值
+        .set(DM_CPUCUR, cpu_cur)
+        .set(DM_CPUMAX, cpu_max)
+        .set(DM_CPUMIN, cpu_min)
+        .set(DM_CPUGOV, cpu_gov)
+        .set(DM_GPUCUR, gpu_cur)
+        .set(DM_GPUMAX, gpu_max)
+        .set(DM_GPUMIN, gpu_min)
+        .set(DM_GPUGOV, gpu_gov);
+    main_write_line(r);
 }
 
 /// event 行：状态变化（decision 列记事件名：mode_change/screen/thermal_change/
-/// config_reload/touch/ak_cooldown；reason 记详情）。pkg 有效时覆盖自动填充
-/// （mode_change 携带触发包名；screen/thermal 等系统事件保留前台包名上下文）
-pub fn devimp_event(kind: &str, pkg: &str, reason: &str) {
-    let mut r = DevRow::new("event");
-    r.set(D_DECISION, kind).set_pkg(pkg).set(D_REASON, reason);
-    devimp_write_line(r);
+/// config_reload/touch/ak_cooldown、overload_hold 等；reason 记详情）。pkg 有效时
+/// 覆盖自动填充（mode_change 携带触发包名；screen/thermal 等系统事件保留前台
+/// 包名上下文）
+pub fn main_event(kind: &str, pkg: &str, reason: &str) {
+    let mut r = MainRow::new("event");
+    r.set(DM_DECISION, kind).set_pkg(pkg).set(DM_REASON, reason);
+    main_write_line(r);
+}
+
+// [aff_writer]
+/// aff_ 帧格式说明（文件头 schema，`#` 注释行解析跳过；正文按行首字符定界）：
+/// - `@A` 动作帧（单行自帧）：线程全部动作 + 结果（ok / e{errno}）
+/// - `@S` 每秒快照帧：帧头带行数，后跟定长 p/t 行块（截断帧按计数丢弃）
+/// - 行首字符 `\x01` 保留给将来的二进制帧（本版不实现）
+const AFF_HEADER: &str = "# aff_ 线程数据文件（帧式文本，2026-09-22 拆分版）\n\
+# @A ts=<MMDD-HHmmss> act=<pin|restore|move_group|cpuset_cpus|uclamp|corectl|bind_release|self_pin|self_unpin> pid=<i32> tid=<i32> pkg=<str> comm=<str> dst=<str> value=<str> result=<ok|e{errno}> reason=<str>\n\
+# @S ts=<MMDD-HHmmss> ntop=<进程行数> nfg=<线程行数>\n\
+# p <rank> <pid> <pkg|comm> u=<整数util%> mask=<允许核hex> home=<核|-1>\n\
+# t <pid> <tid> <comm> u=<整数util%> core=<核|-1> home=<核|-1> pin=<0|1> uclamp=<值|-1>\n\
+# 帧边界：@A 单行自帧；@S 按帧头 ntop+nfg 计数定界，末尾截断帧直接丢弃。\n\
+# 行首字符 \\x01 保留给将来的二进制帧（本版不实现）。全字段空白/控制字符净化为 _。\n\
+# t 行 pid=0 表示归属未知（后台候选建档线程）；uclamp 本版恒 -1（预留字段）。";
+
+struct AffWriter {
+    file: Option<fs::File>,
+    /// 当前文件名（含创建时间戳；单滚动文件不分包）
+    cur_name: Option<String>,
+    since_check: u64,
+}
+
+static AFF_WRITER: Mutex<AffWriter> = Mutex::new(AffWriter {
+    file: None,
+    cur_name: None,
+    since_check: 0,
+});
+
+/// 生成新文件名：`aff_<MMDD-HHmmss>.log`（单滚动不分包；同秒重开由
+/// aff_open 的存在性检测补 -N 后缀去重）
+fn aff_new_name() -> String {
+    format!("aff_{}.log", filename_ts())
+}
+
+/// 打开（或重建）aff_ 线程数据文件：create+append；空文件整块写入文件头
+/// （帧格式说明 + `#` 元信息注释行）。返回 None 表示打开失败（下次写入再试）。
+fn aff_open(w: &mut AffWriter) -> Option<fs::File> {
+    let dir = common::get_module_root().join(DEVIMP_DIR_REL);
+    let _ = fs::create_dir_all(&dir);
+    let name = match w.cur_name.clone() {
+        Some(n) => n,
+        None => {
+            let base = aff_new_name();
+            let stem = base.strip_suffix(".log").unwrap_or(&base);
+            let mut name = base.clone();
+            for n in 1..100u32 {
+                let candidate = if n == 1 {
+                    base.clone()
+                } else {
+                    format!("{stem}-{n}.log")
+                };
+                if !dir.join(&candidate).exists() {
+                    name = candidate;
+                    break;
+                }
+                name = candidate;
+            }
+            w.cur_name = Some(name.clone());
+            name
+        }
+    };
+    let mut f = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join(&name))
+        .ok()?;
+    if f.metadata().map(|m| m.len()).unwrap_or(1) == 0 {
+        let _ = f.write_all(&aff_file_head());
+    }
+    Some(f)
+}
+
+/// 巡检：触顶换新时间戳文件继续写、被删自愈（同名重建）、换新后容量清理。
+/// 与 main_check 同口径（aff_ 无 tick 节流，返回值仅用于调用方触发目录预算清理）。
+fn aff_check(w: &mut AffWriter) -> bool {
+    let mut rotated = false;
+    if let Some(name) = w.cur_name.clone() {
+        let path = common::get_module_root().join(DEVIMP_DIR_REL).join(&name);
+        match fs::metadata(&path) {
+            Ok(m) if m.len() >= DEVIMP_MAX_BYTES => {
+                w.file = None;
+                w.cur_name = None;
+                rotated = true;
+            }
+            Ok(_) => {}
+            Err(_) => w.file = None,
+        }
+    }
+    if w.file.is_none() {
+        let f = aff_open(w);
+        w.file = f;
+        if rotated {
+            diag_prune(w.cur_name.as_deref());
+        }
+    }
+    rotated
+}
+
+/// 写一个帧块（帧头 + payload 行，`block` 已含换行）到 aff_。
+/// `lines` 为块内行数（巡检计数用）。WRITER 临界区内只做文件 IO
+/// （锁序约定见 MAIN_WRITER 定义处）；写失败重开重试一次，仍失败丢块。
+fn aff_write_block(block: &str, lines: u64) {
+    if !diag_active() {
+        return;
+    }
+    let rotated = {
+        let mut w = AFF_WRITER.lock().unwrap_or_else(|p| p.into_inner());
+        if w.file.is_none() {
+            let f = aff_open(&mut w);
+            w.file = f;
+        }
+        let write_ok = match w.file.as_mut() {
+            Some(f) => f.write_all(block.as_bytes()).is_ok(),
+            None => false,
+        };
+        if !write_ok {
+            // write_all 失败可能已落残块（不回滚）：弃用当前文件、换新时间戳
+            // 文件重写整块，绝不把残块与重试块写进同一文件（防 @S 计数定界错位）
+            w.file = None;
+            w.cur_name = None;
+            let f = aff_open(&mut w);
+            w.file = f;
+            if let Some(f) = w.file.as_mut() {
+                let _ = f.write_all(block.as_bytes());
+            }
+        }
+        w.since_check += lines;
+        if w.since_check >= DEVIMP_CHECK_EVERY {
+            w.since_check = 0;
+            aff_check(&mut w)
+        } else {
+            false
+        }
+    };
+    if rotated {
+        // 触顶即新增一个 128MB 级文件：顺手执行目录预算清理（logd/ 与
+        // devimp/ 各自独立计量，与 main_write_line 同口径）
+        enforce_dir_limits(&common::get_module_root());
+    }
+    // 记账（WRITER 锁外，锁序约定）：devimp/ 目录预算与 16MB 归档门限共用
+    note_write(&DEVIMP_BYTES_WRITTEN, "devimp/", block.len() as u64);
+}
+
+/// 帧字段净化：空白/控制字符（含换行）替换为 `_`，防字段值破坏单行帧
+/// 边界（comm 可能含空格；reason 为末字段且调用方传短 token，一并净化无损）。
+pub(crate) fn aff_token(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_whitespace() || c.is_control() {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect()
+}
+
+// [aff_api]
+/// `@A` 动作帧：线程/内核节点写入动作 + 结果（`result` 形如 `ok` 或 `e{errno}`）。
+/// act 枚举见 [`AFF_HEADER`]；pid/tid 节点级动作填 0，pkg/comm 无主体填 "-"。
+/// 关闭诊断（diag_active=false）时零分配直接返回。
+#[allow(clippy::too_many_arguments)]
+pub fn aff_action(
+    act: &str,
+    pid: i32,
+    tid: i32,
+    pkg: &str,
+    comm: &str,
+    dst: &str,
+    value: &str,
+    result: &str,
+    reason: &str,
+) {
+    if !diag_active() {
+        return;
+    }
+    let line = format!(
+        "@A ts={} act={} pid={pid} tid={tid} pkg={} comm={} dst={} value={} result={} reason={}\n",
+        filename_ts(),
+        aff_token(act),
+        aff_token(pkg),
+        aff_token(comm),
+        aff_token(dst),
+        aff_token(value),
+        aff_token(result),
+        aff_token(reason),
+    );
+    aff_write_block(&line, 1);
+}
+
+/// `@S` 每秒快照帧：帧头计数由 `rows` 实际行反推（首字符 `p`/`t` 分别计入
+/// ntop/nfg，帧头与行数恒等）；rows 为调用方拼好的 p/t 行（不含换行）。
+pub fn aff_snapshot(rows: &[String]) {
+    if !diag_active() || rows.is_empty() {
+        return;
+    }
+    let mut ntop = 0u64;
+    let mut nfg = 0u64;
+    for r in rows {
+        match r.as_bytes().first() {
+            Some(b'p') => ntop += 1,
+            Some(b't') => nfg += 1,
+            _ => {}
+        }
+    }
+    let mut block = format!("@S ts={} ntop={ntop} nfg={nfg}\n", filename_ts());
+    for r in rows {
+        // 非 p/t 行（调用方错误）不写入：保持帧头计数与实际行数恒等
+        if !matches!(r.as_bytes().first(), Some(b'p') | Some(b't')) {
+            continue;
+        }
+        block.push_str(r);
+        block.push('\n');
+    }
+    aff_write_block(&block, ntop + nfg + 1);
 }
 
 // 启动归档：logs/ → logd/<ts>.tar、devimp/ → logd/devimp_<ts>.tar（一次性子线程
@@ -1714,7 +1940,10 @@ fn pack_staging_dirs(root: &Path, logd: &Path, dirs: Vec<PathBuf>) {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| STAGING_PREFIX.to_string());
-        let stem = stem.strip_prefix(STAGING_PREFIX).unwrap_or(&stem).to_string();
+        let stem = stem
+            .strip_prefix(STAGING_PREFIX)
+            .unwrap_or(&stem)
+            .to_string();
         let tar_path = unique_path(logd, &stem, "tar");
         pack_or_keep(root, &dir, &tar_path);
     }
@@ -1798,7 +2027,10 @@ pub fn archive_on_startup(root: &Path) -> (Option<String>, Option<String>) {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| STAGING_PREFIX.to_string());
-        let stem = stem.strip_prefix(STAGING_PREFIX).unwrap_or(&stem).to_string();
+        let stem = stem
+            .strip_prefix(STAGING_PREFIX)
+            .unwrap_or(&stem)
+            .to_string();
         format!("{stem}.tar")
     }
     let logs_tar = logs_tmp.as_deref().map(tar_name_of);
@@ -1850,10 +2082,27 @@ fn enforce_dir_limits(root: &Path) {
     );
 }
 
+/// 两个诊断写入器的当前活跃文件名（两把 WRITER 锁顺序短取、不嵌套——锁序约定；
+/// 仅在未持任何写入器锁的上下文调用）
+fn active_diag_names() -> Vec<String> {
+    let mut out = Vec::with_capacity(2);
+    if let Ok(w) = MAIN_WRITER.lock() {
+        if let Some(n) = &w.cur_name {
+            out.push(n.clone());
+        }
+    }
+    if let Ok(w) = AFF_WRITER.lock() {
+        if let Some(n) = &w.cur_name {
+            out.push(n.clone());
+        }
+    }
+    out
+}
+
 /// 单目录预算清理：`dir` 总大小超过 `max` 时按 mtime 从最旧文件逐个删除，
-/// 直到低于 `target`。**最新的一个文件永不删除**——单个文件本身超过 target
-/// 时（如一次归档 >96MB），删完其余文件后仍会留下它，避免目录被清空
-/// （清理目标不可达时以「至少留一份」为准）。
+/// 直到低于 `target`。**活跃文件与最新的一个文件永不删除**——单个文件本身
+/// 超过 target 时（如一次归档 >96MB），删完其余文件后仍会留下它，避免目录
+/// 被清空（清理目标不可达时以「至少留活跃+一份」为准）。
 fn enforce_dir_limit(dir: &Path, max: u64, target: u64) {
     let mut paths: Vec<PathBuf> = Vec::new();
     if collect_files(dir, &mut paths).is_err() {
@@ -1874,7 +2123,15 @@ fn enforce_dir_limit(dir: &Path, max: u64, target: u64) {
         return;
     }
     files.sort();
-    files.pop(); // 保留最新一份
+    // 保留两个写入器的活跃文件（main_/aff_ 并存后另一活跃文件未必是最新——
+    // 它正在被写，删掉会让后续写入落进孤儿 inode 直到巡检自愈，期间丢数据）
+    let active = active_diag_names();
+    files.retain(|(_, _, p)| {
+        p.file_name()
+            .and_then(|n| n.to_str())
+            .map_or(true, |n| !active.iter().any(|a| a == n))
+    });
+    files.pop(); // 再保留最新一份
     for (_, len, path) in &files {
         if total < target {
             break;

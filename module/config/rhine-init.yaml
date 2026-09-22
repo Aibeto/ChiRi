@@ -8,9 +8,8 @@
 #   fas_enabled: true|false        改写生效 meta.yaml 的 fas_enabled，WebUI 开关同步变化
 #   scenemode_enabled: true|false  改写生效 meta.yaml 的 scenemode_enabled
 #   special_tuned: true|false      运行时开关，false 时所有场景特调判定失效
-#   thread_bind: true|false        改写生效 meta.yaml 的 thread_bind，false = 关闭线程
-#                                  功能：CPU 亲和/绑核与 core_ctl 核心在线接管全部交还
-#                                  系统（所有绑定分配改成全核心），WebUI 开关同步变化
+#   thread_bind: true|false        **实验室 frozen 专用**（用户侧开关已移除）：false =
+#                                  交还线程亲和/绑核与 core_ctl（所有绑定分配改成全核心）
 #
 # 新增模式在这里追加条目即可（key 就是写进 rhine.chr 的模式名），但 WebUI 的模式列表
 # 与文案是硬编码的（webui/src/data/lab.ts、webui/src/i18n/locales/*.ts），要一起改。

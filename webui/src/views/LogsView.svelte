@@ -187,7 +187,7 @@
 
     {#if app.devimpFiles.length > 0}
       <!-- 副标题已按需求注释（2026-09-17）：desc={t('config.devRecord.hint')} -->
-      <Panel title="devimp/">
+      <Panel title={t('logs.devimp')}>
         <ul class="files files--scroll u-list-reset u-scroll">
           {#each app.devimpFiles as file (file)}
             <li class="files__item u-mono">{file}</li>

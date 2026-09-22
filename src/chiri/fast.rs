@@ -183,7 +183,7 @@ impl FastLock {
                     "fast-init",
                     &fluent_args!(
                         "pid" => pid.to_string(),
-                        "max_khz" => (target / 1000).to_string()
+                        "khz" => (target / 1000).to_string()
                     )
                 )
             );
@@ -236,7 +236,7 @@ impl FastLock {
                     "fast-rewrite",
                     &fluent_args!(
                         "pid" => p.policy_id.to_string(),
-                        "max_khz" => (p.target / 1000).to_string()
+                        "khz" => (p.target / 1000).to_string()
                     )
                 )
             );

@@ -10,7 +10,11 @@ fas_rules:
   fps_gears: [30.0, 60.0, 120.0]
   fps_margin: 3.0
   per_app_profiles:
+    # 国服与国际版共用同一套帧率档（玩家实际在国服，2026-09-22 补）
     com.levelinfinite.sgameGlobal:
+      target_fps: [60, 120]
+      fps_margin: 3.0
+    com.tencent.tmgp.sgame:
       target_fps: [60, 120]
       fps_margin: 3.0
   # 接管/切回后的起始性能 0.50（默认 0.45）：MOBA 进入对局节奏快，略抬高

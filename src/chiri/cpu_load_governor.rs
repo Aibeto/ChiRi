@@ -294,7 +294,7 @@ struct CoreGroupWorker {
     /// 压制豁免档（f32 bit pattern，0..1）：current_perf >= 该值时不钳制，
     /// 保证任何温度下持续高负载都能到达硬件最高频
     thermal_free_above: Arc<AtomicU32>,
-    /// 上次决策摘要（devimp tick 行用，on_load_update 填写）
+    /// 上次决策摘要（main_ tick 行用，on_load_update 填写）
     dev_decision: &'static str,
     dev_over: u32,
     dev_under: u32,
@@ -347,7 +347,7 @@ impl CoreGroupWorker {
     }
 
     /// 决策入口：每次 SystemLoadUpdate 触发，只计算目标性能比，不写 sysfs。
-    /// 同时记录 devimp tick 行所需摘要（over/under 计数、目标性能、决策标签）。
+    /// 同时记录 main_ tick 行所需摘要（over/under 计数、目标性能、决策标签）。
     /// 决策标签四种：up / down_wait / down / hold。hold 表示降频落点与当前频点
     /// 相同（ceiling/floor 钳制稳态），不计 debounce、不写频。
     fn on_load_update(&mut self, core_utils: &[f32]) {
@@ -355,7 +355,7 @@ impl CoreGroupWorker {
         self.dev_raw_util = raw_util;
         self.dev_prev_perf = self.cluster.current_perf;
 
-        // devimp：组内超升频阈值 / 低于降频阈值的核心数（0.0 核不计入 over）
+        // main_ tick 行：组内超升频阈值 / 低于降频阈值的核心数（0.0 核不计入 over）
         let mut over = 0u32;
         let mut under = 0u32;
         for &cpu in &self.cluster.affected_cpus {
@@ -375,7 +375,7 @@ impl CoreGroupWorker {
         // 抖动负载下 max_util 每 tick 大幅摆动（8550 QQ 实测 0.3~0.7 间跳），
         // target_perf 跟着翻摆 → 决策方向反复翻转、scaling_max_freq 高频改写。
         // 2026-09-22 日志回放：α=0.5 反转降约五成、写频降约三成（α=0.35 更强但
-        // 上限均值抬升更多）。max_util 列（devimp）刻意写平滑前原始值，离线回放
+        // 上限均值抬升更多）。max_util 列（main_）刻意写平滑前原始值，离线回放
         // 可自行试验系数，不受二次平滑污染。
         let smoothed = if self.cfg.util_smoothing >= 0.999 || self.cluster.ema_util < 0.0 {
             raw_util
@@ -439,7 +439,7 @@ impl CoreGroupWorker {
             // 先算降频落点：与当前频点相同（ceiling/floor 钳制稳态，如 reduce
             // little ceiling 0.60 卡住时 util=1.00、tgt 略低于 current 但落点同一档
             // OPP）则写频无效果——不计数、不写频，decision 标 hold。此前该稳态
-            // 每 tick 标 down 且 deb_down 无限增长，devimp 出现「满载却 decision=down」
+            // 每 tick 标 down 且 deb_down 无限增长，main_ 日志出现「满载却 decision=down」
             // 的矛盾记录。真实降频路径（落点不同）行为不变；flush 每 tick 仍会
             // 重写 ceiling 防篡改，稳态跳过决策写频无副作用。
             let target_freq = self.cluster.find_nearest_freq(target_perf);
@@ -492,8 +492,8 @@ impl CoreGroupWorker {
         let target_freq = self.cluster.find_nearest_freq(self.cluster.current_perf);
         self.cluster.write_freq(target_freq);
 
-        // devimp tick 行：仅决策 tick（core_utils 非空）且开发记录开启时写
-        if !core_utils.is_empty() && crate::logger::devimp_active() {
+        // main_ tick 行：仅决策 tick（core_utils 非空）且开发记录开启时写
+        if !core_utils.is_empty() && crate::logger::diag_active() {
             let ranges = &self.core_ranges;
             let name = if self
                 .cluster
@@ -512,7 +512,7 @@ impl CoreGroupWorker {
             } else {
                 "little"
             };
-            crate::logger::devimp_tick(
+            crate::logger::main_tick(
                 name,
                 &format!("{:.2}", self.dev_raw_util),
                 self.dev_over,

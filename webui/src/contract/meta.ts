@@ -19,6 +19,8 @@ export const META_FIELDS = [
   'language',
   'loglevel',
   'dev_record',
+  /** aff @S 快照 top-N 进程数（手改字段，daemon 侧 usize）：刻意不进 WRITABLE_FIELDS */
+  'devimp_top_n',
   'fas_enabled',
   'scenemode_enabled',
   'thread_bind',
@@ -45,7 +47,6 @@ export const WRITABLE_FIELDS = [
   'dev_record',
   'fas_enabled',
   'scenemode_enabled',
-  'thread_bind',
   'powerbase_enabled',
   'power_avg',
   'notify',
@@ -196,6 +197,17 @@ export function validateMeta(values: Record<string, unknown>): string[] {
   ) {
     problems.push('power_max_w 必须是数字')
   }
+  // devimp_top_n 是手改字段（daemon 侧 usize）：非整数/负数判非法；
+  // 用 isSafeInteger 而非 isInteger——超过 2^53 的"整数"（如 1e21）会让 daemon 侧
+  // serde 解析 usize 失败、整个 meta.yaml 判非法被内嵌默认整体重置
+  if (
+    'devimp_top_n' in values &&
+    (typeof values.devimp_top_n !== 'number' ||
+      !Number.isSafeInteger(values.devimp_top_n) ||
+      values.devimp_top_n < 0)
+  ) {
+    problems.push('devimp_top_n 必须是整数')
+  }
   for (const f of ['unit_divisor', 'voltage_divisor', 'current_divisor'] as const) {
     if (f in values && (typeof values[f] !== 'number' || !Number.isFinite(values[f]))) {
       problems.push(`${f} 必须是数字`)
@@ -232,7 +244,6 @@ export function validateFieldValue(
     case 'dev_record':
     case 'fas_enabled':
     case 'scenemode_enabled':
-    case 'thread_bind':
     case 'powerbase_enabled':
     case 'power_avg':
     case 'notify':

@@ -478,7 +478,7 @@ class AppStore {
       // 被实验室接管的开关若还留着草稿，保存出去也会被守护进程按定义写回去——
       // 直接清掉，别让「待提交」标记在配置页骗人
       for (const field of this.labTakeover) delete this.draft[field as WritableField]
-      // 实验室会改写 meta.yaml 的 fas/scenemode/thread_bind 开关，配置页那份快照已过期
+      // 实验室会改写 meta.yaml 的 fas/scenemode 开关，配置页那份快照已过期
       await this.refreshCommon()
       if (settleMs > 0) {
         // 等守护进程把 off 收敛完（清标记 → 还原 meta → 写回未启用）：固定等一次不够，

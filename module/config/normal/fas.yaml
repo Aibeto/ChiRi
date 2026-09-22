@@ -9,3 +9,11 @@ fas:
   apps:
     com.hypergryph.endfield: endfield
     com.levelinfinite.sgameGlobal: sgame
+    # 王者荣耀**国服**（2026-09-22 8475 实测：国服玩家实际玩的是 tmgp.sgame，
+    # 白名单此前只有国际版 sgameGlobal → 国服一直在 default 裸跑 4.65W）
+    com.tencent.tmgp.sgame: sgame
+    # 2026-09-22 8475 实测新增：两款游戏此前在 default 模式裸跑（prime 顶格
+    # 0.61-0.67 util、迁移 1.2-2.1 万/s、4.13/3.09W），按 sgame 模板接入 FAS。
+    # 首刷后看 devimp fps 列是否贴合 target 档（玩家若开 90 帧需调 target_fps）。
+    com.tencent.tmgp.speedmobile: speedmobile
+    com.tencent.lolm: lolm

@@ -10,8 +10,8 @@ dev_record: false
 # 功能总开关（缺省 true，热重载即时生效）：
 #   fas_enabled: FAS 帧感知调度总闸（关闭后运行中实例立即注销，模式判定不再产生 fas）
 #   scenemode_enabled: 息屏场景模式总闸（关闭后息屏不进入 scenemode，运行中立即退出恢复 doze）
-#   thread_bind: 线程摆放总闸（关闭后 CPU 亲和/绑核与 core_ctl 核心在线接管全部交还系统，
-#                所有绑定分配改成全核心）
+#   thread_bind: 线程摆放总闸（**实验室 frozen 专用**，用户开关已移除、勿手改；false =
+#                交还线程亲和/绑核与 core_ctl，所有绑定分配改成全核心）
 fas_enabled: true
 scenemode_enabled: true
 thread_bind: true

@@ -77,7 +77,8 @@ fn main() -> Result<()> {
     // 必须先于日志归档执行：否则第二个实例会把首个实例的 logs/ 整体归档改名。
     // 背景：service.sh/action.sh/WebUI 的看门狗清理依赖 pidfile，logs/watchdog.pid
     // 丢失时旧看门狗无法被终止，killall 后 3s 把 daemon 再拉起，与新实例并行——
-    // devimp_<pkg>_<毫秒时间戳>.log 按进程各自命名，同包名内容写进两份不同文件，
+    // main_<pkg>_<MMDD-HHmmss>.log 按进程各自命名（秒级时间戳，同秒重开补 -N 去重），
+    // 同包名内容写进两份不同文件，
     // status/daemon 日志同理。flock 在进程层兜底一切 shell 侧竞态：
     // 拿锁失败即退出（看门狗 3s 后重试，旧实例退出后即可接管），全程至多一个实例。
     // 锁文件放模块根而非 logs/（logs/ 每次启动被整体归档，不可作为锁锚点）。
@@ -101,15 +102,17 @@ fn main() -> Result<()> {
 
     let log_dir = root.join("logs");
     // 启动归档：把上一轮整个 logs/ 与 devimp/ 分别重命名为临时目录并交单个
-    // 子线程异步打包为 logd/ziped_<ts>.zip 与 logd/devimp_<ts>.zip（watchdog.pid
-    // 复制回新建的 logs/ 供 stopScheduler 定位看门狗）；打包完成后执行
+    // 子线程异步打包为 logd/<ts>.tar 与 logd/devimp_<ts>.tar（tar 无压缩；
+    // watchdog.pid 复制回新建的 logs/ 供 stopScheduler 定位看门狗）；打包完成后执行
     // logd/ 与 devimp/ 各自独立的预算清理（各自 >128MB 时删本目录最旧文件到 <96MB）。
-    // 本进程日志全部写入新建的 logs/、devimp/，互不干扰。
+    // 本进程日志全部写入新建的 logs/、devimp/，互不干扰；devimp/ 为双诊断文件——
+    // main_<pkg>_<MMDD-HHmmss>.log（主诊断，tick/snap/event）+ aff_<MMDD-HHmmss>.log
+    // （线程流，@A 动作帧 + @S 每秒快照帧），归档时一并进 devimp_<ts>.tar。
     // 必须在 create_dir_all(log_dir)/logger::init 之前执行，保证新旧文件分离。
     let (archived_zip, archived_devimp) = logger::archive_on_startup(&root);
     std::fs::create_dir_all(&log_dir)?;
     // devimp 目录已随归档新建；此处仅做容量清理兜底（归档失败时旧文件仍在）
-    logger::devimp_prepare();
+    logger::diag_prepare();
 
     // [soc_check]
     // 2. 判断是否启用 Chiri 专用调度器（检测到列表中的特定处理器时启用）

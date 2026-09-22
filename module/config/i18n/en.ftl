@@ -6,8 +6,6 @@ scheduler-module-start-failed = Failed to start scheduler module: { $error }
 monitor-module-crashed = Monitor module crashed: { $error }
 monitor-module-started = Monitor module started.
 monitor-starting = Starting chiri-monitor module...
-monitor-initial-config-failed = [Main] Failed to read initial config: { $error }.
-    Using default.
 monitor-screen-watcher-failed = [Main] Screen state watcher thread crashed: { $error }
 monitor-config-watcher-failed = [Main] Config watcher thread crashed: { $error }
 monitor-fps-crashed = [Main] FPS Monitor crashed: { $error }
@@ -18,6 +16,7 @@ monitor-rlimit-memlock-failed = [Main] Failed to raise RLIMIT_MEMLOCK. eBPF maps
 main-chdir = [Main] Changed working directory to: { $dir }
 main-module-root = [Main] Module root: { $path }
 main-config-loaded = [Main] Config loaded: { $path } (loglevel={ $loglevel }, language={ $language })
+main-module-version = [Main] Module version: { $name } { $version } (versionCode { $code }) | SoC { $soc } | kernel { $kernel }
 main-chiri-scheduler-selected = [Main] Specific SoC detected, enabling Chiri scheduler
 main-no-chiri-scheduler = [Main] SoC not in Chiri support list, CPU is not taken over (monitor/WebUI/logging only)
 main-special-tuned-exported = [Main] exported { $count } internal special-tuned whitelist entries to special_tuned.yaml
@@ -37,7 +36,6 @@ monitor-thread-start-app-detect = [Main] Starting app detection loop...
 app-detect-config-watch = [AppDetect] Started watching config file: { $path }
 app-detect-change-detected = [AppDetect] Change detected, debouncing (100ms)...
 app-detect-reloading = [AppDetect] Debounce finished. Reloading config...
-app-detect-load-failed = [AppDetect] Failed: { $error }. Using default.
 app-detect-reload-success = [AppDetect] Config reloaded successfully.
 app-detect-loop-started = [AppDetect] App detection loop started (3000ms poll).
 app-detect-screen-changed = [AppDetect] Screen state changed: { $old } -> { $new }
@@ -87,12 +85,7 @@ cpu-monitor-tick-log = [CPU Monitor] cores=[{ $cores }] fg_pid={ $pid } fg_max_u
 cpu-monitor-channel-closed = [CPU Monitor] Channel closed, exiting loop.
 fps-monitor-init = [FPS Monitor] Initializing eBPF FPS monitor...
 fps-monitor-attached = [FPS Monitor] Attached uprobe to PID: { $pid }
-fps-monitor-attach-failed = [FPS Monitor] Failed to attach any Uprobe symbols!
 fps-monitor-attach-failed-initial = [FPS Monitor] Initial attach failed: { $error }
-fps-monitor-init-no-pid = [FPS Monitor] No foreground PID yet, waiting...
-fps-monitor-pid-filter-updated = [FPS Monitor] Target PID updated: { $old } -> { $new }
-fps-monitor-pid-switching = [FPS Monitor] Switching target PID: { $pid }
-fps-monitor-pid-switched = [FPS Monitor] Switched to target PID: { $pid }
 fps-monitor-pid-switch-failed = [FPS Monitor] PID switch failed: { $error }
 fps-monitor-started = [FPS Monitor] eBPF FPS monitor started (per-PID uprobe mode)
 fps-monitor-passive = [FPS Monitor] FAS not active, probe standing by (no uprobe attached, zero overhead)
@@ -105,7 +98,6 @@ fps-monitor-frames-dropped = [FPS Monitor] event channel congested, { $count } f
 # --- Scheduler ---
 scheduler-ipc-started = [Scheduler] IPC Channel listener started.
 scheduler-mode-change-request = [Scheduler] Mode change request: { $old } -> { $new } (Pkg: { $pkg }, Temp: { $temp })
-scheduler-apply-failed = [Scheduler] Failed to apply settings: { $error }
 scheduler-channel-closed = [Scheduler] Channel closed! Thread exiting.
 scheduler-ipc-panic = [Scheduler] IPC thread panicked, releasing CPU control.
 scheduler-ipc-restart = [Scheduler] Cleaned up and restarting scheduler loop (attempt { $count }).
@@ -140,7 +132,6 @@ down-heartbeat = [Down] Halt still in effect ({ $mins } min): scheduling stays r
 config-reloading = [Config] Config file change detected, reloading...
 config-reloaded-success = [Config] Config reloaded successfully.
 config-reload-fail = [Config] Config reload failed: { $error }
-config-special-load-failed = [Config] Failed to read special-tuned config: { $path } ({ $error }) — special tuning unavailable, whitelisted apps fall back to CLG
 config-special-parse-failed = [Config] Failed to parse special-tuned config: { $path } ({ $error }) — special tuning unavailable, whitelisted apps fall back to CLG
 config-special-merged = [Config] Merged special-tuned config: { $path }
 
@@ -165,7 +156,6 @@ battery-status-unknown = [Battery] Unrecognized status node value ({ $raw }); tr
 power-avg-skip = [PowerAVG] this sample was not counted ({ $reason }); PowerAVG.chr keeps its previous value. Sampling needs the battery discharging, and average mode also needs the screen on
 telemetry-raw-snapshot = [Telemetry] first-reading snapshot (for unit checking): private node raw voltage={ $v }, raw current={ $i }; divisors voltage/{ $vd }, current/{ $cd } -> V={ $v }/{ $vd }, A={ $i }/{ $cd }
 config-watch-error = [Config] Failed to watch config directory: { $error }
-config-apply-mode-failed = [Config] Failed to apply reloaded mode settings: { $error }
 config-apply-tweaks-failed = [Config] Failed to apply reloaded system tweaks: { $error }
 
 # --- SysFS (shared FastWriter) ---
@@ -238,7 +228,6 @@ fas-floor-rescue = [FAS] floor-rescue | stuck { $frames } frames at P={ $old }, 
 fas-tick-log = [FAS] { $target }fps avg:{ $avg } | { $ms }ms ema:{ $ema } | err:{ $err_ema }/{ $err_inst } | { $act } | P:{ $perf } fg_util:{ $util }{ $cd }{ $damp }{ $temp }{ $offset }
 fas-set-game = [FAS] set_game | pkg={ $pkg } | gears={ $gears } | target={ $target }fps
 fas-no-profile = [FAS] no per-app profile for '{ $pkg }', using global gears { $gears }
-fas-ignore-write = [FAS] P{ $pid } ignore_write = { $ignore }
 fas-pid-reloaded = [FAS] PID coefficients hot-reloaded: Kp={ $kp } Ki={ $ki } Kd={ $kd }
 fas-rules-reloaded = [FAS] rules hot-reloaded (margin={ $margin }, floor={ $floor }, ceil={ $ceil }, profiles={ $profiles })
 fas-policy-writer-invalid = [FAS] P{ $pid } policy writer invalid (max_valid: { $max_valid }, min_valid: { $min_valid }), skipping.
@@ -259,8 +248,6 @@ scheduler-fas-init-failed = [Scheduler] FAS instance init failed, falling back t
 scheduler-fas-cooldown = [Scheduler] FAS init failed, entering { $secs }s cooldown; CLG takes over during cooldown
 
 # --- Scheduler: Settings ---
-apply-settings-for-mode = Applying settings for mode: { $mode }
-settings-applied-success = Settings for mode '{ $mode }' applied successfully.
 apply-cpu-idle-governor-start = CPU idle governor settings applied.
 apply-io-settings-start = I/O settings applied.
 main-config-watch-thread-create = Main config watcher thread created.
@@ -268,8 +255,8 @@ main-config-watch-thread-create = Main config watcher thread created.
 # --- Fast Lock ---
 fast-activated = [Fast] activated, all cores locked to max frequency
 fast-deactivated = [Fast] deactivated, system frequencies restored
-fast-init = [Fast] policy { $pid } locked at { $max_khz } kHz
-fast-rewrite = [Fast] policy { $pid } rewrite { $max_khz } kHz
+fast-init = [Fast] policy { $pid } locked at { $khz } kHz (target)
+fast-rewrite = [Fast] policy { $pid } rewrite { $khz } kHz (target)
 fast-writer-invalid = [Fast] policy { $pid } writer invalid (max_valid: { $max_valid }, min_valid: { $min_valid }), skipping
 fast-restore = [Fast] policy { $pid } restore governor={ $governor } min={ $min } max={ $max }
 fast-watchdog-release = [Fast] load source timeout ({ $secs }s), releasing fast lock
@@ -297,14 +284,8 @@ rhine-watch-error = [Rhine] rhine.chr watch failed: { $error }
 # --- Affinity (CPU affinity & thread migration) ---
 affinity-boost-applied = [Affinity] boost layout applied: top-app/foreground → { $big }, background groups → { $little }
 affinity-normal-restore = [Affinity] normal affinity layout restored (background kept on little cores)
-affinity-pin-threads = [Affinity] foreground pid={ $pid } threads migrated: { $pinned }/{ $total }
-affinity-pin-failed = [Affinity] no migratable threads for foreground pid={ $pid } (process may have exited)
-affinity-threads-restored = [Affinity] restored full-core affinity for { $count } threads of pid={ $pid }
-affinity-pin-core = [Affinity] thread { $tid } pinned to core { $core } ({ $reason })
-affinity-blacklisted = [Affinity] blacklisted process skipped: pid={ $pid } { $name }
 affinity-promoted = [Affinity] background thread { $tid } promoted to big core (util { $util }%)
 affinity-demoted = [Affinity] background thread { $tid } demoted back to little group (util { $util }%)
-affinity-write-failed = [Affinity] cpuset write failed: { $path }
 affinity-uclamp-unavailable = [Affinity] top_app_uclamp_max_pct unavailable, auto-corrected (kernel { $version }, reason: { $reason }; uclamp requires kernel >= 5.3 with a writable node)
 affinity-released = [Affinity] takeover released, system affinity config restored
 
