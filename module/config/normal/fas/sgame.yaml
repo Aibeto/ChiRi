@@ -20,3 +20,6 @@ fas_rules:
   # 接管/切回后的起始性能 0.50（默认 0.45）：MOBA 进入对局节奏快，略抬高
   perf_init: 0.50
   core_temp_threshold: 45.0
+  # 接管期间调高全局迁移成本，退出按快照恢复
+  # TODO: 实机复核 400000（看同局迁移/s 与 fps p95/min，团战变差则回退）。
+  migration_cost_ns: 400000

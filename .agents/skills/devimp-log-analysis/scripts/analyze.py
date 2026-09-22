@@ -171,8 +171,13 @@ def main():
             continue
         tk = tick.get(k, {})
         def cc(cl):
-            return (f"{avg(tk.get(cl+'_cap', [])):5.1f}/{pct(tk.get(cl+'_cap', []), .95):5.1f} "
-                    f"u{avg(tk.get(cl+'_u', [])):.2f}")
+            caps, us = tk.get(cl + "_cap", []), tk.get(cl + "_u", [])
+            if not caps:
+                # FAS 段（以及任何无 tick 的段）没有决策数据：必须显示 '-'，
+                # 否则 0.0 会被误读成「上限被压到 0」
+                return "    -/    - u   -"
+            return (f"{avg(caps):5.1f}/{pct(caps, .95):5.1f} "
+                    f"u{avg(us):.2f}")
         print(f"{k[0]:9s} {k[1][:26]:26s} {len(d['P']):5d} {avg(d['P']):6.2f} {pct(d['P'], .5):5.2f} "
               f"{pct(d['P'], .95):6.2f} {avg(d['bt']):5.1f} {avg(d['ct']):5.1f} {avg(d['cap']):4.0f} "
               f"{avg(d['gpu']):5.1f} {avg(d['psi']):5.1f} {avg(d['mig']):6.0f} | {cc('little')} "

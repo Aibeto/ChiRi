@@ -47,14 +47,21 @@ tuned_profiles:
     headroom: 0.95
     perf_floor: 0.0
     perf_ceil: 1.0
-    hysteresis: 0.04
-    down_hold_ms: 100
+    # 死区 = hw_max × hysteresis，须 ≥ 频表相邻档步长，否则上限会在相邻两档间往复；
+    # down_hold_ms 是降档保持时间。
+    # TODO: 实机复核 0.06 / 150（看 big 改频次数与 P_avg，fps 无损才保留）。
+    hysteresis: 0.06
+    down_hold_ms: 150
     util_smoothing: 0.25
     boost_affinity: false
     per_cluster:
       little:
         headroom: 0.90
         perf_ceil: 0.65
+      # big 组天花板 0.85（≈2383 MHz）
+      # TODO: 实机复核（弹幕/滚动掉帧则回退）。
+      big:
+        perf_ceil: 0.85
       prime:
         headroom: 0.80
         perf_ceil: 0.50

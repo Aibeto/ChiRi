@@ -219,6 +219,11 @@ pub struct FasRulesConfig {
     #[serde(default = "d_temp_perf")]
     pub core_temp_throttle_perf: f32,
 
+    /// 接管期间写入 `/proc/sys/kernel/sched_migration_cost_ns`（None = 不动），
+    /// 退出按快照恢复
+    #[serde(default)]
+    pub migration_cost_ns: Option<u64>,
+
     /// CPU 负载辅助：前台线程利用率封顶的除数 (越小越激进)
     #[serde(default = "d_util_cap_divisor")]
     pub util_cap_divisor: f32,
@@ -518,6 +523,7 @@ impl Default for FasRulesConfig {
             per_app_margins: HashMap::new(),
             core_temp_threshold: d_temp_thresh(),
             core_temp_throttle_perf: d_temp_perf(),
+            migration_cost_ns: None,
             util_cap_divisor: d_util_cap_divisor(),
         }
     }

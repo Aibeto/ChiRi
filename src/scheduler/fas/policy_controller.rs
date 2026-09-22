@@ -9,6 +9,9 @@ use std::time::{Duration, Instant};
 use crate::fluent_args;
 use crate::i18n::t_with_args;
 
+/// 频率校验的最小等待：内核调频异步，过早读 scaling_cur_freq 得到的是旧档
+const VERIFY_SETTLE: Duration = Duration::from_millis(200);
+
 // [struct]
 // 单 policy 频率控制器状态
 pub struct PolicyController {
@@ -25,6 +28,8 @@ pub struct PolicyController {
 
     verify_freq: Option<u32>,
     verify_timer: Instant,
+    /// 目标值最后一次变化的时刻，用于等待目标稳定后再校验；None = 尚未写过
+    verify_at: Option<Instant>,
     /// 写频后校验间隔（来自 FasRulesConfig::verify_freq_interval_secs）
     verify_interval: Duration,
 
@@ -70,6 +75,7 @@ impl PolicyController {
             freq_max,
             verify_freq: None,
             verify_timer: Instant::now(),
+            verify_at: None,
             verify_interval: Duration::from_secs(verify_interval_secs.max(1) as u64),
             ignore_write: false,
             orig_governor,
@@ -105,6 +111,10 @@ impl PolicyController {
         if self.ignore_write {
             return;
         }
+        // 校验上一次写入，必须在本次写入之前：内核调频异步，写完立刻读 scaling_cur_freq
+        // 拿到的是旧档，会被判成「被压制」而触发无效重写。校验还要求目标已稳定
+        // ≥ VERIFY_SETTLE，频繁改频期间跳过。
+        self.verify_prev_freq();
         if target_freq >= self.current_freq {
             self.max_writer.write_value_force(target_freq);
             self.min_writer.write_value_force(target_freq);
@@ -112,53 +122,58 @@ impl PolicyController {
             self.min_writer.write_value_force(target_freq);
             self.max_writer.write_value_force(target_freq);
         }
+        let changed = target_freq != self.current_freq;
         self.current_freq = target_freq;
         self.freq_hold_frames = 2;
-        self.do_verify_freq(target_freq);
+        self.verify_freq = Some(target_freq);
+        // 只在目标变化时重启稳定计时
+        if changed || self.verify_at.is_none() {
+            self.verify_at = Some(Instant::now());
+        }
     }
 
-    fn do_verify_freq(&mut self, write_freq: u32) {
-        // 校验间隔来自 verify_freq_interval_secs（默认 1s）：verify 只在
-        // 写频事件后触发一次读数（非周期轮询），调小无长期开销，能更快
-        // 发现内核频率覆写
-        if self.verify_timer.elapsed() >= self.verify_interval {
-            self.verify_timer = Instant::now();
-            if let Some(expected) = self.verify_freq {
-                if let Some(actual) = self.read_current_freq() {
-                    // 只校验下沿：min=max 锁频下 cur_freq 高于目标值属于
-                    // hw 量化/迁移中的瞬态（MTK 频表步进可达 +18%），性能
-                    // 无损，且实测反复「紧急重写」从未修正过该读数——重写
-                    // 只造成 write/umount 抖动。低于目标值才是锁频未生效
-                    // （thermal cap / QoS 覆写），需要重写夺回
-                    let min_ok = self
-                        .available_freqs
-                        .iter()
-                        .take_while(|&&f| f <= expected)
-                        .last()
-                        .copied()
-                        .unwrap_or(expected);
-                    if actual < min_ok {
-                        warn!(
-                            "{}",
-                            t_with_args(
-                                "fas-freq-mismatch",
-                                &fluent_args!(
-                                    "pid" => self.policy_id.to_string(),
-                                    "min" => min_ok.to_string(),
-                                    "max" => expected.to_string(),
-                                    "actual" => actual.to_string()
-                                )
-                            )
-                        );
-                        self.max_writer.re_unmount();
-                        self.min_writer.re_unmount();
-                        self.max_writer.write_value_force(write_freq);
-                        self.min_writer.write_value_force(write_freq);
-                    }
-                }
-            }
+    // TODO: 实机复核校验延后后 fas-freq-mismatch 是否消失（旧实现约 55 次/11min）；
+    // 若仍复现，说明确有外部压制（thermal / QoS 覆写），保留重写逻辑。
+    /// 校验上一次写入的目标频率（由 apply 入口调用；要求目标已稳定 ≥ [`VERIFY_SETTLE`]，
+    /// 且距上次校验 ≥ verify_freq_interval_secs，默认 1s）。
+    /// 只校验下沿：高于目标属瞬态，性能无损；低于目标才是锁频未生效
+    /// （thermal / QoS 覆写），需要重写夺回。
+    fn verify_prev_freq(&mut self) {
+        let (Some(expected), Some(at)) = (self.verify_freq, self.verify_at) else {
+            return;
+        };
+        if at.elapsed() < VERIFY_SETTLE || self.verify_timer.elapsed() < self.verify_interval {
+            return;
         }
-        self.verify_freq = Some(write_freq);
+        self.verify_timer = Instant::now();
+        let Some(actual) = self.read_current_freq() else {
+            return;
+        };
+        let min_ok = self
+            .available_freqs
+            .iter()
+            .take_while(|&&f| f <= expected)
+            .last()
+            .copied()
+            .unwrap_or(expected);
+        if actual < min_ok {
+            warn!(
+                "{}",
+                t_with_args(
+                    "fas-freq-mismatch",
+                    &fluent_args!(
+                        "pid" => self.policy_id.to_string(),
+                        "min" => min_ok.to_string(),
+                        "max" => expected.to_string(),
+                        "actual" => actual.to_string()
+                    )
+                )
+            );
+            self.max_writer.re_unmount();
+            self.min_writer.re_unmount();
+            self.max_writer.write_value_force(expected);
+            self.min_writer.write_value_force(expected);
+        }
     }
 
     fn read_current_freq(&self) -> Option<u32> {
@@ -187,6 +202,7 @@ impl PolicyController {
         self.min_writer.write_value_force(min_f);
         self.current_freq = max_f;
         self.verify_freq = None;
+        self.verify_at = None;
         // 恢复接管前的 governor：load_policies 期间写入的 performance
         // 只对 FAS 锁频模式有意义，泄漏到 CLG/akmode/系统调频会让功耗
         // 停留在「性能拉满」档（用户实测 FAS 用后功耗不降的直接原因）

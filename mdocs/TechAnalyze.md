@@ -552,9 +552,11 @@ util 数组按**真实 CPU ID 索引**，长度是 `max_cpu_id + 1`。这样 CLG
 
 检测源有三类：
 
-- `Backlight`：`/sys/class/backlight`，读 `bl_power` 或 `actual_brightness`
-- `Leds`：`/sys/class/leds/*backlight*`，看 `brightness > 0`
-- `FbBlank`：`/sys/class/graphics/fb0/blank == 0`
+- `Backlight`：`/sys/class/backlight`，读 `bl_power`（不可信时退 `actual_brightness`，再退 `brightness`）
+- `Leds`：`/sys/class/leds` 下的面板背光节点（`*backlight*`/`lcd*`/`panel*`/`wled*`/`disp*`），看 `brightness > 0`
+- `FbBlank`：`/sys/class/graphics/fb*/blank == 0`
+- `LcdPower`：`/sys/class/lcd/*/lcd_power == 0`（LCD class，三星 Exynos 等机型）
+- `DrmEnabled`：`/sys/class/drm` 内屏 connector 的 `enabled` == "enabled"（无该节点退 `dpms`）
 
 **息屏仲裁**用的是投票制。亮转息时所有有效节点投票，需要 2 票（`OFF_QUORUM = 2`）才确认。只有一个有效节点时按一票算。所有节点都读不到时，fail-safe 选择「恒亮屏」——宁可多耗电，也不要错误地进入省电模式。
 

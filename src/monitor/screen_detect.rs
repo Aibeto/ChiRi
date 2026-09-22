@@ -71,10 +71,7 @@ fn update_state_if_changed(state_arc: &Arc<Mutex<bool>>, new_state: bool, source
                 // 一个有效读数都没有：保持亮屏。反复读失败由 verify 的计数退役该节点
                 debug!(
                     "{}",
-                    t_with_args(
-                        "screen-off-unconfirmed",
-                        &fluent_args!("source" => source)
-                    )
+                    t_with_args("screen-off-unconfirmed", &fluent_args!("source" => source))
                 );
             }
             return false;
@@ -122,17 +119,27 @@ fn update_state_if_changed(state_arc: &Arc<Mutex<bool>>, new_state: bool, source
 
 // [source]
 /// 屏幕状态检测源类别：不同机型暴露的屏幕状态节点不同（QCOM/通用内核走
-/// backlight class；MTK 等仅以 leds class 暴露背光；老内核可读 fbdev blank），
-/// 按可靠性优先级依次探测，找到第一个可用源即锁定缓存。
+/// backlight class；MTK 等仅以 leds class 暴露背光；老内核可读 fbdev blank；
+/// 三星/海思部分机型只有 LCD class 的 lcd_power），按可靠性优先级依次探测，
+/// 找到第一个可用源即锁定缓存。
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ScreenSourceKind {
-    /// backlight class（/sys/class/backlight）：bl_power/actual_brightness 三分支判定
+    /// backlight class（/sys/class/backlight）：bl_power/actual_brightness/brightness 判定
     Backlight,
     /// leds class（/sys/class/leds/*backlight*，如 MTK lcd-backlight）：
     /// Android 息屏时背光亮度写 0，brightness > 0 即面板在发光
     Leds,
-    /// fbdev blank（/sys/class/graphics/fb0/blank）：0 = unblank（亮），非 0 = 灭
+    /// fbdev blank（/sys/class/graphics/fb*/blank）：0 = unblank（亮），非 0 = 灭
     FbBlank,
+    /// LCD class（/sys/class/lcd/*/lcd_power，三星 Exynos `panel/lcd_power` 等）：
+    /// 同 FB_BLANK 口径，0 = UNBLANK（亮）、4 = POWERDOWN（灭）
+    LcdPower,
+    /// DRM connector（/sys/class/drm/*DSI*/*eDP* 等内屏）：`enabled` 字符串节点，
+    /// "enabled" = 亮、"disabled" = 灭（内核 DPMS 口径）；外接 HDMI/DP 不计
+    DrmEnabled,
+    /// DRM connector 的 `dpms`（`enabled` 缺失时的兜底，老内核 DPMS 字符串节点）：
+    /// "On" = 亮，"Off"/"Standby"/"Suspend" = 灭
+    DrmDpms,
 }
 
 impl ScreenSourceKind {
@@ -141,8 +148,48 @@ impl ScreenSourceKind {
             ScreenSourceKind::Backlight => "backlight",
             ScreenSourceKind::Leds => "leds",
             ScreenSourceKind::FbBlank => "fb-blank",
+            ScreenSourceKind::LcdPower => "lcd-power",
+            ScreenSourceKind::DrmEnabled => "drm-enabled",
+            ScreenSourceKind::DrmDpms => "drm-dpms",
         }
     }
+}
+
+/// leds class 背光节点名关键字：厂商命名差异极大——MTK/海思 `lcd-backlight`、
+/// 高通 `panel-backlight`、Awinic `aw22xxx-backlight`、展锐 `sprd-backlight`、
+/// 部分机型 `wled-backlight`/`disp-backlight`，只认命中这些关键字的亮度节点。
+const BACKLIGHT_LED_KEYWORDS: [&str; 5] = ["backlight", "lcd", "panel", "wled", "disp"];
+
+/// 非面板 LED 关键字豁免：名字即便含上表关键字，命中这里也不是屏幕背光
+/// （键盘背光 keyboard-backlight、按键灯 button-backlight、充电/通知灯、
+/// 闪光灯 torch/flash、RGB 指示灯等）。这类灯随充电/通知亮灭，计进息屏
+/// 仲裁会持续投出亮屏票（后果：永远进不了息屏）。
+const NON_PANEL_LED_KEYWORDS: [&str; 14] = [
+    "keyboard",
+    "keypad",
+    "button",
+    "keys",
+    "charging",
+    "charge",
+    "battery",
+    "notification",
+    "notify",
+    "torch",
+    "flash",
+    "indicator",
+    "breath",
+    "rgb",
+];
+
+/// 判断 leds class 节点名是否屏幕背光：命中背光关键字且不是非面板 LED。
+/// 枚举与 uevent 两条路径共用（口径一致，避免 uevent 收到通知灯/按键灯事件
+/// 时按背光处理）。
+fn is_backlight_led_name(name: &str) -> bool {
+    let n = name.to_lowercase();
+    if !BACKLIGHT_LED_KEYWORDS.iter().any(|k| n.contains(k)) {
+        return false;
+    }
+    !NON_PANEL_LED_KEYWORDS.iter().any(|k| n.contains(k))
 }
 
 /// 主检测源缓存：`None` 表示尚未发现，每次校验重扫直到找到——
@@ -203,28 +250,38 @@ const VETO_EPISODE_MIN_GAP: Duration = Duration::from_secs(60);
 
 // [select]
 /// 按可靠性优先级枚举全部候选屏幕状态节点（有序）：
-/// 1. `/sys/class/backlight`（QCOM/通用内核）——具备状态节点（bl_power 或
-///    actual_brightness）的设备；
-/// 2. `/sys/class/leds` 下名字含 "backlight" 的节点（MTK 常见 lcd-backlight）——
+/// 1. `/sys/class/backlight`（QCOM/通用内核）——具备状态节点（bl_power、
+///    actual_brightness，或只有 brightness）的设备；
+/// 2. `/sys/class/leds` 下的背光节点（MTK 常见 lcd-backlight，另有
+///    panel-backlight / wled-backlight / aw22xxx-backlight / sprd-backlight 等）——
 ///    具备 brightness 节点；这是「/sys/class/backlight 不存在导致屏幕状态
-///    完全读不到」机型的主要修复路径；
-/// 3. `/sys/class/graphics/fb0/blank`（fbdev 旧接口兜底）。
+///    完全读不到」机型的主要修复路径（非面板 LED：键盘背光、按键灯、充电/通知灯、
+///    闪光灯、RGB 灯不计）；
+/// 3. `/sys/class/graphics/fb*/blank`（fbdev 旧接口兜底，fb0/fb1/… 全部计入）；
+/// 4. `/sys/class/lcd/*/lcd_power`（LCD class，三星 Exynos `panel/lcd_power`
+///    等机型唯一可用的屏幕状态节点，FB_BLANK 口径）；
+/// 5. `/sys/class/drm` 内屏 connector（名字含 dsi/edp/lvds）的 `enabled` 节点
+///    （内核 DPMS 状态，字符串型）——backlight/leds 全缺机型的又一兜底路径；
+///    同一 connector 若没有 `enabled` 则退 `dpms`（老内核）。
 fn enumerate_screen_nodes() -> Vec<(PathBuf, ScreenSourceKind)> {
     let mut nodes = Vec::new();
     if let Ok(entries) = fs::read_dir("/sys/class/backlight") {
         for entry in entries.flatten() {
             let dev = entry.path();
-            if dev.join("bl_power").exists() || dev.join("actual_brightness").exists() {
+            // brightness 兜底：部分驱动未实现 get_brightness（actual_brightness
+            // 读不到）、也无 bl_power，此时只能看驱动里存的亮度值
+            if dev.join("bl_power").exists()
+                || dev.join("actual_brightness").exists()
+                || dev.join("brightness").exists()
+            {
                 nodes.push((dev, ScreenSourceKind::Backlight));
             }
         }
     }
     if let Ok(entries) = fs::read_dir("/sys/class/leds") {
         for entry in entries.flatten() {
-            let name = entry.file_name();
-            // 只认背光类 leds（lcd-backlight/backlight/pwm-backlight 等），
-            // 跳过通知灯、按键灯、充电灯等无关节点
-            if !name.to_string_lossy().to_lowercase().contains("backlight") {
+            // 只认面板背光 leds，跳过通知灯/按键灯/键盘背光/充电灯/闪光灯
+            if !is_backlight_led_name(&entry.file_name().to_string_lossy()) {
                 continue;
             }
             let dev = entry.path();
@@ -233,9 +290,40 @@ fn enumerate_screen_nodes() -> Vec<(PathBuf, ScreenSourceKind)> {
             }
         }
     }
-    let fb0 = PathBuf::from("/sys/class/graphics/fb0");
-    if fb0.join("blank").exists() {
-        nodes.push((fb0, ScreenSourceKind::FbBlank));
+    if let Ok(entries) = fs::read_dir("/sys/class/graphics") {
+        for entry in entries.flatten() {
+            let dev = entry.path();
+            if dev.join("blank").exists() {
+                nodes.push((dev, ScreenSourceKind::FbBlank));
+            }
+        }
+    }
+    if let Ok(entries) = fs::read_dir("/sys/class/lcd") {
+        for entry in entries.flatten() {
+            let dev = entry.path();
+            // 内核 LCD class 属性为 lcd_power（FB_BLANK_*）；`power` 是运行时
+            // PM 目录（每个设备都有），故用 is_file 判定真正的属性文件
+            if dev.join("lcd_power").exists() || dev.join("power").is_file() {
+                nodes.push((dev, ScreenSourceKind::LcdPower));
+            }
+        }
+    }
+    if let Ok(entries) = fs::read_dir("/sys/class/drm") {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            // 只认内屏 connector（DSI/eDP/LVDS），跳过 HDMI/DP 外接显示——
+            // 外接屏亮灭与本机面板息屏无关，误计票会干扰息屏仲裁
+            let name = name.to_string_lossy().to_lowercase();
+            if !(name.contains("dsi") || name.contains("edp") || name.contains("lvds")) {
+                continue;
+            }
+            let dev = entry.path();
+            if dev.join("enabled").exists() {
+                nodes.push((dev, ScreenSourceKind::DrmEnabled));
+            } else if dev.join("dpms").exists() {
+                nodes.push((dev, ScreenSourceKind::DrmDpms));
+            }
+        }
     }
     nodes
 }
@@ -407,16 +495,10 @@ fn tally_screen_nodes() -> ScreenVotes {
                 }
             }
             Some(false) => votes.off += 1,
-            None => debug!(
-                "screen-detect: node unreadable, skipped: {}",
-                dev.display()
-            ),
+            None => debug!("screen-detect: node unreadable, skipped: {}", dev.display()),
         }
     }
-    debug!(
-        "screen-detect: votes off={} on={}",
-        votes.off, votes.on
-    );
+    debug!("screen-detect: votes off={} on={}", votes.off, votes.on);
     votes
 }
 
@@ -444,6 +526,31 @@ fn read_screen_state(kind: ScreenSourceKind, dev: &Path) -> Option<bool> {
                 .ok()
                 .map(|v| v == 0)
         }
+        ScreenSourceKind::LcdPower => {
+            // LCD class：lcd_power（少数驱动写作 power）= FB_BLANK_*，
+            // 0 = UNBLANK（亮），其余（4 = POWERDOWN 等）= 灭
+            let p = dev.join("lcd_power");
+            let p = if p.exists() { p } else { dev.join("power") };
+            crate::utils::read_i32_from_file(&p.to_string_lossy())
+                .ok()
+                .map(|v| v == 0)
+        }
+        ScreenSourceKind::DrmEnabled => {
+            let raw = fs::read_to_string(dev.join("enabled")).ok()?;
+            match raw.trim() {
+                "enabled" => Some(true),
+                "disabled" => Some(false),
+                _ => None,
+            }
+        }
+        ScreenSourceKind::DrmDpms => {
+            let raw = fs::read_to_string(dev.join("dpms")).ok()?;
+            match raw.trim() {
+                "On" => Some(true),
+                "Off" | "Standby" | "Suspend" => Some(false),
+                _ => None,
+            }
+        }
     }
 }
 
@@ -457,18 +564,24 @@ fn read_screen_state(kind: ScreenSourceKind, dev: &Path) -> Option<bool> {
 /// - `bl_power != 0` → 不可信（可能是上述陈旧值），以 `actual_brightness`
 ///   为准：Android 息屏时会把背光亮度写 0，>0 即面板在发光；
 /// - `bl_power` 不可读 → 回退 `actual_brightness > 0`（原行为）；
+/// - `actual_brightness` 也不可读（驱动未实现 get_brightness）→ 回退
+///   `brightness > 0`（驱动里存的目标亮度，息屏时 Android 同样写 0）；
 /// - 全部不可读 → None（调用方静默跳过）。
 fn read_backlight_state(dev: &Path) -> Option<bool> {
     let bl_power = dev.join("bl_power");
     let actual = dev.join("actual_brightness");
+    let target = dev.join("brightness");
     let bl = crate::utils::read_i32_from_file(&bl_power.to_string_lossy()).ok();
     let act = crate::utils::read_i32_from_file(&actual.to_string_lossy()).ok();
-    match (bl, act) {
-        (Some(0), _) => Some(true),
-        (Some(_), Some(a)) => Some(a > 0),
-        (Some(_), None) => Some(false),
-        (None, Some(a)) => Some(a > 0),
-        (None, None) => None,
+    let tgt = crate::utils::read_i32_from_file(&target.to_string_lossy()).ok();
+    match (bl, act, tgt) {
+        (Some(0), _, _) => Some(true),
+        (Some(_), Some(a), _) => Some(a > 0),
+        (Some(_), None, Some(b)) => Some(b > 0),
+        (Some(_), None, None) => Some(false),
+        (None, Some(a), _) => Some(a > 0),
+        (None, None, Some(b)) => Some(b > 0),
+        (None, None, None) => None,
     }
 }
 
@@ -678,14 +791,15 @@ pub fn monitor_screen_state_uevent(
                         }
                     } else if event.subsystem == "leds" && event.action == ActionType::Change {
                         // leds class 背光（MTK lcd-backlight 等）亮度变化 uevent：
-                        // 仅认名字含 backlight 的节点（跳过通知灯/按键灯/充电灯等
-                        // 无关 leds 事件）。多数 led 驱动不广播亮度变化 uevent，
-                        // verify 轮询兜底才是主路径，此处能收到即零延迟直推。
+                        // 仅认面板背光节点（跳过通知灯/按键灯/键盘背光/充电灯等
+                        // 无关 leds 事件），口径与枚举一致（is_backlight_led_name）。
+                        // 多数 led 驱动不广播亮度变化 uevent，verify 轮询兜底才是
+                        // 主路径，此处能收到即零延迟直推。
                         let dev =
                             std::path::PathBuf::from(format!("/sys{}", event.devpath.display()));
                         let is_backlight_led = dev
                             .file_name()
-                            .map(|n| n.to_string_lossy().to_lowercase().contains("backlight"))
+                            .map(|n| is_backlight_led_name(&n.to_string_lossy()))
                             .unwrap_or(false);
                         if is_backlight_led {
                             thread::sleep(Duration::from_millis(100));

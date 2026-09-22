@@ -99,6 +99,9 @@
 - **动态限频**：CLG 与特调同构——写 schedutil、min 压硬件最低、只调 max；按核心组 `up/down_core_count|util_percent` 判定，util=0 不计升频、计入降频；抖动 wait_ms 防抖。
 - **特调参数组**：`Config.tuned_profiles: HashMap<模式名, SpecialTunedConfig>`，`get_tuned_profile(mode)` 缺省回退 `akmode`；新增模式 = special_tuned.yaml 条目+同名参数组（无需改 .rs）；缺参数组打 `tuned-profile-missing`。`boost_affinity`=boost 类亲和（省电型必须 false）；`util_smoothing`=负载 EMA。
 - **降频计时**：`down_target` 只在目标明显回升（>+hyst）时重置计时。
+- **FAS「频率不匹配」不是外部压制的证据**（2026-09-23 定位）：旧实现 `apply_freq_locked` 写完立刻读 `scaling_cur_freq`，内核调频异步未完成 → 读到的是**写入前的旧档**，被误判成压制；实测 55 次的实际值全部 = 旧档、近旁 snap 的 cur==max、帧率达标。已改为「目标稳定 ≥ VERIFY_SETTLE=200ms 后、在下一次写入前抽查」（频繁改频期间跳过；真实压制仍会抓到并重写）。
+- **FAS migration_cost**（2026-09-23 起）：`FasRulesConfig.migration_cost_ns`（`module/config/normal/fas/*.yaml`，None=完全不动），接管期写 `/proc/sys/kernel/sched_migration_cost_ns`、deactivate 按快照恢复（读不到原值就不写）；sgame.yaml 已配 400000。
+- **`scaling_governor` 写入恒 EPERM**（PHB110/A16，三 policy）：内核本就是 schedutil，意图已满足；但 OEM 换 governor 则切不回（环境约束，非本轮回归）。
 - **白名单 `re:` 解析**：必须 `strip_prefix("re:")` 再按 `:` 切分；导出 yaml 只含精确条目 → UI 只能近似。
 - **FAS 单实例+延迟退出**：activate 时 GovernorGuard 切 performance；失前台 `request_delayed_exit` 持策略 15s（夹 1..=600），到期 1s tick 退出并按 `pending_mode_after_fas` 重接管；ModeChange 的 fas→非fas 拦截在 mode_clone 更新前。息屏与 FAS 完全解耦。
 - **帧指标口径**：eBPF 只有一个 uprobe（`Surface::queueBuffer`），`frame_delta_ns` = 相邻帧间隔；必须只投喂新产生的帧。
@@ -120,7 +123,10 @@
 - 整夜 5h default：亮屏均 1.35W；bili 1.27W；游戏 2.48W；息屏 0.07-0.09W。游戏段 65% 时间被 vendor 热限流（cap 70%）而 ChiRi 未参与。
 - **main\_（原 devimp）列语义**：`cur_freq_khz` = CLG 动态上限，`max_freq_khz` = 硬件最高；`batt_current_ma` 实为安培；wakeups/migrations 累计。（历史样本 fps 列全空——那是 status.csv 的列。）
 - 无平滑特调在抖动负载下上限均值反而高于 CLG；EMA + hr 1.0 才能把 little/big 压到 0.90-0.96。**调度层剩余空间个位数 %。**
+- **Alpha06-04 / PHB110 / A16 实测（2026-09-23 凌晨）**：王者 FAS 120 档位 10.75 min = 4.32~4.34 W / fps 121.3（cpuT 62.4℃）；bili playback 2.78 W（cap 85 段 2.5~2.7 W）；batt 42.1℃ 触发 cap 85；daemon 重启会重置热保护状态。
 - **迁移率基线（2026-09-22 结案）**：亮屏 UI（cloudmusic/launcher）迁移 2500~5000/s 是 surfaceflinger/system_server 主导的**固有形态**（40 列无天花板的老包同样如此），视频稳态才 ~300/s——勿再拿亮屏 UI 对比视频稳态判「迁移异常」。**over/under 列语义**：组内 util 过 `up_threshold` / 低于 `down_threshold` 的核数（big 簇 0.1/3.6 = 负载集中在 1 核、其余空转）。
+- **2026-09-23 补测**：bili 播放态迁移 ≈4500/s（含弹幕/网页渲染，`@S` 帧里 `bili:web`+surfaceflinger 同时活跃）→ 旧的「视频稳态 ≈300/s」只适用于纯视频无 UI 动画；王者 FAS ≈9000/s。判定异常前先确认场景组成。
+- **频率上限摆动与死区**（2026-09-23）：特调 `hysteresis` 是**绝对频率死区** `hw_max×hysteresis`，必须 ≥ 频表相邻档步长才不来回摆——playback 原 0.04 在 8550 上只有 81/112/127 MHz（步长 115~135 MHz）→ big 每秒改 scaling_max 5.6~6.0 次；已提到 0.06（配 down_hold_ms 150），**待实测复核**。
 
 ## WebUI
 
@@ -138,8 +144,9 @@
 - `cargo xtask build` 先跑 `webui/npm run build` 再拷 `webui/dist` 到模块 `webroot/`；硬约束 `base:'./'`+`type="module"`。CI Node 24。`module.prop` id = `chiri`。dist 由根 `build.rs` 嵌入（`restore_webroot` 启动补齐，缺则降级）。
 - **.gitignore 已合并为根单文件（2026-09-22）**：webui/、module/ 的子 .gitignore 已删除；根内新增 WebUI 段（`webui/` 前缀）与 Magisk 段；根 `/package.json`、`/package-lock.json` 刻意忽略（npm init 残留）。后续新增忽略规则一律进根文件。
 - `mdocs/` 只放项目原有文档；AI 产出放 `.codebuddy/docs/`（已忽略）；`.codebuddy/memory/` 跟踪。
-- **项目 skill 位置（2026-09-23 用户定）**：正式 = **`.agents/skills/<name>/`**（Agent Skills 开放标准，Cursor 官方识别 `.agents/skills/` 与 `.cursor/skills/` 两者，CodeBuddy 亦读）；`.codebuddy/skills/` 是 CodeBuddy 项目级**逐字镜像**，两份必须同步。现役 skill：`devimp-log-analysis`（含定版/40-48 列 schema 识别）。
+- **项目 skill 位置（2026-09-23 用户定，同日二次修订）**：**只维护 `.agents/skills/<name>/`**（Agent Skills 开放标准，Cursor 与 CodeBuddy 均读）；**不再建 `.codebuddy/skills/` 副本、不要求两份同步**（用户明确「不用在 CodeBuddy 再写一次 skill」）。现役 skill：`devimp-log-analysis`（含定版/40-48 列 schema 识别）。
 - 评估与准备 ≠ 批准开工。没说「开始改」就不建不改源码；改动前 `git status` 核对足迹，汇报给文件级清单。
 - **只改任务范围内的东西，不「顺手修」**：未提交改动、被注释的代码可能是用户 WIP。检查报错若指向用户正在编辑的文件，只报告不动手。汇报区分「我改的」与「工作区里已有的」。
 - **Yumi 权重归零（2026-09-20 用户声明）**：性能优化及同类工作中，`src/scheduler/` 与 Yumi 设备兼容**不再作为约束**，改动即使波及也可进行（通常只做类型适配，不主动改逻辑）。2026-09-22 Yumi 调度本体已删，`docs/agents/` 口径已同步，本条冲突消解。
+- **注释口径（2026-09-23 用户定）**：注释只写「这是什么 + 注意点什么」，不写实测数据、日期溯源、「因为…导致…」的因果叙述；待验证/待办一律写**标准 `TODO: ` 前缀**（不放日期括注，避免 IDE 的 TODO→Problems 扩展正则不匹配），关键数字放进 TODO 文案里。
 - 常驻技能 **humanizer-zh** 与 **token-efficient-coding**：中文去 AI 腔；Rust 文件头 `//! x.rs - 区块索引: [a] [b]`（ASCII 方括号）；先读头部再定位、单任务 Read ≤200 行、Edit 局部改禁整文件重写、工具调用并行、shell 输出过滤、回复精简给 diff。

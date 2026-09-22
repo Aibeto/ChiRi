@@ -28,10 +28,16 @@ use crate::scheduler::fas::FasController;
 /// 活跃实例温度刷新周期（喂给 FAS 引擎内部限温逻辑，core_temp_threshold=0 时无效）
 const FAS_TEMP_REFRESH: Duration = Duration::from_secs(3);
 
+/// 接管期间写入 `sched_migration_cost_ns` 的节点（配置 None 时不动）
+// TODO: 实机复核接管期写入与退出恢复（退出后该节点应回到接管前的值）。
+const MIGRATION_COST_PATH: &str = "/proc/sys/kernel/sched_migration_cost_ns";
+
 // [types]
 struct FasInstance {
     package: String,
     controller: FasController,
+    /// 接管前 `sched_migration_cost_ns` 原值，deactivate 写回（None = 未写或读不到）
+    migration_cost_restore: Option<String>,
 }
 
 pub struct FasManager {
@@ -115,12 +121,23 @@ impl FasManager {
         }
         // governor 先切 performance：本层快照在写入前完成，与引擎的频率快照互不干扰
         self.governor.activate();
+        // 迁移成本：读不到原值就不写，保证退出能恢复
+        let migration_cost_restore = rules
+            .migration_cost_ns
+            .filter(|v| *v > 0)
+            .and_then(|want| {
+                let orig = std::fs::read_to_string(MIGRATION_COST_PATH).ok()?;
+                let orig = orig.trim().to_string();
+                crate::utils::try_write_file(MIGRATION_COST_PATH, &want.to_string()).ok()?;
+                Some(orig)
+            });
         controller.set_game(pid, pkg);
         controller.set_temperature(self.last_temp);
         controller.set_temp_threshold(rules.core_temp_threshold);
         self.instance = Some(FasInstance {
             package: pkg.to_string(),
             controller,
+            migration_cost_restore,
         });
         self.exit_deadline = None;
         self.fas_active_flag.store(true, Ordering::Release);
@@ -155,6 +172,10 @@ impl FasManager {
         };
         self.exit_deadline = None;
         self.fas_active_flag.store(false, Ordering::Release);
+        // 迁移成本先于频率恢复，让后续 governor 快照到系统原状
+        if let Some(orig) = inst.migration_cost_restore.take() {
+            let _ = crate::utils::try_write_file(MIGRATION_COST_PATH, &orig);
+        }
         // 先恢复频率再清状态：调用方随后 init 其他 governor（CLG/akmode/fast）时，
         // 对方才能快照到真实的系统状态；governor 快照与频率互不依赖，最后恢复
         inst.controller.reset_all_freqs();
