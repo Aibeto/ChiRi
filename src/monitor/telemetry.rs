@@ -8,7 +8,7 @@
 ///
 /// 数据写入进程级共享原子量（monitor 层写、chiri 调度层读），不占用事件通道容量；
 /// 消费端为 chiri scheduler_ipc 的 2s 热循环：telemetry.log CSV 落盘 + 周期 debug 摘要。
-/// 线程仅在 ChiRi SoC 上由 monitor/mod.rs 启动，Yumi 设备零开销。
+/// 线程仅在 ChiRi SoC 上由 monitor/mod.rs 启动，非 ChiRi 零开销。
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 
 // [data]

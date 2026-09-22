@@ -49,8 +49,8 @@
   );
   const modeSignal = $derived(modeIdle ? "info" : app.modeInfo.signal);
   const deviceLabel = $derived(
-    app.deviceKind === "chiri" ? t("overview.device.chiri")
-    : app.deviceKind === "yumi" ? t("overview.device.yumi")
+    app.deviceKind === "chiri" ?
+      t("overview.device.chiri")
     : t("overview.device.unknown"),
   );
 
@@ -100,7 +100,9 @@
   <Panel signal={app.daemonState === "running" ? "success" : "action"}>
     <div class="daemon-card">
       <div class="daemon">
-        <p class="daemon__name u-mono">{app.moduleProp.name || t("app.title")}</p>
+        <p class="daemon__name u-mono">
+          {app.moduleProp.name || t("app.title")}
+        </p>
         <p class="u-note u-mono">
           {app.moduleProp.version || "—"}{app.moduleProp.versionCode ?
             ` (${app.moduleProp.versionCode})`
@@ -118,12 +120,14 @@
              量程 = meta.power_max_w（默认 12W），进度条直接复用官方 ak-progress 原语 -->
         <div class="power">
           <p class="u-note">
-            {app.powerAvgUsesAverage ? t("overview.power.avg") : t("overview.power.ref")}
+            {app.powerAvgUsesAverage ?
+              t("overview.power.avg")
+            : t("overview.power.ref")}
           </p>
           <p class="power__value u-mono">
-            {app.powerAvgWatt === null
-              ? "—"
-              : `${app.powerAvgWatt.toFixed(2)} ${t("unit.watt")}`}
+            {app.powerAvgWatt === null ?
+              "—"
+            : `${app.powerAvgWatt.toFixed(2)} ${t("unit.watt")}`}
           </p>
           <!-- 官方 ak-progress 结构：--ak-progress-signal 与 --ak-progress-value 的默认值
                都声明在 .ak-progress 根上，fill 的宽度与颜色全部由变量驱动。此前裸用
@@ -132,16 +136,22 @@
           <div
             class="ak-progress power__bar"
             role="progressbar"
-            aria-label={app.powerAvgUsesAverage ? t("overview.power.avg") : t("overview.power.ref")}
+            aria-label={app.powerAvgUsesAverage ?
+              t("overview.power.avg")
+            : t("overview.power.ref")}
             aria-valuemin="0"
             aria-valuemax="100"
             aria-valuenow={Math.round(powerPercent)}
             style={`--ak-progress-value: ${powerPercent.toFixed(1)}%`}
           >
-            <div class="ak-progress__track"><span class="ak-progress__fill"></span></div>
+            <div class="ak-progress__track">
+              <span class="ak-progress__fill"></span>
+            </div>
           </div>
           <!-- 百分比同时出数字：条看起来空时能判断是「读数为 0/缺失」还是「条没画出来」 -->
-          <span class="ak-progress__value u-mono">{Math.round(powerPercent)}%</span>
+          <span class="ak-progress__value u-mono"
+            >{Math.round(powerPercent)}%</span
+          >
         </div>
       {/if}
     </div>
@@ -171,55 +181,59 @@
     signal={modeSignal}
   >
     <div class="mode-card">
-    <div class="mode" data-signal={modeSignal}>
-      <div class="mode__main">
-        {#if showFamily}
-          <p class="mode__family">{familyLabel}</p>
-        {/if}
-        <p class="mode__name">{modeName}</p>
-        {#if showModeId}
-          <p class="mode__id u-mono">{modeId}</p>
-        {/if}
-      </div>
-      {#if app.modeError}
-        <StateBox
-          kind="error"
-          message={t("state.failed")}
-          detail={app.modeError}
-        />
-      {/if}
-      {#if app.metaProblems.length > 0}
-        <ul class="mode__problems">
-          {#each app.metaProblems as problem, index (index)}
-            <li>{problem}</li>
-          {/each}
-        </ul>
-      {/if}
-    </div>
-    {#if app.isChiri}
-      <!-- 当前功耗：status.csv 最后一行的 batt_power_w，结构/样式与首卡的
-           平均/参考放电功耗块完全一致（同一批 .power 类） -->
-      <div class="power">
-        <p class="u-note">{t("overview.power.now")}</p>
-        <p class="power__value u-mono">
-          {app.powerNowWatt === null
-            ? "—"
-            : `${app.powerNowWatt.toFixed(2)} ${t("unit.watt")}`}
-        </p>
-        <div
-          class="ak-progress power__bar"
-          role="progressbar"
-          aria-label={t("overview.power.now")}
-          aria-valuemin="0"
-          aria-valuemax="100"
-          aria-valuenow={Math.round(nowPercent)}
-          style={`--ak-progress-value: ${nowPercent.toFixed(1)}%`}
-        >
-          <div class="ak-progress__track"><span class="ak-progress__fill"></span></div>
+      <div class="mode" data-signal={modeSignal}>
+        <div class="mode__main">
+          {#if showFamily}
+            <p class="mode__family">{familyLabel}</p>
+          {/if}
+          <p class="mode__name">{modeName}</p>
+          {#if showModeId}
+            <p class="mode__id u-mono">{modeId}</p>
+          {/if}
         </div>
-        <span class="ak-progress__value u-mono">{Math.round(nowPercent)}%</span>
+        {#if app.modeError}
+          <StateBox
+            kind="error"
+            message={t("state.failed")}
+            detail={app.modeError}
+          />
+        {/if}
+        {#if app.metaProblems.length > 0}
+          <ul class="mode__problems">
+            {#each app.metaProblems as problem, index (index)}
+              <li>{problem}</li>
+            {/each}
+          </ul>
+        {/if}
       </div>
-    {/if}
+      {#if app.isChiri}
+        <!-- 当前功耗：status.csv 最后一行的 batt_power_w，结构/样式与首卡的
+           平均/参考放电功耗块完全一致（同一批 .power 类） -->
+        <div class="power">
+          <p class="u-note">{t("overview.power.now")}</p>
+          <p class="power__value u-mono">
+            {app.powerNowWatt === null ?
+              "—"
+            : `${app.powerNowWatt.toFixed(2)} ${t("unit.watt")}`}
+          </p>
+          <div
+            class="ak-progress power__bar"
+            role="progressbar"
+            aria-label={t("overview.power.now")}
+            aria-valuemin="0"
+            aria-valuemax="100"
+            aria-valuenow={Math.round(nowPercent)}
+            style={`--ak-progress-value: ${nowPercent.toFixed(1)}%`}
+          >
+            <div class="ak-progress__track">
+              <span class="ak-progress__fill"></span>
+            </div>
+          </div>
+          <span class="ak-progress__value u-mono"
+            >{Math.round(nowPercent)}%</span
+          >
+        </div>
+      {/if}
     </div>
   </Panel>
 
@@ -247,9 +261,7 @@
           >{t("apps.tag.special")} / {t("apps.tag.fas")}</span
         >
         <span class="kv__value u-muted">
-          {app.deviceKind === "yumi" ?
-            t("state.notApplicable")
-          : t("overview.device.unknown")}
+          {t("overview.device.unknown")}
         </span>
       </div>
     {/if}
@@ -287,7 +299,9 @@
       disabled={app.exportPhase === "running"}
       onclick={() => void app.startExport()}
     >
-      {app.exportPhase === "running" ? t("overview.export.running") : t("overview.export.action")}
+      {app.exportPhase === "running" ?
+        t("overview.export.running")
+      : t("overview.export.action")}
     </button>
     {#if app.exportPhase === "running"}
       <!-- 进度区整块用官方 ak-progress（标题行 + 斜纹刻度轨道）；填充宽度由下方
@@ -295,13 +309,13 @@
       <div class="ak-progress u-mt-3">
         <div class="ak-progress__header">
           <span>
-            {app.exportTotal > 0
-              ? t("overview.export.progress", {
-                  mb: app.exportMb,
-                  done: app.exportDone,
-                  total: app.exportTotal
-                })
-              : t("overview.export.preparing")}
+            {app.exportTotal > 0 ?
+              t("overview.export.progress", {
+                mb: app.exportMb,
+                done: app.exportDone,
+                total: app.exportTotal,
+              })
+            : t("overview.export.preparing")}
           </span>
           <span class="ak-progress__value">{app.exportPercent}%</span>
         </div>
@@ -313,7 +327,8 @@
           aria-valuenow={app.exportPercent}
         >
           <!-- 同功耗条：宽度直接内联，不依赖上游变量继承 -->
-          <span class="ak-progress__fill" style={`width: ${app.exportPercent}%`}></span>
+          <span class="ak-progress__fill" style={`width: ${app.exportPercent}%`}
+          ></span>
         </div>
       </div>
     {/if}

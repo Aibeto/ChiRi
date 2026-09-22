@@ -68,6 +68,7 @@ reduce:
     up_threshold: 0.90
     down_threshold: 0.50
     smoothing_up: 0.50
+    util_smoothing: 0.5
     down_rate_limit_ticks: 2
     up_rate_limit_ticks: 2
     headroom_factor: 1.05
@@ -90,6 +91,7 @@ default:
     up_threshold: 0.78
     down_threshold: 0.55
     smoothing_up: 0.75
+    util_smoothing: 0.5
     down_rate_limit_ticks: 1
     up_rate_limit_ticks: 1
     headroom_factor: 1.05

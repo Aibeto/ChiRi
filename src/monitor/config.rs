@@ -1,12 +1,11 @@
 //! config.rs: [helpers] [rules]
 
 use crate::common;
-pub use crate::fas_types::FasRulesConfig;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-// [helpers] 
+// [helpers]
 pub fn get_rules_path() -> PathBuf {
     common::get_module_root().join("rules.yaml")
 }
@@ -69,12 +68,10 @@ where
     })
 }
 
-// [rules] 
+// [rules]
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct RulesConfig {
-    #[serde(default = "crate::utils::default_true")]
-    pub yumi_scheduler: bool,
     // 注意：以下字段缺省时必须以 null/省略 安全反序列化。
     // 若不加 #[serde(default)]，用户精简 rules.yaml（删除任一字段）会导致
     // serde 报 missing field，read_config 回退 Default（dynamic_enabled=false）
@@ -90,6 +87,4 @@ pub struct RulesConfig {
     pub app_modes: HashMap<String, String>,
     #[serde(default)]
     pub ignored_apps: Vec<String>,
-    #[serde(default)]
-    pub fas_rules: FasRulesConfig,
 }

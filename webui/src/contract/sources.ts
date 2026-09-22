@@ -10,8 +10,8 @@ import { absent, failed, ok, shellError } from './errors'
 import { isLive, run } from '@/kernel/shell'
 
 // [device]
-/** 设备形态：读不到生效配置时是 unknown，而不是想当然地当成通用机型 */
-export type DeviceKind = 'chiri' | 'yumi' | 'unknown'
+/** 设备形态：非 ChiRi 机型与读不到生效配置时都是 unknown */
+export type DeviceKind = 'chiri' | 'unknown'
 
 let deviceCache: DeviceKind | null = null
 
@@ -23,7 +23,7 @@ let deviceCache: DeviceKind | null = null
 export async function deviceKind(): Promise<DeviceKind> {
   if (deviceCache !== null) return deviceCache
   const rel = await readActiveConfigRel()
-  deviceCache = rel.kind !== 'ok' ? 'unknown' : rel.value.includes('/') ? 'chiri' : 'yumi'
+  deviceCache = rel.kind !== 'ok' || !rel.value.includes('/') ? 'unknown' : 'chiri'
   return deviceCache
 }
 

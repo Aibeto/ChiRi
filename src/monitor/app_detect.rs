@@ -168,10 +168,8 @@ fn check_cgroup_path(path: &str, ignored_apps: &[String]) -> Option<(String, i32
     let mut cmdline_path = String::with_capacity(32);
     for pid_str in content.split_whitespace().rev() {
         cmdline_path.clear();
-        let _ = std::fmt::Write::write_fmt(
-            &mut cmdline_path,
-            format_args!("/proc/{pid_str}/cmdline"),
-        );
+        let _ =
+            std::fmt::Write::write_fmt(&mut cmdline_path, format_args!("/proc/{pid_str}/cmdline"));
         if let Ok(cmdline) = utils::read_file_content(&cmdline_path) {
             let pkg_name = cmdline.split('\0').next().unwrap_or("").trim();
             if is_valid_user_app(pkg_name, ignored_apps) {
@@ -267,7 +265,7 @@ fn determine_mode(config: &RulesConfig, current_package: &str) -> String {
         return global_mode;
     }
     // 特调体系为 ChiRi 专属：仅命中 CHIRI_SOC_HINTS 的 SoC 上白名单/特调模式才生效，
-    // 非 ChiRi SoC 上特调映射一律回退全局模式（Yumi 调度器未注册特调模式）。
+    // 非 ChiRi SoC 上特调映射一律回退全局模式。
     // 优先级：用户自定义 app_modes > 特调白名单的优先回退模式 > 全局模式。
     // 门控：特调模式只允许白名单应用；非白名单包名映射到特调模式时回退全局模式并告警
     // （WebUI 侧在扫描完成后会同步清理这类非法条目）。
@@ -596,8 +594,7 @@ pub fn app_detection_loop(
                     && last_package != final_pkg
                 {
                     // 同模式前台切换（ChiRi 专属）：补发 PackageSwitch 供 FAS 侧切换
-                    // uprobe 目标。首轮与亮屏后 last_package 为空不触发；Yumi 设备
-                    // 不发，事件流零变化。
+                    // uprobe 目标。首轮与亮屏后 last_package 为空不触发；非 ChiRi 不发。
                     let _ = tx.send(DaemonEvent::PackageSwitch {
                         package_name: final_pkg.clone(),
                         pid: final_pid,

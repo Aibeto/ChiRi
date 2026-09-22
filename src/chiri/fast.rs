@@ -27,7 +27,6 @@ struct PolicySnapshot {
 /// 单个 policy 的锁频状态
 struct LockedPolicy {
     policy_id: i32,
-    hw_max: u32,
     /// 本次接管锁定的目标频率（kHz）：vector 取硬件最高、frozen 取硬件最低
     target: u32,
     max_writer: FastWriter,
@@ -160,7 +159,6 @@ impl FastLock {
 
             let mut locked = LockedPolicy {
                 policy_id: pid,
-                hw_max,
                 target,
                 max_writer,
                 min_writer,
@@ -210,7 +208,7 @@ impl FastLock {
         self.active = false;
     }
 
-    /// 每 5 秒重写一次 hw_max，防止系统/厂商守护进程篡改频率。
+    /// 每 5 秒重写一次 target（vector=hw_max、frozen=hw_min），防止篡改频率。
     /// 由 scheduler_ipc 在事件循环中调用。
     /// 返回距下次重写的剩余时间（非激活状态返回 None），供事件循环
     /// 计算动态阻塞超时（sleep 到最近 deadline，空闲不空转）。
@@ -225,11 +223,12 @@ impl FastLock {
         self.last_write = std::time::Instant::now();
 
         for p in &mut self.policies {
-            // 直接写 hw_max，不走 current_freq 去重——tick 本身就是"重写"
-            let ok = p.max_writer.write_value_force(p.hw_max)
-                && p.min_writer.write_value_force(p.hw_max);
+            // 直接写 target，不走 current_freq 去重——tick 本身就是"重写"。
+            // 2026-09-22 修：原误写 hw_max，frozen（锁最低频）每 5s 会被拉回最高频
+            let ok = p.max_writer.write_value_force(p.target)
+                && p.min_writer.write_value_force(p.target);
             if ok {
-                p.current_freq = p.hw_max;
+                p.current_freq = p.target;
             }
             debug!(
                 "{}",
@@ -237,7 +236,7 @@ impl FastLock {
                     "fast-rewrite",
                     &fluent_args!(
                         "pid" => p.policy_id.to_string(),
-                        "max_khz" => (p.hw_max / 1000).to_string()
+                        "max_khz" => (p.target / 1000).to_string()
                     )
                 )
             );

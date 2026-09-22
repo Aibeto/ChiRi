@@ -6,8 +6,6 @@ import { load as loadYaml } from 'js-yaml'
 
 // [types]
 export interface RulesInfo {
-  /** 全局调度总开关 */
-  yumiScheduler: boolean
   /** 动态模式总开关（false 时前台永远用 global_mode） */
   dynamicEnabled: boolean
   /** 全局模式（dynamic_enabled=false 或应用未命中时的取值） */
@@ -23,7 +21,6 @@ export interface RulesInfo {
 }
 
 export const EMPTY_RULES: RulesInfo = {
-  yumiScheduler: true,
   dynamicEnabled: true,
   globalMode: 'default',
   appModes: {},
@@ -65,7 +62,6 @@ export function parseRules(text: string): RulesInfo {
     }
     const obj = parsed as Record<string, unknown>
     return {
-      yumiScheduler: asBool(obj.yumi_scheduler, true),
       dynamicEnabled: asBool(obj.dynamic_enabled, true),
       globalMode: asString(obj.global_mode, 'default'),
       appModes: asStringMap(obj.app_modes),

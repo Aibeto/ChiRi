@@ -25,7 +25,7 @@ node_modules/
 Thumbs.db
 
 # Artifacts
-yumi-*.zip
+ChiRi*.zip
 # *.bak
 output/
 *.log

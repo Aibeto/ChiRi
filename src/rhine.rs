@@ -39,7 +39,7 @@ pub const RHINE_BACK_CHR: &str = "rhine-back.chr";
 /// 里面只有注释，解析后等同于空文件（未启用），但用户能一眼看到该写什么。
 const RHINE_DEFAULT_CHR: &str = include_str!("../module/rhine.chr");
 
-/// 监听异常后的重建间隔（与两套 config_watcher 同口径）
+/// 监听异常后的重建间隔（与 chiri config_watcher 同口径）
 const WATCH_RETRY_BACKOFF: Duration = Duration::from_secs(2);
 
 // [defs]
@@ -350,7 +350,10 @@ fn apply(root: &Path, meta_path: &Path, key: &str) -> Result<(), String> {
     // 快照必须记「当前生效值」：文件没写该键时等于内嵌默认（缺省 = 沿用）
     let d = common::embedded_meta_defaults();
     let eff_fas = meta.fas_enabled.or(d.fas_enabled).unwrap_or(true);
-    let eff_scenemode = meta.scenemode_enabled.or(d.scenemode_enabled).unwrap_or(true);
+    let eff_scenemode = meta
+        .scenemode_enabled
+        .or(d.scenemode_enabled)
+        .unwrap_or(true);
     let eff_thread = meta.thread_bind.or(d.thread_bind).unwrap_or(true);
 
     let backup = Backup {
@@ -786,7 +789,7 @@ pub fn report_startup(report: &StartupReport) {
 /// 不需要重启调度。只有 Chiri 会起这个线程。
 ///
 /// `initial` 是启动期收敛后的状态；相同就不重复套用（避免开机后再白写一次 meta.yaml）。
-/// 监听异常时退避重建，与本仓库两套 config_watcher 同口径。
+/// 监听异常时退避重建，与本仓库 chiri config_watcher 同口径。
 pub fn watch_loop(root: PathBuf, meta_path: PathBuf, initial: Option<String>) {
     let mut current = initial;
     let mut watcher: Option<utils::DirWatcher> = None;

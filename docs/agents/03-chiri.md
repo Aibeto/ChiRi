@@ -1,6 +1,6 @@
 ## [chiri] ChiRi 调度子系统
 
-以下子系统仅在命中 `CHIRI_SOC_HINTS` 的 SoC 上生效。全局统一 schedutil：ChiRi 的 CLG 与 akmode 均把内核调速器写为 schedutil（两套调度器各自 `init_policies` 时写 governor、release 时恢复快照）；Yumi 的 `scheduler/cpu_load_governor.rs` 写 `performance`（Yumi 原有行为，勿改）。
+以下子系统仅在命中 `CHIRI_SOC_HINTS` 的 SoC 上生效（未命中不接管 CPU，原 Yumi 兜底已删）。全局统一 schedutil：CLG 与 akmode 均把内核调速器写为 schedutil（各自 `init_policies` 时写 governor、release 时恢复快照）。
 
 ### 特调（akmode）
 
@@ -12,13 +12,13 @@
 
 - 当前条目：明日方舟国服 `com.hypergryph.arknights`、日服 `com.YoStarJP.Arknights`、正则兜底 `re:(?i)arknights`（覆盖台服/Mod 变体），模式均为 `akmode`（fallback 同）；**playback 组**（视频播放，2026-09-17 8550 日志分析新增）：`tv.danmaku.bili` + `re:(?i)(bilibili|danmaku\.bili)`，模式 `playback`。**daily 组已于 2026-09-17 晚上机实测后移除**（桌面/聊天/工具属高频短交互，特调收益低、侵入高——「不是所有程序都需要特调」；移除条目留档在 special_tuned.yaml 注释里，特调只保留长稳态场景）。新增特调模式 = 本表加条目 + `normal/tuned_profiles.yaml` 的 `tuned_profiles` 段加同名参数组，无需改 .rs。
 
-- main.rs 启动时把精确条目导出到运行时文件 `special_tuned.yaml`（每行 `包名:模式列表(逗号分隔):优先回退模式`，正则条目无法按包名精确查找故不导出）并 info 打点。导出仅 `is_chiri_soc()` 下发生，Yumi 设备不生成该文件。
+- main.rs 启动时把精确条目导出到运行时文件 `special_tuned.yaml`（每行 `包名:模式列表(逗号分隔):优先回退模式`，正则条目无法按包名精确查找故不导出）并 info 打点。导出仅 `is_chiri_soc()` 下发生，非 ChiRi 机型不生成该文件。
 
 生效范围与门控：
 
 - 特调体系仅限 ChiRi：`determine_mode` 先判 `is_chiri_soc()`，非 ChiRi SoC 上特调映射一律回退全局模式。
 
-- 只在 chiri 的 `Config` 挂载独立特调字段 `akmode`（缺省段：游戏特调兼未注册模式的回退）与 `tuned_profiles: HashMap<模式名, SpecialTunedConfig>`（**特调参数组**，2026-09-17 加：`normal/tuned_profiles.yaml` 的 `tuned_profiles:` 段，`get_tuned_profile(mode)` 按模式名取、缺省回退 `akmode` 段，**全部调用点唯一的取参入口**——不要再加第二个取参方法）；不要注册进 `get_mode`（只认 CLG 常规模式），也不要注册进 yumi 的 `scheduler/config.rs`。
+- 只在 chiri 的 `Config` 挂载独立特调字段 `akmode`（缺省段：游戏特调兼未注册模式的回退）与 `tuned_profiles: HashMap<模式名, SpecialTunedConfig>`（**特调参数组**，2026-09-17 加：`normal/tuned_profiles.yaml` 的 `tuned_profiles:` 段，`get_tuned_profile(mode)` 按模式名取、缺省回退 `akmode` 段，**全部调用点唯一的取参入口**——不要再加第二个取参方法）；不要注册进 `get_mode`（只认 CLG 常规模式）。
 
 - 白名单应用始终进特调：前台命中 `special_tuned_entry()` 就返回特调模式，不管 app_modes/global_mode 配了什么（`determine_mode` 开头直接判定）。rules.yaml 里给该应用配的普通模式只作为特调起始档（scheduler 侧 `get_ak_initial_tier` 识别）。
 
@@ -36,15 +36,15 @@
 
 - 动态限频（schedutil + 负载驱动升降 max）：`TunedGovernor` 激活时写 schedutil、min 压到硬件最低、max 设为硬件最高。`on_load_update`（特调 40ms tick）用当前档位策略参数按核心组判定升降，升频优先：升频 = 任一组内达到 up_core_count 个核心 util > up_util_percent；降频 = 任一组内达到 down_core_count 个核心 util < down_util_percent（达到 = 组内核心数 >= core_count，即配置值就是绝对个数）。统计口径：util 恰为 0.0 的核心（离线与整窗空闲的在线核均为 0.0、不可区分）不计入升频 over、但计入降频 under——空闲即低负载，避免挂机/息屏时永不降频。升频前检查实际频率（scaling_cur_freq）是否已达当前设定的 max（schedutil 余量），达到才在频率表中升一档；降频直接把 max 降为当前实际频率对应档位（`read_cur_freq` 后 `partition_point` 找 <= 实际频率的最高档，实际不可读回退降一档，绝不高于当前 max），max 上下限均为硬件上下限。升降频带 wait_ms 防抖（升降后 `after_change_duration_ms` 内减半）。CLG 与 akmode 同构：min 压硬件最低、只调 max。
 
-- 特调参数独立成文件（仅嵌入 normal/，非处理器绑定）：`module/config/normal/tuned_profiles.yaml` 定义缺省段 `akmode` + 按模式名分派的 `tuned_profiles` 段，经 `common::embedded_tuned_profiles_str()` 编译进二进制，不放在默认 `config.yaml` 里。原处理器目录 `{soc}/akmode.yaml` 绑定已在 4cb4d97 重构中移除（磁盘已无该文件，勿再加回）。嵌入内容解析失败时 `set_special_tuned_available(false)` → 特调不可用、白名单应用回退 CLG（不再保留旧值用默认参数接管 CPU）。
+- 特调参数独立成文件（仅嵌入 normal/，非处理器绑定）：`module/config/normal/tuned_profiles.yaml` 定义缺省段 `akmode` + 按模式名分派的 `tuned_profiles` 段，经 `common::embedded_tuned_profiles_str()` 编译进二进制，不放在默认 `feature.yaml` 里。原处理器目录 `{soc}/akmode.yaml` 绑定已在 4cb4d97 重构中移除（磁盘已无该文件，勿再加回）。嵌入内容解析失败时 `set_special_tuned_available(false)` → 特调不可用、白名单应用回退 CLG（不再保留旧值用默认参数接管 CPU）。
 
 - 特调接管失败冷却：`TunedGovernor::init_policies(mode, cfg)` 返回 `bool`（无可用 cluster 即 false）。scheduler_ipc 在三个特调接管入口（亮屏恢复/ModeChange/ConfigReload）检查返回值，失败时置 `tuned_cooldown_until = now + 300s` 并 warn 打点 `scheduler-tuned-cooldown`，5 分钟内该特调模式不再触发、改由 CLG 接管（冷却中特调模式名保持，息屏 doze/亮屏恢复均走 CLG 分支），冷却结束后经 ConfigReload 或下次 ModeChange 自然恢复重试。
 
 WebUI 侧：
 
-- 设备形态三态：`contract/sources.ts::deviceKind()` 依据 active_config 是否指向处理器子目录判定 `chiri` / `yumi` / `unknown`；读不到时是 `unknown`（界面显示「无法判定」，不替用户下结论）。状态落在 `src/state.svelte.ts`。
+- 设备形态两态：`contract/sources.ts::deviceKind()` 依据 active_config 是否指向处理器子目录判定 `chiri` / `unknown`（非 ChiRi 与读不到一律 unknown，界面显示「无法判定」）。状态落在 `src/state.svelte.ts`。
 
-- 特调/FAS 在 WebUI 为只读标注：`data/whitelists.ts` 解析白名单，仅 `chiri` 机型显示「特调 / FAS」标签（`yumi` 显示「不适用」）；不提供专属特调模式选项、不做特调清理/重扫修复。应用性能模式已禁止在 WebUI 指定（rules.yaml 只读），应用列表仅展示特调/FAS/现存 app_modes 标签，提供「重新扫描」按钮（扫描中禁用防并发）。
+- 特调/FAS 在 WebUI 为只读标注：`data/whitelists.ts` 解析白名单，仅 `chiri` 机型显示「特调 / FAS」标签（其余不显示）；不提供专属特调模式选项、不做特调清理/重扫修复。应用性能模式已禁止在 WebUI 指定（rules.yaml 只读），应用列表仅展示特调/FAS/现存 app_modes 标签，提供「重新扫描」按钮（扫描中禁用防并发）。
 
 - 当前模式读取与自愈：`contract/sources.ts::readCurrentModeRaw()` 读 `current_mode.chr`（内容为模式名原样字节、无换行无空格）；守护进程启动时写一次、模式切换时写、并常态每 5 秒**无条件**重写一次（两套 scheduler_ipc 各一份实现），因此**不能用 mtime 判断模式变化**；守护进程停止后文件是陈旧值，界面须结合存活探测呈现。文件为空/缺失时界面显示「未知 · 尚未产生模式记录」，与「模式名不在已注册档位内」区分开。
 
@@ -54,7 +54,7 @@ WebUI 侧：
 
 - **单实例 + 延迟进出（2026-09-17 重构，原多实例已废弃）**：`src/chiri/fas_manager.rs` 的 `FasManager` 同一时刻至多一个白名单应用被接管（`instance: Option<FasInstance>`）。白名单前台 → `activate`（FasController.load_policies 快照频率 + **GovernorGuard 把各 policy 的 `scaling_governor` 切 performance**，原值快照待恢复）；失去前台不立即退出 → `request_delayed_exit` 进入 **15s 延迟期**（`FasRulesConfig.deactivate_delay_secs`，normalize 夹 1..=600，`fas-example.yaml` 可配）：mode 保持 fas、FAS 仍持有接管（频率停在最后状态、governor=performance），期间切回白名单应用由 activate 无缝续期；到期由 1s 遥测块的 `tick()` 完成退出（reset_all_freqs + clear_game + governor 按快照恢复），并按延迟期记住的目标模式（`pending_mode_after_fas`，fas→X 的 ModeChange 被延迟时记录）重新接管——contingency/babel 走 apply 的 lab 分支，其余走 `apply_mode_takeover`。ModeChange 的 fas→非fas 分支因此**不再立即切换**（拦截在 mode_clone 更新之前，避免「文件写 default、FAS 还持着频率」的中间态）。C5 收尾 deactivate_all（DOWN/panic/进程收尾/fas_enabled=false 热重载）立即全退。事件路由：FrameUpdate/SystemLoadUpdate/温度只喂活跃实例。
 
-- 同模式热切换：新增 `DaemonEvent::PackageSwitch { package_name, pid }`（app_detect 主循环在模式不变且 ChiRi 且前台包变化时发射；Yumi 设备不发射、Yumi 调度器空 arm）。fas→fas 切换序列 = deactivate_active → activate → fas_affinity_hook；另有 1s 遥测兜底（事件丢失/启动即 fas 自愈：非活跃且冷却外且白名单命中 → 三 governor release 后 activate；启动残留 fas 模式且前台非白名单且三 governor 均不活跃 → CLG default 自愈）。兜底块仅亮屏时执行——息屏时 FAS 必须保持释放，否则会把息屏前旧包名拉回 FAS、绕过 CLG doze。
+- 同模式热切换：新增 `DaemonEvent::PackageSwitch { package_name, pid }`（app_detect 主循环在模式不变且 ChiRi 且前台包变化时发射；非 ChiRi 机型不发射）。fas→fas 切换序列 = deactivate_active → activate → fas_affinity_hook；另有 1s 遥测兜底（事件丢失/启动即 fas 自愈：非活跃且冷却外且白名单命中 → 三 governor release 后 activate；启动残留 fas 模式且前台非白名单且三 governor 均不活跃 → CLG default 自愈）。兜底块仅亮屏时执行——息屏时 FAS 必须保持释放，否则会把息屏前旧包名拉回 FAS、绕过 CLG doze。
 
 - FAS 模式下 CLG/特调/vector 全部暂停（三 governor release 后接管）；激活失败（load_policies 后无可用 policy）→ 300s 冷却（`FAS_COOLDOWN`，镜像 TUNED_COOLDOWN）+ CLG default 回退；进入 fas 的回退分支也先释放三 governor（可能从特调/极速切入）。
 
@@ -74,13 +74,15 @@ WebUI 侧：
 
 - 上限语义下 `perf_floor/perf_ceil/perf_init` 约束的是上限（空闲实际频率由 schedutil 决定），`perf_floor` 允许被热保护击穿。
 
-- 全局省电向（2026-09-20，用户要求「除 sgameGlobal 外所有场景功耗减半」+「不能限制最高性能释放」硬性约束）：**perf_ceil 一律保持硬性原值（reduce 0.60 / default 1.0 / boost 1.0），禁止用压 ceiling 省电**。省电路径 = 提升升频门槛与降地板：default 档 up_threshold 0.72→0.78、perf_floor 0.10→0.05、perf_init 0.40→0.25、headroom_factor 1.20→1.05、down_fast_threshold 0.25；boost headroom 1.40→1.25（保留相对性能优势）；reduce perf_init 0.25→0.20、headroom 1.05。`module/config/feature.yaml` 是 yumi 遗留不可动。**sgameGlobal（FAS 配置）唯一豁免**：改档位参数不得连带改动其 FAS 语义。
+- **`util_smoothing`（2026-09-22 新增，CLG 决策负载 EMA）**：抖动负载下 max_util 每 tick 大幅摆动 → target_perf 翻摆、决策方向反复翻转、`scaling_max_freq` 高频改写（8550 QQ 实测大核 2048 tick 反转 458 次）。EMA 滤波（语义同 tuned 的 `util_smoothing`，1.0=关闭、缺省即关闭=逐位等价）后反转降约五成、写频降三成。default/reduce 配 0.5，boost 保持 1.0（响应优先）；α 0.35 可再降抖动但上限均值抬升更多。devimp `max_util` 列写**平滑前**原始值，离线回放可自行试验系数。字段新增须同步：`config.rs` 字段+缺省+normalize+Default、`feature.yaml` 全部 SoC 文件（SoC 文件整份覆盖根，只改根不生效）、`config-example.yaml`。
+
+- 全局省电向（2026-09-20，用户要求「除 sgameGlobal 外所有场景功耗减半」+「不能限制最高性能释放」硬性约束）：**perf_ceil 一律保持硬性原值（reduce 0.60 / default 1.0 / boost 1.0），禁止用压 ceiling 省电**。省电路径 = 提升升频门槛与降地板：default 档 up_threshold 0.72→0.78、perf_floor 0.10→0.05、perf_init 0.40→0.25、headroom_factor 1.20→1.05、down_fast_threshold 0.25；boost headroom 1.40→1.25（保留相对性能优势）；reduce perf_init 0.25→0.20、headroom 1.05。`module/config/feature.yaml`（根）是未命中 SoC 目录机型的 ChiRi 兜底配置与代码默认值来源。**sgameGlobal（FAS 配置）唯一豁免**：改档位参数不得连带改动其 FAS 语义。（2026-09-22 用户复盘后更新：日常档加了天花板 default `perf_ceil` 0.80 + `per_cluster` little 0.70 / prime 0.65，交互由 touch_boost 兜——「禁止压 ceiling」条款对 CLG 日常档已解除，FAS 豁免不变。）
 
 - 多线程按核心组独立调度：每个 cpufreq policy 由一个独立的 `CoreGroupWorker` 线程管理，持有各自的 `ClusterState`（频率档位、`FastWriter`、`current_perf`、防抖计数器等），线程内自主完成决策 + 写频，核心组之间完全并行无锁。`CpuLoadGovernor`（`cpu_load_governor.rs`）是 Worker 线程管理器：`init_policies` 枚举系统 cpufreq policy、为每个 policy spawn Worker 线程（写 schedutil governor、min 压硬件最低、max 按 perf_init 设初始上限）；`release` 停止所有 Worker（Worker 退出前自行恢复系统原始状态）；`reload_config` 停旧 Worker + 用新配置 spawn 新 Worker（等价轻量 init，current_perf 重置到新 perf_init）。
 
 - scheduler_ipc 通过 `on_load_update(&core_utils)` 将负载数据广播给所有 Worker（非阻塞 `try_send`，通道满则丢弃本 tick），Worker 线程内自主决策 + 写频，无需外部 flush。
 
-- 升频 = 平滑抬高上限：ceiling 提升不强制频率跳变，无需读 `scaling_cur_freq` 做余量检查（旧 `clg-up-skipped` 机制已随锁频语义删除）。降频 = 一步到位降上限：防抖确认（`down_rate_limit_ticks`，极低负载命中 `down_fast_threshold` 免防抖）后直接写目标档（`ratio_of_freq` 同步 current_perf），降 ceiling 只收窄 schedutil 区间、不会把实际频率抬上去。已删除废弃参数 `smoothing_down / slow_down_scale / down_fast_mult`。
+- 升频 = 平滑抬高上限：ceiling 提升不强制频率跳变，无需读 `scaling_cur_freq` 做余量检查（旧 `clg-up-skipped` 机制已随锁频语义删除）。降频 = 一步到位降上限：防抖确认（`down_rate_limit_ticks`，极低负载命中 `down_fast_threshold` 免防抖）后直接写目标档（`ratio_of_freq` 同步 current_perf），降 ceiling 只收窄 schedutil 区间、不会把实际频率抬上去。`smoothing_down / slow_down_scale / down_fast_mult` 是 Yumi 参数，已随 Yumi 调度本体删除（2026-09-22），feature.yaml 里的同名键一并移除；README.en.md 里仍有其文档，属上游历史参考。
 
 - 热切换配置重放 perf_init：`reload_config` 重置 current_perf 到新 perf_init 并立即写频，避免接管间隙 current_perf 掉到 0 后频率要从地板缓慢爬升数秒（息屏 doze/scenemode 切换同样经此热切换恢复，见「息屏省电与屏幕状态」）；模式变更 / ConfigReload 热重载同理。
 
@@ -118,7 +120,7 @@ WebUI 侧：
 
 - **FAS 息屏省电已完全移除（2026-09，删除而非暂停）**：FAS 与屏幕状态完全解耦——① `ScreenStateChange(false)` 不再释放 FAS（fas 活跃时息屏走"保持接管"分支，与特调同语义；仅 FAS 失效后走 doze）；② 亮屏恢复分支的 fas arm 对 **FAS 失效场景激活 CLG default**（300s 冷却期内 1s 兜底被 `fas_cooldown` 门控短路，此处是退出 doze/scenemode 低性能配置的唯一恢复路径；FAS 活跃时空操作——CLG 绝不能接管 FAS 已接管的 CPU）；③ ModeChange 息屏进入 fas 的特殊分支删除；④ fas 全时段 boost（`apply_affinity_and_corectl` 不再按 screen_on 回退 normal）；⑤ FAS 兜底激活与 FrameUpdate 喂帧的 is_screen_on 门控删除；⑥ **FAS 优先于 scenemode**：兜底激活 FAS 前若 `scene_mode_active` 先退出 scenemode（恢复全部在线核，守卫「FAS 实例存在 ⇒ 非 scenemode」不变量），scenemode 入口按 `has_any_instance()` 门控。`scheduler-fas-screen-release` i18n key 已随代码删除。
 
-- cpuidle governor 默认启用 menu：8550/8475/8998 的 `config.yaml` 将 `CpuIdleScalingGovernor` 置 true、`CpuIdle.current_governor` 置 "menu"（menu 按预期空闲时长选最深 C 状态，降低空闲功耗），内核无 menu 时写入失败静默跳过、无副作用。
+- cpuidle governor 默认启用 menu：8550/8475/8998 的 `feature.yaml` 将 `CpuIdleScalingGovernor` 置 true、`CpuIdle.current_governor` 置 "menu"（menu 按预期空闲时长选最深 C 状态，降低空闲功耗），内核无 menu 时写入失败静默跳过、无副作用。
 
 - 屏幕状态自愈校验：uevent 可能漏报/误报（开机早期背光未就绪、长时间息屏后唤醒、netlink 缓冲溢出，或机型根本不广播屏幕类 uevent——现代内核已无 early_suspend/late_resume power uevent，leds/backlight 亮度变化多数驱动也不发 KOBJ_CHANGE），导致 `screen_state_arc` 锁死在错误状态。`screen_detect.rs::verify_screen_state` 由 app_detect 主循环每轮调用，读检测源 sysfs 校正 arc。**检测源按可靠性优先级自动扫描并缓存**：① `/sys/class/backlight`（bl_power/actual_brightness 三分支：`bl_power==0`→亮（FB 权威亮屏信号）；非 0 **不可信**——部分 DRM 面板驱动息屏写 FB_BLANK 后亮屏不清零，以 `actual_brightness>0` 为准；bl 不可读回退亮度。勿改回「bl_power==0 即亮、非 0 即灭」的两分支）；② `/sys/class/leds/*backlight*`（MTK 等无 backlight class 机型，`brightness>0` 即亮——**此前这类机型屏幕状态完全读不到的主因**，2026-09 修复）；③ `/sys/class/graphics/fb0/blank`（0=亮）。源发现/无源/读失败各 info/warn 打点（`screen-detect-source-found` / `screen-detect-no-source` / `screen-detect-read-failed`），「屏幕状态读不到」时从 daemon.log 即可确认设备实际可用的源；缓存源连续 8 次全不可读时退役并切换下一个候选（见下方两阶段判定）。
 
@@ -136,7 +138,7 @@ WebUI 侧：
 
 - **PowerBase（Stardust 家族，meta.yaml `powerbase_enabled`，默认关）只替换「谁来调频」**：开启后原本由 CLG 接管的档位（reduce/default/boost）改由 `src/chiri/power_base.rs` 以**放电功耗**为指标调频——功耗低于 feature 里的 `target_power_w` 时放宽升频；达到或超过时守住不升，除非「满占用核心占比 ≥ `overload_cores_pct` 且持续 `overload_hold_ms`」；降频恒激进（不看功耗）；触摸窗口内允许突破功率上限。**模式名与所有外部接口一律不变**（`current_mode.chr` 仍是 default/boost，rules / WebUI / 通知都不受影响）。接管点有两处：`apply_mode_takeover`（主路径，即时）与调度循环每轮的兜底纠正块（覆盖启动块 / ConfigReload / 亮屏恢复 / lab 重建四条旁路——它们直接 init CLG，不兜就会「CLG 与 PowerBase 抢写 scaling_max_freq」或「切换后没人接管」）。affinity 的 promote 阈值在开启时翻倍（积极性减半）。**已知 TODO**：触摸突破当前恒 false——CLG 的 `AtomicTouchState` 是它私有字段，需另备共享标志。**热保护对它无效是预期行为**（thermal 靠压 CLG 上限工作）。
 
-- `FastLock::init()` 遍历 `get_cpu_policies()`、快照原始状态、写 schedutil governor、把所有 cluster 的 `scaling_min_freq/scaling_max_freq` 都锁到含 boost 的硬件最高频（min=max=hw_max）；`tick()` 每 5 秒重写一次 hw_max 防止系统/厂商守护进程篡改；`release()` 恢复接管前的 governor/min/max。
+- `FastLock::init()` 遍历 `get_cpu_policies()`、快照原始状态、写 schedutil governor、把 min=max 锁到 target（vector=含 boost 硬件最高频、frozen=硬件最低频）；`tick()` 每 5 秒重写一次 **target** 防止系统/厂商守护进程篡改（2026-09-22 修：原误写 hw_max，frozen 每 5 秒被拉回最高频=失效）；`release()` 恢复接管前的 governor/min/max。
 
 - `mod.rs` 事件循环中 `fast_lock.tick()` 在每次 `recv_timeout` 唤醒时调用；模式切换/息屏 doze/亮屏恢复/看门狗超时/panic 收尾均正确 release fast_lock。
 
@@ -203,7 +205,7 @@ WebUI 侧：
 
 - 结果写入进程级共享原子量 `telemetry()`（f32 bit pattern 存 `AtomicU32`，与热保护/触摸状态同口径），不占事件通道容量。
 
-- eBPF 扩展探针（`yumi-ebpf/src/main.rs` 的 `handle_sched_wakeup`/`handle_sched_migrate_task`/`handle_cpufreq_transition`，PerCpuArray 计数）由 `cpu_monitor.rs` 仅在 ChiRi 上可选挂载（内核缺 tracepoint 时 warn 一次跳过，不影响主探针），每 2s 读累计值取增量发 `DaemonEvent::BpfStats`（Yumi 设备不发送；Yumi scheduler match 里的空 arm 仅为枚举完备性）。
+- eBPF 扩展探针（`yumi-ebpf/src/main.rs` 的 `handle_sched_wakeup`/`handle_sched_migrate_task`/`handle_cpufreq_transition`，PerCpuArray 计数）由 `cpu_monitor.rs` 仅在 ChiRi 上可选挂载（内核缺 tracepoint 时 warn 一次跳过，不影响主探针），每 2s 读累计值取增量发 `DaemonEvent::BpfStats`（非 ChiRi 机型不发送）。
 
 - chiri scheduler_ipc 以 `TELEMETRY_LOG_INTERVAL=1s` 消费：写 `logs/status.csv`（logger.rs `status_log_snapshot`，1s 一行，功耗精度 1s）+ 20s 一条 debug 摘要 `telemetry-summary`。BpfStats 不刷新 CLG 看门狗心跳（探针失效不影响负载源判定）。
 

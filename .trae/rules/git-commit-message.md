@@ -41,7 +41,7 @@ scene: git_message
 | 作用域      | 说明                                        |
 | ----------- | ------------------------------------------- |
 | `chiri`     | ChiRi 调度模块（src/chiri/）                |
-| `scheduler` | Yumi 调度模块（src/scheduler/，通常不改动） |
+| `scheduler` | FAS 调度引擎与 policy 工具（src/scheduler/） |
 | `monitor`   | 监控层（src/monitor/）                      |
 | `ebpf`      | eBPF 探针（yumi-ebpf/）                     |
 | `config`    | 配置相关（module/config/）                  |

@@ -2,7 +2,7 @@
 // 无 KernelSU 环境（浏览器 dev / 自动化走查）下的设备替身：
 // 用构建期嵌入的仓库配置 + 生成的假日志构成一个内存文件系统，并按契约层实际发出的
 // 命令形态回放。URL 参数可切换设备形态，便于走查空态/错误态：
-//   ?soc=chiri|yumi   设备是否 ChiRi 专属机型（影响白名单与 status.csv 是否存在）
+//   ?soc=chiri        设备是否 ChiRi 专属机型（影响白名单与 status.csv 是否存在）
 //   ?state=normal|empty|error   正常 / 守护进程从未启动 / 读取真实失败
 //   ?daemon=running|stopped     存活探测结果（影响“关闭调度”演示）
 import embedded from 'virtual:chiri-config'

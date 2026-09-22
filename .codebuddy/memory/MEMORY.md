@@ -13,13 +13,13 @@
 
 ## 守护进程契约
 
-来源：`common.rs`/`main.rs`/`logger.rs`/`chiri/*`/`scheduler/*`/`monitor/app_detect.rs`。
+来源：`common.rs`/`main.rs`/`logger.rs`/`chiri/*`/`scheduler/fas/*`/`monitor/app_detect.rs`。
 
 ### 文件接触点
 
 `daemon.lock`（单实例锁，WebUI 不读写）· `LiveTime.chr`（只读心跳，15s 写 `MM:SS`，差 >20s 判停止）· `active_config.chr`/`current_mode.chr`/`PowerAVG.chr`（只读）· `config/{rel}`（读写）· `rules.yaml`/`special_tuned.yaml`/`fas_whitelist.yaml`（只读，仅 Chiri 生成）· `logs/daemon.log`（只读，仅本次运行）· `logs/status.csv`(+`.1`) · `logs/watchdog.pid`（读+删）· `rhine.chr`（读写）+`rhine-back.chr`（快照）· `down.chr`（读写，`down`=停摆）。附：`devimp/`、`logd/`、`config/{soc}/`。
 
-读取失败三态必须分开：正常空值 / 合法缺失（非 Chiri 无白名单、Yumi 无 status.csv）/ 读取失败（界面明确报错，不得伪装成空值）。
+读取失败三态必须分开：正常空值 / 合法缺失（非 Chiri 无白名单、无 status.csv）/ 读取失败（界面明确报错，不得伪装成空值）。
 
 ### meta.yaml 写侧
 
@@ -46,8 +46,9 @@
 
 - 模式值域：`reduce` `default` `boost` `vector` `fas` + 特调（`akmode`/`playback`）+ `down`。`scenemode` 不产生模式值（独立息屏轴）。daemon 停止后 `current_mode.chr` 是陈旧值。
 - **UI 家族**：clg / special / lab / down / stardust（=scenemode 家族位）/ fas / unknown；同步面 = `data/mode.ts` + 两语 locale + `tests/i18n.test.ts`。
-- **二进制名 chiri（原 yumi）**：Cargo 包名/产物/`core/bin/chiri`/`DAEMON_PATH`/脚本 killall、pidof/WebUI `stopScheduler`/app_detect 黑名单/i18n。**刻意保留**：`yumi-ebpf`、`YUMI_SKIP_EBPF`、`src/scheduler/`、设备形态 `'yumi'`、README 上游引用。
-- 档位段名三侧同名：`feature.yaml` 段名 + `chiri/config.rs` + `scheduler/config.rs` 的 `Modes` 与 `get_mode`（后者无 deny_unknown_fields，漏改静默忽略整段）。
+- **二进制名 chiri（原 yumi）**：Cargo 包名/产物/`core/bin/chiri`/`DAEMON_PATH`/脚本 killall、pidof/WebUI `stopScheduler`/app_detect 黑名单/i18n。**刻意保留**：`yumi-ebpf`、`YUMI_SKIP_EBPF`、设备形态 `'yumi'`、README 上游引用。（Yumi 调度本体已删 2026-09-22，`src/scheduler/` 只剩 FAS 引擎 + policy 工具。）
+- 档位段名与 `feature.yaml` 段名、`chiri/config.rs` 的 `Modes`/`get_mode` 同名（无 deny_unknown_fields，漏改静默忽略整段）；原 Yumi 侧同名结构已随调度本体删除。
+- **feature.yaml 的 CLG 段只归 `chiri::config` 消费**：`smoothing_down / slow_down_scale / down_fast_mult` 是 Yumi 参数，已随 Yumi 调度本体删除并从 root/8745 feature.yaml 移除（2026-09-22），`util_smoothing` 归 chiri。判死键先确认消费方是否已随子系统删除，勿只对现存结构体。
 - UI 原理上不可知：`is_special_tuned_available()` 还取决于嵌入 `tuned_profiles.yaml` 加载成功；`fas_available()` 要求白名单非空且至少一个 app 配置解析成功——白名单命中 ≠ 生效。生效态以 `current_mode.chr` 观测值为准。
 
 ### 日志与预算
@@ -133,5 +134,5 @@
 - `mdocs/` 只放项目原有文档；AI 产出放 `.codebuddy/docs/`（已忽略）；`.codebuddy/memory/` 跟踪。
 - 评估与准备 ≠ 批准开工。没说「开始改」就不建不改源码；改动前 `git status` 核对足迹，汇报给文件级清单。
 - **只改任务范围内的东西，不「顺手修」**：未提交改动、被注释的代码可能是用户 WIP。检查报错若指向用户正在编辑的文件，只报告不动手。汇报区分「我改的」与「工作区里已有的」。
-- **Yumi 权重归零（2026-09-20 用户声明）**：性能优化及同类工作中，`src/scheduler/` 与 Yumi 设备兼容**不再作为约束**，改动即使波及也可进行（通常只做类型适配，不主动改逻辑）。`AGENTS.md` 与 `docs/agents/01-overview.md` 仍写「`src/scheduler/` 勿改动其逻辑」，冲突时以本条为准（是否同步 AGENTS 待用户确认）。
+- **Yumi 权重归零（2026-09-20 用户声明）**：性能优化及同类工作中，`src/scheduler/` 与 Yumi 设备兼容**不再作为约束**，改动即使波及也可进行（通常只做类型适配，不主动改逻辑）。2026-09-22 Yumi 调度本体已删，`docs/agents/` 口径已同步，本条冲突消解。
 - 常驻技能 **humanizer-zh** 与 **token-efficient-coding**：中文去 AI 腔；Rust 文件头 `//! x.rs - 区块索引: [a] [b]`（ASCII 方括号）；先读头部再定位、单任务 Read ≤200 行、Edit 局部改禁整文件重写、工具调用并行、shell 输出过滤、回复精简给 diff。

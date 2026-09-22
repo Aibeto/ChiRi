@@ -43,7 +43,6 @@ describe('rules.yaml 解析', () => {
   it('读取全部只读展示字段', () => {
     const info = parseRules(
       [
-        'yumi_scheduler: true',
         'dynamic_enabled: true',
         'global_mode: "default"',
         'app_modes:',
@@ -58,10 +57,9 @@ describe('rules.yaml 解析', () => {
     expect(info.ignoredApps).toEqual(['com.android.systemui'])
   })
 
-  it('缺字段时按守护进程默认值（dynamic_enabled/global_mode/yumi_scheduler 均为真值）', () => {
+  it('缺字段时按守护进程默认值（dynamic_enabled/global_mode 均为真值）', () => {
     const info = parseRules('app_modes: {}\n')
     expect(info.ok).toBe(true)
-    expect(info.yumiScheduler).toBe(true)
     expect(info.dynamicEnabled).toBe(true)
     expect(info.globalMode).toBe('default')
   })

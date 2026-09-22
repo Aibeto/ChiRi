@@ -17,7 +17,7 @@
 
 ## 基石
 
-- 模块基于 [yumi](https://github.com/imacte/yumi) 调度，ChiRi 调度仍有部分核心代码来自 [yumi](https://github.com/imacte/yumi) ，并保留回退兜底能力。
+- 模块 fork 自 [yumi](https://github.com/imacte/yumi)，部分核心代码来自上游（上游调度兜底已移除，非目标 SoC 不接管 CPU）。
 - 线程调整功能有部分参考了 [AppOptR](https://gitee.com/sutoliu/AppOptR) 。
 
 ### 主要特性
@@ -51,14 +51,14 @@ ChiRi 提供以下模式：
 ChiRi CLG 调度核心，使用白名单适配soc
 [已适配soc列表](/mdocs/socList.md)
 没有你的soc或功能适配不完全？当前处于早期测试阶段，正在增加soc适配
-完全不支持的soc会回退到 yumi 调度（微调版）
+不支持的 SoC 不接管 CPU（仅监控/WebUI/日志）
 不支持部分特调的soc会回退到CLG模式
 
 #### 核心特性
 
 - **高性能 Rust 实现**: 极低的系统资源占用，运行功耗极低。
 - **eBPF 内核级监控**: 通过 `sched_switch` tracepoint 精确采集每核心 CPU 利用率和线程运行时间；通过 `queueBuffer` uprobe 零开销捕获渲染帧间隔。
-- **实时配置监听**: 支持配置文件（`config.yaml`）和规则文件（`rules.yaml`）热重载，切换模式无需重启。
+- **实时配置监听**: 支持调优配置（`feature.yaml` / `meta.yaml`）和规则文件（`rules.yaml`）热重载，切换模式无需重启。
 - **内置 FAS 引擎**: PID 控制器驱动的帧感知调度，支持自动容量权重探测、per-app 配置、CPU 利用率辅助调频。
 - **CLG 负载调速器**: 基于 eBPF 实时负载的自适应调频，替代内核原生调速器。
 - **多语言国际化**: 基于 Fluent 的 i18n 系统，支持中英文日志输出。

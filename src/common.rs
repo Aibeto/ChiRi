@@ -45,7 +45,7 @@ pub enum DaemonEvent {
     ScreenStateChange(bool),
 
     /// eBPF 扩展探针的周期统计（ChiRi 专属：仅 ChiRi SoC 上 cpu_monitor 加载
-    /// 可选探针并发送；Yumi 设备不会产生该事件）。字段为发送周期（2s）内的增量。
+    /// 可选探针并发送；非 ChiRi 机型不产生该事件）。字段为发送周期（2s）内的增量。
     BpfStats {
         /// sched_wakeup 唤醒次数：调度唤醒链活跃度
         wakeups: u32,
@@ -70,7 +70,7 @@ pub fn get_module_root() -> PathBuf {
         .parent()
         .unwrap_or(&exe_path) // .../core
         .parent()
-        .unwrap_or(&exe_path) // .../yumi (Root)
+        .unwrap_or(&exe_path) // .../chiri (Root)
         .to_path_buf()
 }
 
@@ -301,7 +301,7 @@ pub fn set_lab_special_tuned_disabled(disabled: bool) {
 /// - 命中 Chiri 目标 SoC 且存在处理器子目录 `config/{命中片段}/meta.yaml` 时，使用该文件
 /// - 否则回退到默认 `config/meta.yaml`
 ///
-/// 所有配置加载/热重载入口（main.rs 与两套调度器的 config_watcher）统一走这里，
+/// 所有配置加载/热重载入口（main.rs 与 chiri 的 config_watcher）统一走这里，
 /// 保证 8550 等目标机型使用处理器独立配置，其余机型不受影响。
 pub fn get_config_path() -> PathBuf {
     matched_soc_config_dir()
@@ -541,7 +541,7 @@ pub fn fas_app_config(name: &str) -> Option<&'static crate::fas_types::FasRulesC
         .get(name)
 }
 
-/// FAS 是否可用：总开关开启（rules.yaml fas_enabled）、白名单非空且至少一个应用配置解析成功。
+/// FAS 是否可用：总开关开启（meta.yaml fas_enabled）、白名单非空且至少一个应用配置解析成功。
 pub fn fas_available() -> bool {
     if !fas_enabled() {
         return false;
@@ -650,7 +650,7 @@ pub(crate) fn embedded_config_file(rel: &str) -> Option<&'static str> {
 }
 
 /// 嵌入的 meta.yaml（用户可修改字段的默认值）：按命中处理器取 {soc}/meta.yaml，
-/// 未命中（默认 Yumi）取 meta.yaml
+/// 未命中取 meta.yaml
 pub fn embedded_meta_str() -> &'static str {
     if let Some(soc) = matched_soc_hint() {
         if let Some(text) = embedded_config_file(&format!("{soc}/meta.yaml")) {
@@ -773,7 +773,7 @@ pub struct ExternalMetaOverrides {
     pub fas_enabled: Option<bool>,
     pub scenemode_enabled: Option<bool>,
     /// 线程摆放总开关：false = 关闭线程功能，CPU 亲和/绑核与 core_ctl 核心在线
-    /// 接管全部交还系统（**把所有绑定分配改成全核心**）。与机型内嵌 config.yaml 的
+    /// 接管全部交还系统（**把所有绑定分配改成全核心**）。与机型内嵌 feature.yaml 的
     /// `Affinity.enabled` / `CoreCtl.enabled` 取「与」——任一为假即视为关闭线程功能，
     /// 见 chiri/config.rs::Config::load。
     pub thread_bind: Option<bool>,
@@ -784,12 +784,12 @@ pub struct ExternalMetaOverrides {
     /// 功耗口径开关（PowerAVG.chr）：false（默认）= 参考值（旧值先乘 10 再与新值
     /// 按 10:1 加权递推，偏历史，含息屏样本）；true = 累计平均值（等权全史，
     /// **仅亮屏**放电样本）。两者都只在电池放电时取样。daemon 只在 ChiRi 的 1s 状态采样里
-    /// 消费（Yumi 无效）；写侧走「单次读-改-写」顶层行替换，见 WebUI contract/meta.ts。
+    /// 消费（非 ChiRi 无效）；写侧走「单次读-改-写」顶层行替换，见 WebUI contract/meta.ts。
     pub power_avg: Option<bool>,
     /// 常驻状态通知开关（meta.yaml `notify`，默认 true）：daemon 每 5s 把调度状态
     /// （前台包名 / 模式 / 家族 / 子模式 / 温度 / 功耗）写到系统通知栏的常驻通知，
     /// 见 src/notify.rs。false = 不投递，并**撤销已投递的通知**（daemon 自己还在跑，
-    /// 有能力清理）。同样只在 ChiRi 的 1s 循环里消费（Yumi 无效）。
+    /// 有能力清理）。同样只在 ChiRi 的 1s 循环里消费（非 ChiRi 无效）。
     pub notify: Option<bool>,
     /// OPlus 私有电压/电流节点（`oplus_chg`，默认 false）：true = 优先读
     /// `/sys/class/oplus_chg/battery/bcc_parms`（下标 6 电芯电压0、8 电流、11 电芯电压1，
@@ -946,7 +946,7 @@ fn parse_disk_meta(text: &str) -> Option<ExternalMetaOverrides> {
     })
 }
 
-/// meta.yaml 快照自愈：main.rs 启动时与两套 config_watcher **触发热重载前**调用。
+/// meta.yaml 快照自愈：main.rs 启动时与 chiri config_watcher **触发热重载前**调用。
 /// - 文件合法 → 跳过写入（返回 false，防 config_watcher 事件成环）
 /// - 文件缺失/不可读 → 嵌入原文原子重建（首次安装 / 被误删；不留警告注释）
 /// - 任一字段非法 → 嵌入原文整体覆盖 + 文件末尾追加警告注释 + warn 日志
@@ -980,7 +980,7 @@ pub fn sync_meta_snapshot(meta_path: &Path) -> bool {
     write_file_no_panic(meta_path, corrected.as_bytes())
 }
 
-/// rules.yaml 快照复制：把编译期嵌入的 rules.yaml 向外复制到模块根（与 config.yaml
+/// rules.yaml 快照复制：把编译期嵌入的 rules.yaml 向外复制到模块根（与 meta.yaml
 /// 快照自愈同口径——嵌入内容为唯一基准，磁盘副本仅供展示/备份，运行时一律读嵌入值，
 /// 被篡改不影响调度行为）。内容一致时跳过写入。
 ///

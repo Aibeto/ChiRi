@@ -2,9 +2,9 @@
 
 mod chiri;
 mod common;
+mod down;
 pub mod fas_types;
 pub mod i18n;
-mod down;
 mod logger;
 mod monitor;
 mod notify;
@@ -21,7 +21,6 @@ use std::sync::{Arc, RwLock};
 use std::thread;
 // 注意：fluent_args 由 i18n.rs 的 #[macro_export] 注入 crate 根宏命名空间，
 // main.rs 即 root 模块，可直接使用，不能再用 use crate::fluent_args 重复导入（E0255）。
-use crate::scheduler::config::Config;
 
 fn main() -> Result<()> {
     // [daemonize]
@@ -165,7 +164,7 @@ fn main() -> Result<()> {
     // 导出内部特调白名单（编译期嵌入 src/chiri/special_tuned.yaml）供 WebUI 展示
     // “特调”标签与专属选项：每行一条 `包名:特调模式列表(逗号分隔):优先回退模式`。
     // 只导出精确包名条目（正则条目无法按包名精确查找）；WebUI 只读该文件，不提供修改入口。
-    // 仅在 Chiri 专属调度激活时导出——非 Chiri（Yumi）设备不生成该文件，WebUI 据此隐藏特调功能。
+    // 仅在 Chiri 专属调度激活时导出——非 Chiri 机型不生成该文件，WebUI 据此隐藏特调功能。
     // 日志延后到 logger::init 之后输出（init 前的 log 会被静默丢弃），见下方「日志系统就绪」块。
     let mut exported_special: Option<usize> = None;
     let mut exported_fas: Option<usize> = None;
@@ -208,12 +207,9 @@ fn main() -> Result<()> {
     };
 
     // [lang_logger]
-    // 4. 立即加载语言与日志（两套 Config 的 meta 结构一致，先用它初始化）
-    let (language, loglevel) = if chiri_active {
+    // 4. 立即加载语言与日志（meta 读取统一走 chiri::config，非 ChiRi 机型同样适用）
+    let (language, loglevel) = {
         let cfg = chiri::config::Config::load(config_path.to_str().unwrap()).unwrap_or_default();
-        (cfg.meta.language, cfg.meta.loglevel)
-    } else {
-        let cfg = Config::load(config_path.to_str().unwrap()).unwrap_or_default();
         (cfg.meta.language, cfg.meta.loglevel)
     };
     load_language(&language);
@@ -356,14 +352,18 @@ fn main() -> Result<()> {
     // 心跳线程：每 15s 把当前本地时间（MM:SS）写模块根 LiveTime.chr，WebUI 刷新时
     // 比对差值（容差 20s）判定调度是否在跑——取代此前的 flock 探测：不再依赖
     // toybox 是否带 flock applet，也不会在探测命令不可用时退化成「无法判定」。
-    // 语义仍是**进程级存活**（与 flock 判据一致）：独立线程而非搭调度循环，两套
-    // 调度器（chiri / yumi）共用同一心跳，进程被信号杀死/看门狗没拉起都会停写。
+    // 语义仍是**进程级存活**（与 flock 判据一致）：独立线程而非搭调度循环——
+    // 进程被信号杀死/看门狗没拉起都会停写。
     // 循环永不 panic、写失败静默（logger::write_live_time 内部吞错）。
     thread::Builder::new()
         .name("live_time".to_string())
-        .spawn(|| loop {
-            logger::write_live_time();
-            thread::sleep(std::time::Duration::from_secs(logger::LIVE_TIME_INTERVAL_SECS));
+        .spawn(|| {
+            loop {
+                logger::write_live_time();
+                thread::sleep(std::time::Duration::from_secs(
+                    logger::LIVE_TIME_INTERVAL_SECS,
+                ));
+            }
         })?;
 
     // [channels]
@@ -382,23 +382,25 @@ fn main() -> Result<()> {
     let fas_active = Arc::new(AtomicBool::new(false));
 
     // [scheduler_start]
-    // 6. 按 SoC 启动对应的调度器（两套互斥，同一事件通道只被其中一个消费）
+    // 6. 启动 ChiRi 调度器（Yumi 兜底已移除：非 ChiRi SoC 不接管 CPU，
+    //    只跑监控/WebUI/日志，事件通道无消费者直接丢弃）
     let start_result = if chiri_active {
         log::info!("{}", t("main-chiri-scheduler-selected"));
         let cfg = chiri::config::Config::load(config_path.to_str().unwrap()).unwrap_or_default();
-        chiri::start_scheduler_thread(
+        Some(chiri::start_scheduler_thread(
             rx,
             Arc::new(RwLock::new(cfg)),
             ak_active.clone(),
             fas_active.clone(),
             // 启动期收敛后的实验室模式：监听线程据此判断「文件没变就不重复套用」
             rhine_report.enabled.clone(),
-        )
+        ))
     } else {
-        let cfg = Config::load(config_path.to_str().unwrap()).unwrap_or_default();
-        scheduler::start_scheduler_thread(rx, Arc::new(RwLock::new(cfg)))
+        log::warn!("{}", t("main-no-chiri-scheduler"));
+        drop(rx);
+        None
     };
-    if let Err(e) = start_result {
+    if let Some(Err(e)) = start_result {
         error!(
             "{}",
             t_with_args(
@@ -408,11 +410,13 @@ fn main() -> Result<()> {
         );
         return Err(e);
     }
-    info!("{}", t("scheduler-module-started"));
+    if chiri_active {
+        info!("{}", t("scheduler-module-started"));
+    }
 
     // [monitor_start]
     // 7. 启动 Monitor
-    // 常规采样间隔按 SoC 参数化：Chiri 160ms，Yumi 保持原有 200ms
+    // 常规采样间隔按 SoC 参数化：Chiri 160ms，非 ChiRi（仅监控）沿用 200ms
     let sample_ms_normal: u64 = if chiri_active { 160 } else { 200 };
     let monitor_thread = thread::Builder::new()
         .name("monitor_core".to_string())

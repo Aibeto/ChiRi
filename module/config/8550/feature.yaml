@@ -74,6 +74,7 @@ reduce:
     up_threshold: 0.90
     down_threshold: 0.50
     smoothing_up: 0.50
+    util_smoothing: 0.5
     down_rate_limit_ticks: 2
     up_rate_limit_ticks: 2
     headroom_factor: 1.05
@@ -96,6 +97,10 @@ default:
     up_threshold: 0.78
     down_threshold: 0.55
     smoothing_up: 0.75
+    # 决策负载 EMA（1.0=关闭）：滤掉抖动负载的单 tick 摆动，抑制决策翻转与
+    # scaling_max_freq 高频改写（2026-09-22 本机型 QQ 日志回放：大核反转 458→194、
+    # 写频 −30%；alpha 0.35 可再降但上限均值抬升更多，取 0.5 折中）。boost 不开。
+    util_smoothing: 0.5
     # 防抖：原 1/1 等于无防抖，8550 实测 cap 与方向每 tick 都可能翻转
     # （升频平滑推进、降频一步到位，util 抖动即来回改写 scaling_max_freq）。
     # 调回 2/3；低载（<down_fast_threshold）仍跳过降频防抖立即下调，空闲不受影响

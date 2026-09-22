@@ -52,8 +52,10 @@ struct ClusterState {
     down_wait: u32,
     /// 升频确认计数：连续满 up_rate_limit_ticks 才执行升频
     up_wait: u32,
-    /// 上一 tick 的原始 max_util，用于尖峰跳升检测
+    /// 上一 tick 的 max_util（平滑后），用于尖峰跳升检测
     last_util: f32,
+    /// 决策负载 EMA 状态（util_smoothing < 1 时启用；-1 = 未初始化），语义同 tuned
+    ema_util: f32,
 }
 
 impl ClusterState {
@@ -369,13 +371,27 @@ impl CoreGroupWorker {
         self.dev_over = over;
         self.dev_under = under;
 
-        // 尖峰抑制：单 tick 跳升超过阈值时衰减其增量
-        let util = if raw_util > self.cluster.last_util + self.cfg.spike_jump_threshold {
-            self.cluster.last_util + (raw_util - self.cluster.last_util) * self.cfg.spike_decay
-        } else {
+        // 负载平滑（EMA，util_smoothing=1.0 关闭；语义同 tuned::util_smoothing）：
+        // 抖动负载下 max_util 每 tick 大幅摆动（8550 QQ 实测 0.3~0.7 间跳），
+        // target_perf 跟着翻摆 → 决策方向反复翻转、scaling_max_freq 高频改写。
+        // 2026-09-22 日志回放：α=0.5 反转降约五成、写频降约三成（α=0.35 更强但
+        // 上限均值抬升更多）。max_util 列（devimp）刻意写平滑前原始值，离线回放
+        // 可自行试验系数，不受二次平滑污染。
+        let smoothed = if self.cfg.util_smoothing >= 0.999 || self.cluster.ema_util < 0.0 {
             raw_util
+        } else {
+            self.cfg.util_smoothing * raw_util
+                + (1.0 - self.cfg.util_smoothing) * self.cluster.ema_util
         };
-        self.cluster.last_util = raw_util;
+        self.cluster.ema_util = smoothed;
+
+        // 尖峰抑制：单 tick 跳升超过阈值时衰减其增量
+        let util = if smoothed > self.cluster.last_util + self.cfg.spike_jump_threshold {
+            self.cluster.last_util + (smoothed - self.cluster.last_util) * self.cfg.spike_decay
+        } else {
+            smoothed
+        };
+        self.cluster.last_util = smoothed;
 
         // headroom 在 up_threshold 附近线性过渡，避免阶跃导致的振荡
         let ramp_start = self.cfg.up_threshold - self.cfg.headroom_ramp;
@@ -669,6 +685,7 @@ impl CoreGroupWorker {
             current_freq: 0,
             down_wait: 0,
             up_wait: 0,
+            ema_util: -1.0,
             last_util: 0.0,
         };
 

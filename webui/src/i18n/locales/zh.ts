@@ -46,7 +46,6 @@ export default {
   'overview.config.invalid': '配置不符合守护进程校验规则',
   'overview.device': '设备匹配',
   'overview.device.chiri': 'ChiRi',
-  'overview.device.yumi': '通用机型',
   'overview.device.unknown': '无法判定',
   'overview.power.ref': '实时放电参考',
   'overview.power.avg': '平均放电功耗',
@@ -213,7 +212,6 @@ export default {
   'apps.tag.fas': 'FAS规则数量',
   'apps.tag.mode': '模式',
   'apps.rules': '全局规则',
-  'apps.rules.scheduler': '调度状态',
   'apps.rules.dynamic': '动态模式',
   'apps.rules.globalMode': '全局模式',
   'apps.rules.ignored': '忽略的包名',
@@ -222,7 +220,6 @@ export default {
   'apps.empty.detail': '点击「重新扫描」获取应用列表',
   'apps.failed': '应用列表读取失败',
   'apps.scanned': '扫描完成',
-  'apps.notApplicableTag': '本型无特调与 FAS 白名单',
 
   'logs.title': '日志',
   'logs.source': '数据源',

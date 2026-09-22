@@ -95,7 +95,7 @@ pub struct Meta {
     /// 线程摆放总开关（meta.yaml `thread_bind`）：false = 关闭线程功能，CPU 亲和/绑核
     /// （cpuset / uclamp / sched_setaffinity）与 core_ctl 核心在线接管全部交还系统，
     /// 也就是**把所有绑定分配改成全核心**。
-    /// 与 config.yaml 的 `Affinity.enabled` / `CoreCtl.enabled` 取「与」——机型可按硬件
+    /// 与 feature.yaml 的 `Affinity.enabled` / `CoreCtl.enabled` 取「与」——机型可按硬件
     /// 禁用、用户可按意愿禁用；合并在 Config::load 完成，下游只看那两个子开关。
     #[serde(default = "crate::utils::default_true", alias = "ThreadBind")]
     pub thread_bind: bool,
@@ -111,7 +111,7 @@ pub struct Meta {
     /// 采样写模块根 `PowerAVG.chr` 的口径——false 写参考值（(旧值 × 10 + 新值) / 11
     /// 递推，偏历史，含息屏样本）；true 写累计平均值（(旧值 × 次数 + 新值) / (次数 + 1)，
     /// 等权全史，**仅亮屏**放电样本）。两者都只在电池放电时取样。
-    /// 热重载即时生效；仅 ChiRi 有 1s 状态采样，Yumi 无效。
+    /// 热重载即时生效；仅 ChiRi 有 1s 状态采样，非 ChiRi 无效。
     #[serde(default, alias = "PowerAvg")]
     pub power_avg: bool,
 
@@ -144,12 +144,18 @@ pub struct Meta {
 
     /// 电压校准除数（默认 1000000，须 > 0）：节点原始值 ÷ 该值 = V，读取层不做换算。
     /// 缺省 1000000 = 标准 Android ABI µV 口径；OPlus 私有节点报 mV，安装脚本会写入 1000
-    #[serde(default = "crate::utils::default_unit_divisor", alias = "VoltageDivisor")]
+    #[serde(
+        default = "crate::utils::default_unit_divisor",
+        alias = "VoltageDivisor"
+    )]
     pub voltage_divisor: f32,
 
     /// 电流校准除数（默认 1000000，须 > 0）：节点原始值 ÷ 该值 = **安培**（口径同电压）。
     /// batt_power_w 按安培 × 伏特得瓦——口径必须与本注释一致。
-    #[serde(default = "crate::utils::default_unit_divisor", alias = "CurrentDivisor")]
+    #[serde(
+        default = "crate::utils::default_unit_divisor",
+        alias = "CurrentDivisor"
+    )]
     pub current_divisor: f32,
 
     /// 「不改」开关（meta.yaml 可选字段 `nofix`，默认 false，默认不写进配置）：
@@ -159,7 +165,7 @@ pub struct Meta {
     pub nofix: bool,
 }
 
-// Meta 缺省值：config.yaml 省略该字段时回退到此处
+// Meta 缺省值：meta.yaml 省略该字段时回退到此处
 fn default_loglevel() -> String {
     "INFO".to_string()
 }
@@ -185,6 +191,13 @@ pub struct CpuLoadGovernorConfig {
     /// 升频平滑系数：每 tick 目标性能只逼近该比例，越大响应越快，越小越省电
     #[serde(default = "d_clg_smooth_up")]
     pub smoothing_up: f32,
+    /// 决策负载平滑（EMA 系数，1.0=关闭，语义同 tuned 的 util_smoothing）：抖动负载下
+    /// target_perf 每 tick 大幅摆动 → 决策方向反复翻转、scaling_max_freq 高频改写
+    /// （2026-09-22 8550 QQ 场景日志回放：大核 2048 tick 方向反转 458 次；α=0.5
+    /// 后反转 194 次、写频降约三成）。日常/省电档建议 0.5，性能档保持 1.0。
+    /// 注意：0 = 负载冻结在首个采样值、决策不再跟随负载，勿设 0。
+    #[serde(default = "d_clg_util_smooth")]
+    pub util_smoothing: f32,
     /// 降频速率限制：必须连续满足 down_wait >= 该 tick 数才执行一次降频。
     /// 降频本身为“直接降频”一步到位（不做平滑渐变），该值仅作防抖。
     #[serde(default = "d_clg_down_rate")]
@@ -243,7 +256,7 @@ pub struct CpuLoadGovernorConfig {
     pub touch_boost_tiers: u32,
 }
 
-// CLG 各参数缺省值：config.yaml 省略字段时回退到此处（与 normalize 的兜底默认一致）
+// CLG 各参数缺省值：feature.yaml 省略字段时回退到此处（与 normalize 的兜底默认一致）
 fn d_clg_up_thresh() -> f32 {
     0.80
 }
@@ -252,6 +265,9 @@ fn d_clg_down_thresh() -> f32 {
 }
 fn d_clg_smooth_up() -> f32 {
     0.60
+}
+fn d_clg_util_smooth() -> f32 {
+    1.0
 }
 fn d_clg_down_rate() -> u32 {
     3
@@ -346,6 +362,7 @@ impl Default for CpuLoadGovernorConfig {
             up_threshold: d_clg_up_thresh(),
             down_threshold: d_clg_down_thresh(),
             smoothing_up: d_clg_smooth_up(),
+            util_smoothing: d_clg_util_smooth(),
             down_rate_limit_ticks: d_clg_down_rate(),
             up_rate_limit_ticks: d_clg_up_rate(),
             headroom_factor: d_clg_headroom(),
@@ -382,6 +399,10 @@ impl CpuLoadGovernorConfig {
         if !self.smoothing_up.is_finite() {
             self.smoothing_up = d_clg_smooth_up();
         }
+        if !self.util_smoothing.is_finite() {
+            self.util_smoothing = d_clg_util_smooth();
+        }
+        self.util_smoothing = self.util_smoothing.clamp(0.0, 1.0);
         if !self.headroom_factor.is_finite() {
             self.headroom_factor = d_clg_headroom();
         }
@@ -490,7 +511,7 @@ impl CpuLoadGovernorConfig {
 
 // [mode_io]
 // 核心模式与杂项配置
-/// 单一性能模式的配置集合（config.yaml 中 reduce / default / boost / vector 之一）
+/// 单一性能模式的配置集合（feature.yaml 中 reduce / default / boost / vector 之一）
 #[derive(Debug, Deserialize, Default, Clone)]
 pub struct Mode {
     /// 该模式下的 CLG 调频参数
@@ -498,7 +519,7 @@ pub struct Mode {
     pub cpu_load_governor: CpuLoadGovernorConfig,
 }
 
-/// IO 优化段（对应 config.yaml `IO_Settings`），值均为写入 /sys/block/*/queue 的字符串
+/// IO 优化段（对应 feature.yaml `IO_Settings`），值均为写入 /sys/block/*/queue 的字符串
 #[derive(Debug, Deserialize, Clone)]
 pub struct IOSettings {
     /// I/O 调度器名（如 none / mq-deadline / cfq），空字符串则跳过不写
@@ -537,7 +558,7 @@ fn default_iostats() -> String {
     "0".to_string()
 }
 
-/// cpuidle 段（对应 config.yaml `CpuIdle`）
+/// cpuidle 段（对应 feature.yaml `CpuIdle`）
 #[derive(Debug, Deserialize, Default)]
 // [toggles]
 #[serde(rename_all = "snake_case")]
@@ -546,7 +567,7 @@ pub struct CpuIdle {
     pub current_governor: String,
 }
 
-/// 功能总开关段（对应 config.yaml `Function`）
+/// 功能总开关段（对应 feature.yaml `Function`）
 #[derive(Debug, Deserialize, Default)]
 pub struct FunctionToggles {
     /// 是否应用 cpuidle governor 切换
@@ -782,7 +803,7 @@ impl SpecialTunedConfig {
 // [thermal_config]
 // 热保护配置
 
-/// 热保护配置（config.yaml `Thermal` 段）。
+/// 热保护配置（feature.yaml `Thermal` 段）。
 ///
 /// 双温度源取较小值：
 /// - 电池温度是主参考——手机壳体发热由电池主导，温升慢但持续，不像 CPU 瞬间飙高又回落
@@ -827,7 +848,7 @@ pub struct ThermalGuardConfig {
     pub hysteresis_c: f32,
 }
 
-// Thermal 缺省值：config.yaml 省略该段时回退到此处
+// Thermal 缺省值：feature.yaml 省略该段时回退到此处
 fn d_batt_soft_temp() -> f32 {
     41.0
 }
@@ -926,7 +947,7 @@ impl ThermalGuardConfig {
 // [affinity_config]
 // CPU 亲和 / core_ctl 配置
 
-/// CPU 亲和与线程迁移配置（config.yaml `Affinity` 段）。
+/// CPU 亲和与线程迁移配置（feature.yaml `Affinity` 段）。
 /// boost 类模式（boost/vector/特调）下由 AffinityManager 应用：
 /// top-app/foreground cpuset 收窄到大核+超大核、后台分组压小核、
 /// 可选 uclamp.min 抬前台利用率下限、可选前台线程 sched_setaffinity 迁移。
@@ -991,7 +1012,7 @@ impl AffinityConfig {
     }
 }
 
-/// core_ctl（厂商核心在线控制器）接管配置（config.yaml `CoreCtl` 段）。
+/// core_ctl（厂商核心在线控制器）接管配置（feature.yaml `CoreCtl` 段）。
 /// boost 模式下把各 cluster 的 min_cpus 抬到全组常在线，防厂商热插拔与
 /// ChiRi 调频打架；退出 boost 恢复快照。仅动 min_cpus。
 // [corectl_config]
@@ -1138,7 +1159,7 @@ pub struct Config {
     pub powerbase: PowerBaseConfig,
     /// 息屏场景模式（scenemode）：屏幕熄灭超过 `scene_mode_delay_secs` 秒后切换到的
     /// 低功耗配置（压低频率上限、禁止主动升频），亮屏后恢复原模式。
-    /// 未定义时回退 CLG 默认参数（兜底，通常 8550 config.yaml 会显式配置）。
+    /// 未定义时回退 CLG 默认参数（兜底，通常 8550 feature.yaml 会显式配置）。
     #[serde(default)]
     pub scenemode: Mode,
     /// 息屏进入 scenemode 的延迟（秒）：默认 300s（5 分钟），YAML 可覆盖
@@ -1261,7 +1282,10 @@ impl Config {
                     if m != "akmode" && !self.tuned_profiles.contains_key(&m) {
                         log::warn!(
                             "{}",
-                            t_with_args("tuned-profile-missing", &fluent_args!("mode" => m.clone()))
+                            t_with_args(
+                                "tuned-profile-missing",
+                                &fluent_args!("mode" => m.clone())
+                            )
                         );
                     }
                 }
@@ -1287,7 +1311,7 @@ impl Config {
     }
 
     /// 合并嵌入的 scenemode 配置。只反序列化 scenemode 段（先解析成 Value 再提取）：
-    /// 段缺失时保持 config.yaml 已配置的值，而不是用默认值覆盖。
+    /// 段缺失时保持 feature.yaml 已配置的值，而不是用默认值覆盖。
     fn merge_scenemode(&mut self) {
         let scene_value = match serde_yaml::from_str::<serde_yaml::Value>(
             crate::common::embedded_scenemode_str(),

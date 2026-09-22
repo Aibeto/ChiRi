@@ -46,7 +46,7 @@ pub static CPU_HOTPLUG_DIRTY: AtomicBool = AtomicBool::new(false);
 
 // [start]
 /// `ak_active` 为特调（akmode）激活共享标志：cpu_monitor 据此在常规与 40ms 采样间切换。
-/// `sample_ms_normal` 为常规采样间隔（由 main.rs 按 SoC 传入：ChiRi 160ms / Yumi 200ms）。
+/// `sample_ms_normal` 为常规采样间隔（由 main.rs 按 SoC 传入：ChiRi 160ms / 非 ChiRi 200ms）。
 /// `fas_active` 为 FAS 前台激活共享标志：fps_monitor 据此门控 eBPF 探针加载与
 /// uprobe 挂载（FAS 未激活前线程零开销待机，反偷跑）。
 pub fn start_monitor(
@@ -156,8 +156,8 @@ pub fn start_monitor(
     // [ebpf]
     // 6. 启动 eBPF FPS 监控线程 (带有独立的 Tokio 运行时)
     //    FAS 帧事件源：FPS 帧监控仅服务于 FAS 调频，仅 ChiRi 且 FAS 配置可用时启动
-    //    （FpsManager 空 uprobe attach + RingBuf 轮询对 Yumi 设备是纯开销），
-    //    Yumi 设备零开销。PID 来源复用上方 pid_watcher 的共享广播（rx_pid_cpu clone）。
+    //    （FpsManager 空 uprobe attach + RingBuf 轮询是纯开销），非 ChiRi 零开销。
+    //    PID 来源复用上方 pid_watcher 的共享广播（rx_pid_cpu clone）。
     //    反偷跑门控：FasManager 激活 FAS 前线程以 1s 周期空转等待
     //    fas_active 置位——tokio runtime / eBPF 加载 / uprobe 挂载全部推迟到
     //    首个 FAS 应用进前台时才发生；非 FAS 会话（桌面/普通应用）全程零开销。
@@ -217,7 +217,7 @@ pub fn start_monitor(
 
     // 7.5 ChiRi 专属遥测线程：1s 轮询 PSI / GPU busy% / 电池电流电压，
     //     写入进程级共享原子量（telemetry()）供 chiri 调度层消费与落盘。
-    //     仅 ChiRi SoC 启动，Yumi 设备零开销。
+    //     仅 ChiRi SoC 启动，非 ChiRi 零开销。
     if crate::common::is_chiri_soc() {
         log::debug!("{}", t("monitor-thread-start-telemetry"));
         spawn_guarded("telemetry_monitor", telemetry::telemetry_loop)?;

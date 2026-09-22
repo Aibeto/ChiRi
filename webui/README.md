@@ -70,7 +70,7 @@ npm test             # vitest
 URL 参数可切换形态，便于走查空态 / 错误态：
 
 ```
-?soc=chiri|yumi        设备形态（影响白名单与 status.csv 是否存在）
+?soc=chiri             设备形态（影响白名单与 status.csv 是否存在）
 ?state=normal|empty|error   正常 / 守护进程从未启动 / 读取真实失败
 ?daemon=running|stopped     存活探测结果
 ```

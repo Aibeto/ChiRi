@@ -4,7 +4,6 @@
 # 调度行为；本文件是启动时复制出的对外展示副本（common::sync_rules_snapshot）。
 
 # [global-switches]
-yumi_scheduler: true
 dynamic_enabled: true
 global_mode: "default"
 

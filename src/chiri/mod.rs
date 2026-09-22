@@ -1,7 +1,6 @@
 //! mod.rs: [consts] [thermal] [policies] [affinity] [threads] [config_watcher] [ipc_main] [ipc_state] [evt_loop] [evt_screen] [evt_mode] [evt_pkg_switch] [evt_load] [evt_frame] [evt_reload] [evt_bpf] [panic_recovery]
 
 use anyhow::Result;
-use std::fs;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock, mpsc};
 use std::thread;
@@ -242,12 +241,8 @@ pub fn get_cpu_policies() -> Vec<CpuPolicy> {
 /// `cur_freq_khz`/`max_freq_khz`（调度器决策值）互补：那两列是「我们写了多少」，
 /// 这里是「内核现在实际是多少」。
 pub fn cpu_freq_snapshot() -> (String, String, String, String) {
-    let (mut cur, mut max, mut min, mut gov) = (
-        String::new(),
-        String::new(),
-        String::new(),
-        String::new(),
-    );
+    let (mut cur, mut max, mut min, mut gov) =
+        (String::new(), String::new(), String::new(), String::new());
     for p in get_cpu_policies() {
         let base = format!("/sys/devices/system/cpu/cpufreq/policy{}", p.id);
         let read = |f: &str| -> String {
@@ -312,62 +307,6 @@ fn read_boost_frequencies(pid: i32) -> Vec<u32> {
         .split_whitespace()
         .filter_map(|s| s.parse().ok())
         .collect()
-}
-
-/// 通过 sysfs 探测指定 policy 的 capacity 值
-/// 仅供 FAS 的 capacity 权重计算使用，FAS 禁用期间暂无调用，恢复时启用。
-#[allow(dead_code)]
-pub(super) fn probe_policy_capacity(policy_id: i32) -> Option<u32> {
-    let related_str = fs::read_to_string(format!(
-        "/sys/devices/system/cpu/cpufreq/policy{}/related_cpus",
-        policy_id
-    ))
-    .or_else(|_| {
-        fs::read_to_string(format!(
-            "/sys/devices/system/cpu/cpufreq/policy{}/affected_cpus",
-            policy_id
-        ))
-    })
-    .ok()?;
-    let first_cpu: u32 = related_str.split_whitespace().next()?.parse().ok()?;
-    fs::read_to_string(format!(
-        "/sys/devices/system/cpu/cpu{}/cpu_capacity",
-        first_cpu
-    ))
-    .ok()?
-    .trim()
-    .parse::<u32>()
-    .ok()
-}
-
-/// 根据 CPU capacity 自动计算每个 cluster 的权重
-/// 仅供 FAS 使用，FAS 禁用期间暂无调用，恢复时启用。
-#[allow(dead_code)]
-pub(super) fn auto_compute_capacity_weights(policies: &[CpuPolicy]) -> Option<Vec<(i32, f32)>> {
-    let caps: Vec<(i32, u32)> = policies
-        .iter()
-        .filter(|p| p.id != -1)
-        .filter_map(|p| probe_policy_capacity(p.id).map(|c| (p.id, c)))
-        .collect();
-    if caps.is_empty() || caps.iter().any(|&(_, c)| c == 0) {
-        return None;
-    }
-    let min_cap = caps.iter().map(|&(_, c)| c).min().unwrap() as f32;
-    Some(
-        caps.iter()
-            .map(|&(pid, cap)| {
-                let r = cap as f32 / min_cap;
-                (
-                    pid,
-                    if r <= 1.01 {
-                        1.0
-                    } else {
-                        1.0 + (r - 1.0).sqrt()
-                    },
-                )
-            })
-            .collect(),
-    )
 }
 
 /// 按当前模式判定是否为 boost 类模式（亲和收窄/core_ctl 保大核的判定口径）：
@@ -647,8 +586,8 @@ pub fn start_scheduler_thread(
     let sys_path_exist = Arc::new(utils::SysPathExist::new());
     // 触摸事件通道（事件驱动）：触摸检测线程发送触摸事件，scheduler_ipc 即时处理并触发大核升频
     let (touch_tx, touch_rx) = mpsc::sync_channel::<()>(8);
-    // config.yaml 热重载联动标志：config_watcher 成功重载后置位，scheduler_ipc 轮询消费。
-    // 修复此前「config.yaml 调参要等下次 ModeChange/规则重载才应用到运行中的 CLG/akmode」的
+    // feature/meta 热重载联动标志：config_watcher 成功重载后置位，scheduler_ipc 轮询消费。
+    // 修复此前「feature.yaml 调参要等下次 ModeChange/规则重载才应用到运行中的 CLG/akmode」的
     // 热更新断链——现在调参保存后 100ms 内即按当前模式重载调度器配置。
     let config_dirty = Arc::new(AtomicBool::new(false));
 
@@ -708,7 +647,7 @@ pub fn start_scheduler_thread(
         .name("config_watcher".to_string())
         .spawn(move || {
             // 监听生效配置的父目录而非固定的 config/ 根目录：ChiRi 机型的生效配置在
-            // 处理器子目录（如 config/8550/config.yaml），inotify 目录监听不递归，
+            // 处理器子目录（如 config/8550/feature.yaml），inotify 目录监听不递归，
             // 监听根目录收不到子目录内文件的 CLOSE_WRITE/MOVED_TO——导致 8550/8475/8998
             // 上 WebUI 改 meta.loglevel/language 的热重载完全失效。
             let watch_dir = config_path
@@ -1236,7 +1175,7 @@ pub fn start_scheduler_thread(
                     );
                 }
 
-                // config.yaml 热重载联动：config_watcher 成功重载后置位。
+                // feature/meta 热重载联动：config_watcher 成功重载后置位。
                 // 与 ConfigReload（rules.yaml）同口径：亮屏时按当前模式把新配置应用到
                 // 运行中的 CLG/akmode，并刷新亲和/core_ctl（息屏不覆盖 Doze，亮屏事件补上）。
                 // 停摆期间配置照重载（meta 的日志开关等仍要生效），只是不下发到调度器

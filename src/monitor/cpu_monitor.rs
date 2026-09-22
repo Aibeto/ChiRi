@@ -15,13 +15,13 @@ use crate::fluent_args;
 use crate::i18n::{t, t_with_args};
 
 // [consts]
-/// 常规采样周期由调用方（main.rs 按 SoC）传入：ChiRi 160ms / Yumi 200ms。
+/// 常规采样周期由调用方（main.rs 按 SoC）传入：ChiRi 160ms / 非 ChiRi 200ms。
 /// 见 `start_cpu_loop` 的 `sample_ms_normal` 参数。
 /// 特调采样周期（ms）：明日方舟特调激活时缩短到 40ms，保证特调档位判定的响应度
 const SAMPLE_MS_TUNED: u64 = 40;
 /// 前台应用 CPU 利用率计算开关：仅 FAS（帧感知调度）消费 foreground_max_util。
-/// FAS 禁用（false）期间两套调度器均忽略该字段，跳过计算省掉每 tick 的 TGID/线程级开销；
-/// start_cpu_loop 入口按「ChiRi 且 FAS 配置可用」动态置位，Yumi 设备恒为 false（行为零变化）。
+/// FAS 禁用（false）期间调度器忽略该字段，跳过计算省掉每 tick 的 TGID/线程级开销；
+/// start_cpu_loop 入口按「ChiRi 且 FAS 配置可用」动态置位，非 ChiRi 恒为 false。
 static FAS_FG_UTIL_ENABLED: AtomicBool = AtomicBool::new(false);
 
 // [core-state]
@@ -97,15 +97,15 @@ pub async fn start_cpu_loop(
     program.attach("sched", "sched_switch")?;
     info!("{}", t("cpu-monitor-started"));
 
-    // FAS 恢复前台利用率计算：仅 ChiRi 且 FAS 配置可用时置位（Yumi 设备保持 false，
-    // 两套调度器对该字段均忽略，行为零变化）
+    // FAS 恢复前台利用率计算：仅 ChiRi 且 FAS 配置可用时置位（非 ChiRi 保持 false，
+    // 调度器对该字段忽略）
     if crate::common::is_chiri_soc() && crate::common::fas_available() {
         FAS_FG_UTIL_ENABLED.store(true, Ordering::Relaxed);
     }
 
     // ChiRi 专属：附加可选扩展探针（唤醒/线程迁移/频率切换计数，遥测观测用）。
     // 内核缺少对应 tracepoint 时挂载失败，warn 一次后跳过，不影响主探针；
-    // 仅 ChiRi SoC 尝试挂载，Yumi 设备保持原有单探针行为不变。
+    // 仅 ChiRi SoC 尝试挂载。
     let chiri_telemetry = crate::common::is_chiri_soc();
     if chiri_telemetry {
         for (name, cat, tp) in [
@@ -494,7 +494,7 @@ pub async fn start_cpu_loop(
 
             // [interval]
             // 按特调状态动态切换采样周期：akmode 激活时 40ms 快速跟随负载，
-            // 其余用传入的常规间隔（ChiRi 160ms / Yumi 200ms）。
+            // 其余用传入的常规间隔（ChiRi 160ms / 非 ChiRi 200ms）。
             // interval 周期固定，切换时按新周期重建（相位以本轮处理完成为基准，采样点间隔精确）。
             let target = if ak_active.load(Ordering::Relaxed) {
                 std::time::Duration::from_millis(SAMPLE_MS_TUNED)

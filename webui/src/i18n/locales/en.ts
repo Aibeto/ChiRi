@@ -46,7 +46,6 @@ export default {
   'overview.config.invalid': 'Config does not satisfy daemon validation',
   'overview.device': 'Device match',
   'overview.device.chiri': 'ChiRi',
-  'overview.device.yumi': 'Generic SoC (yumi)',
   'overview.device.unknown': 'Undetermined',
   'overview.power.ref': 'Reference discharge power',
   'overview.power.avg': 'Average discharge power',
@@ -219,7 +218,6 @@ export default {
   'apps.tag.fas': 'FAS rule count',
   'apps.tag.mode': 'Mode',
   'apps.rules': 'Global rules',
-  'apps.rules.scheduler': 'Scheduler status',
   'apps.rules.dynamic': 'Dynamic mode',
   'apps.rules.globalMode': 'Global mode',
   'apps.rules.ignored': 'Ignored packages',
@@ -228,7 +226,6 @@ export default {
   'apps.empty.detail': 'Tap Rescan to fetch the app list',
   'apps.failed': 'Failed to read the app list',
   'apps.scanned': 'Scan complete',
-  'apps.notApplicableTag': 'No tuned or FAS whitelist on this device',
 
   'logs.title': 'Logs',
   'logs.source': 'Source',

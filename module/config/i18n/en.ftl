@@ -19,6 +19,7 @@ main-chdir = [Main] Changed working directory to: { $dir }
 main-module-root = [Main] Module root: { $path }
 main-config-loaded = [Main] Config loaded: { $path } (loglevel={ $loglevel }, language={ $language })
 main-chiri-scheduler-selected = [Main] Specific SoC detected, enabling Chiri scheduler
+main-no-chiri-scheduler = [Main] SoC not in Chiri support list, CPU is not taken over (monitor/WebUI/logging only)
 main-special-tuned-exported = [Main] exported { $count } internal special-tuned whitelist entries to special_tuned.yaml
 main-log-archive-submitted = [Main] previous logs archived, packing in background to logd/{ $zip }
 main-devimp-archive-submitted = [Main] previous devimp diagnostics archived, packing in background to logd/{ $zip }
@@ -343,4 +344,4 @@ telemetry-map-missing = [CPU Monitor] map { $name } missing from eBPF binary (bi
 telemetry-summary = [Telemetry] PSI cpu={ $cpu }% io={ $io }% mem={ $mem }% | GPU={ $gpu }% | wakeups={ $wakeups } migrations={ $migrations } freq={ $freq } | battery { $power }W
 
 # --- Config hot-reload sync ---
-scheduler-config-dirty-reload = [Scheduler] config.yaml hot reload synced to scheduler (mode={ $mode })
+scheduler-config-dirty-reload = [Scheduler] feature.yaml hot reload synced to scheduler (mode={ $mode })

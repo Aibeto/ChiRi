@@ -121,11 +121,11 @@ describe('status.csv 解析', () => {
 describe('daemon.log 解析', () => {
   const text = [
     '12:00:00 被截断的残行',
-    '[2026-09-13 12:00:00] [INFO] [yumi::main] 启动完成',
-    '[2026-09-13 12:00:01] [ERROR] [yumi::chiri] 出错了',
+    '[2026-09-13 12:00:00] [INFO] [chiri::main] 启动完成',
+    '[2026-09-13 12:00:01] [ERROR] [chiri::mod] 出错了',
     '    详细堆栈续行',
-    '[2026-09-13 12:00:02] [DEBUG] [yumi::logger] tick',
-    '[2026-09-13 12:00:03] [WEIRD] [yumi::x] 未知级别'
+    '[2026-09-13 12:00:02] [DEBUG] [chiri::logger] tick',
+    '[2026-09-13 12:00:03] [WEIRD] [chiri::x] 未知级别'
   ].join('\n')
 
   it('解析时间/级别/模块/消息，并丢弃窗口开头的残行', () => {
@@ -133,7 +133,7 @@ describe('daemon.log 解析', () => {
     expect(lines).toHaveLength(4)
     expect(lines[0].time).toBe('09-13 12:00:00')
     expect(lines[0].level).toBe('INFO')
-    expect(lines[0].module).toBe('yumi::main')
+    expect(lines[0].module).toBe('chiri::main')
   })
 
   it('多行消息并入上一条', () => {

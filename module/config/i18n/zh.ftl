@@ -18,6 +18,7 @@ main-chdir = [Main] 切换工作目录到: { $dir }
 main-module-root = [Main] 模块根目录: { $path }
 main-config-loaded = [Main] 已读取配置: { $path } (loglevel={ $loglevel }, language={ $language })
 main-chiri-scheduler-selected = [Main] 检测到特定处理器，已启用 Chiri 专用调度器
+main-no-chiri-scheduler = [Main] 本处理器不在 Chiri 支持列表内，调度不接管 CPU（仅监控/WebUI/日志）
 main-special-tuned-exported = [Main] 已导出 { $count } 个内部特调白名单条目到 special_tuned.yaml
 main-log-archive-submitted = [Main] 上一轮日志已归档，后台打包至 logd/{ $zip }
 main-devimp-archive-submitted = [Main] 上一轮 devimp 诊断日志已归档，后台打包至 logd/{ $zip }
@@ -342,4 +343,4 @@ telemetry-map-missing = [CPU Monitor] eBPF 产物中缺少映射 { $name }（产
 telemetry-summary = [Telemetry] PSI cpu={ $cpu }% io={ $io }% mem={ $mem }% | GPU={ $gpu }% | 唤醒={ $wakeups } 迁移={ $migrations } 调频={ $freq } | 电池 { $power }W
 
 # --- Config 热重载联动 ---
-scheduler-config-dirty-reload = [Scheduler] config.yaml 热重载已同步到调度器 (mode={ $mode })
+scheduler-config-dirty-reload = [Scheduler] feature.yaml 热重载已同步到调度器 (mode={ $mode })

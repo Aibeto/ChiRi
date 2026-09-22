@@ -6,7 +6,7 @@
 
 - 保持 KernelSU/Magisk 模块规范兼容（`module/` 目录结构、`service.sh` 启动流程）。
 
-- Yumi 逻辑冻结：不修改 `src/scheduler/` 与默认 `module/config/config.yaml` 的调度逻辑与参数行为（Yumi 即将废弃）；确需修复时先与 ChiRi 对齐、最小改动。共享层（`src/monitor/`、`main.rs`）如需为 ChiRi 适配，必须保持 Yumi 运行时行为不变（常规采样 200ms 原值勿改）。
+- Yumi 调度兜底已删除（2026-09-22，用户指令）：`src/scheduler/` 只剩 FAS 引擎与 policy 探测工具（`config.rs` / `cpu_load_governor.rs` / `scheduler.rs` / mod.rs 的 thread/cfgwatch/ipc 接线均已移除），非 ChiRi SoC 不接管 CPU、只跑监控/WebUI/日志。共享层（`src/monitor/`、`main.rs`）的 `is_chiri_soc()` 分支保留作「仅监控模式」（非 ChiRi 采样 200ms 口径不变）。`yumi-ebpf`、`YUMI_SKIP_EBPF`、设备形态 `'yumi'` 是刻意保留名，勿当残留清理。
 
 - 不允许在未经许可的情况下主动创建git提交
 
@@ -42,3 +42,4 @@
 
 - **整文件覆盖（Write）前必须确认目标不是已跟踪文件**：本轮为嵌 WebUI 资产直接整文件重写了已有 `build.rs`，丢掉 eBPF 构建与 `assert_required_configs` 断言——cargo check 静默通过（ebpf 占位产物已存在、断言消失不会报错），靠 diff 审查才抓回。写整文件前先 `git status` 该路径 / 读原文件；向既有文件加功能一律局部 Edit。cargo/类型检查通过 ≠ 构建脚本语义完整。
 
+- **「field is never read」当 bug 查，别当冗余直接删（2026-09-22）**：`fast.rs` 的 `LockedPolicy.target` 报 never read，真相是 `tick()` 防篡改重写误用了 `hw_max`——frozen（锁最低频）每 5 秒被拉回最高频，功能等于没有。之前的审查两轮都只看到字段存在就放行了。字段「写了没人读」和「读的地方读错了对象」在警告里长得一样：先找这个字段的赋值语义本该被谁消费、那个消费方实际读的是不是另一个字段，再决定是删字段还是修消费方。

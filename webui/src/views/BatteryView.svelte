@@ -39,7 +39,7 @@
   </header>
 
   {#if !app.isChiri}
-    <!-- 遥测线程只在 ChiRi SoC 上启动：这些开关在 Yumi 上没有消费方，如实说明 -->
+    <!-- 遥测线程只在 ChiRi SoC 上启动：这些开关在非 ChiRi 上没有消费方，如实说明 -->
     <StateBox kind="missing" message={t('state.notApplicable')} detail={t('state.chiriOnly')} />
   {/if}
 

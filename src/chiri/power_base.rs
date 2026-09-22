@@ -42,7 +42,6 @@ struct PolicySnapshot {
 
 /// 单个 policy 的运行状态
 struct BasePolicy {
-    policy_id: i32,
     /// 该 policy 覆盖的 CPU（用于取利用率）
     cpus: Vec<usize>,
     hw_min: u32,
@@ -127,11 +126,22 @@ impl PowerBase {
 
         for policy in &policies {
             let pid = policy.id;
-            let gov_path = format!("/sys/devices/system/cpu/cpufreq/policy{}/scaling_governor", pid);
-            let min_path = format!("/sys/devices/system/cpu/cpufreq/policy{}/scaling_min_freq", pid);
-            let max_path = format!("/sys/devices/system/cpu/cpufreq/policy{}/scaling_max_freq", pid);
-            let freq_path =
-                format!("/sys/devices/system/cpu/cpufreq/policy{}/scaling_available_frequencies", pid);
+            let gov_path = format!(
+                "/sys/devices/system/cpu/cpufreq/policy{}/scaling_governor",
+                pid
+            );
+            let min_path = format!(
+                "/sys/devices/system/cpu/cpufreq/policy{}/scaling_min_freq",
+                pid
+            );
+            let max_path = format!(
+                "/sys/devices/system/cpu/cpufreq/policy{}/scaling_max_freq",
+                pid
+            );
+            let freq_path = format!(
+                "/sys/devices/system/cpu/cpufreq/policy{}/scaling_available_frequencies",
+                pid
+            );
 
             let mut freqs: Vec<u32> = fs::read_to_string(&freq_path)
                 .unwrap_or_default()
@@ -198,7 +208,6 @@ impl PowerBase {
             }
 
             self.policies.push(BasePolicy {
-                policy_id: pid,
                 cpus,
                 hw_min,
                 hw_max,
@@ -313,8 +322,6 @@ impl PowerBase {
         let since = *self.gate.overload_since.get_or_insert(now);
         now.duration_since(since).as_millis() as u64 >= self.cfg.overload_hold_ms
     }
-
-
 
     // [release]
     /// 释放接管：恢复各 policy 的 governor / min / max

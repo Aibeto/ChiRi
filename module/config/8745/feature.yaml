@@ -1,5 +1,5 @@
-# yumi 配置文件，不能动
-# config.yaml: [meta] [function] [io-settings] [cpu-idle] [reduce] [default] [boost] [vector]
+# 8745 调优配置（SoC 覆盖层，整份盖掉根 feature.yaml）
+# feature.yaml: [function] [io-settings] [cpu-idle] [reduce] [default] [boost] [vector]（meta 在 meta.yaml）
 
 # [function]
 # 主要功能开关
@@ -28,7 +28,7 @@ reduce:
     up_threshold: 0.85
     down_threshold: 0.60
     smoothing_up: 0.40
-    smoothing_down: 0.50
+    util_smoothing: 0.5
     down_rate_limit_ticks: 2
     up_rate_limit_ticks: 2
     headroom_factor: 1.10
@@ -38,9 +38,7 @@ reduce:
     perf_init: 0.30
     up_jump_threshold: 0.35
     slow_up_scale: 0.02
-    slow_down_scale: 0.5
     down_fast_threshold: 0.10
-    down_fast_mult: 2.5
     spike_jump_threshold: 0.35
     spike_decay: 0.30
 
@@ -51,7 +49,10 @@ default:
     up_threshold: 0.80
     down_threshold: 0.50
     smoothing_up: 0.60
-    smoothing_down: 0.30
+    # 决策负载 EMA（1.0=关闭）：滤掉抖动负载的单 tick 摆动，抑制决策方向反复翻转
+    # 与 scaling_max_freq 高频改写（2026-09-22 8550 QQ 日志回放：反转降约五成）。
+    # 性能档 boost 保持 1.0 不开（响应优先）。
+    util_smoothing: 0.5
     down_rate_limit_ticks: 3
     up_rate_limit_ticks: 2
     headroom_factor: 1.25
@@ -66,9 +67,7 @@ default:
     perf_init: 0.50
     up_jump_threshold: 0.35
     slow_up_scale: 0.02
-    slow_down_scale: 0.5
     down_fast_threshold: 0.10
-    down_fast_mult: 2.5
     spike_jump_threshold: 0.35
     spike_decay: 0.30
 
@@ -80,7 +79,6 @@ boost:
     up_threshold: 0.65
     down_threshold: 0.40
     smoothing_up: 0.80
-    smoothing_down: 0.20
     down_rate_limit_ticks: 5
     up_rate_limit_ticks: 1
     headroom_factor: 1.40
@@ -90,9 +88,7 @@ boost:
     perf_init: 0.60
     up_jump_threshold: 0.35
     slow_up_scale: 0.02
-    slow_down_scale: 0.5
     down_fast_threshold: 0.10
-    down_fast_mult: 2.5
     spike_jump_threshold: 0.35
     spike_decay: 0.30
 
@@ -104,7 +100,6 @@ vector:
     up_threshold: 0.01
     down_threshold: 0.01
     smoothing_up: 1.0
-    smoothing_down: 0.01
     down_rate_limit_ticks: 10
     up_rate_limit_ticks: 1
     headroom_factor: 2.0
@@ -114,9 +109,7 @@ vector:
     perf_init: 1.0
     up_jump_threshold: 0.35
     slow_up_scale: 0.02
-    slow_down_scale: 0.5
     down_fast_threshold: 0.10
-    down_fast_mult: 2.5
     spike_jump_threshold: 0.35
     spike_decay: 0.30
 

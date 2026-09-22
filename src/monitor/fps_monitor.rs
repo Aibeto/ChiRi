@@ -22,7 +22,7 @@ use crate::common::DaemonEvent;
 use crate::fluent_args;
 use crate::i18n::{t, t_with_args};
 
-// [consts] 
+// [consts]
 
 /// uprobe 符号名（短签名）
 const SYMBOL_SHORT: &str = "_ZN7android7Surface11queueBufferEP19ANativeWindowBufferi";
@@ -42,7 +42,7 @@ const MIN_FRAME_NS: u64 = 1_000_000;
 const MAX_FRAME_NS: u64 = 200_000_000;
 const FRAMETIME_WINDOW: usize = 144;
 
-// [probe] 
+// [probe]
 // ProbeState：单个 PID 的帧统计
 
 struct ProbeState {
@@ -76,13 +76,9 @@ impl ProbeState {
         }
         self.last_ktime_ns = Some(ktime_ns);
     }
-
-    fn latest_frametime(&self) -> Option<Duration> {
-        self.frametimes.front().copied()
-    }
 }
 
-// [manager] 
+// [manager]
 // FpsManager：单 eBPF 实例，多 PID attach
 
 struct FpsManager {
@@ -237,18 +233,12 @@ impl FpsManager {
         out
     }
 
-    /// 当前 PID 的最新帧间隔
-    #[allow(dead_code)]
-    fn latest_frametime(&self) -> Option<Duration> {
-        self.states.get(&self.current_pid)?.latest_frametime()
-    }
-
     fn has_active_probe(&self) -> bool {
         self.current_pid > 0
     }
 }
 
-// [loop] 
+// [loop]
 // 主入口
 
 pub async fn start_fps_loop(

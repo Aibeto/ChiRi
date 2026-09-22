@@ -239,7 +239,7 @@
 
   {#if app.isChiri}
     <!-- 电池读数：二级页面入口（电流/电压/功率的来源、双电芯、单位换算、功耗口径）。
-        ChiRi 专属：遥测线程只在 ChiRi SoC 上启动，Yumi 上这些开关没有消费方 -->
+        ChiRi 专属：遥测线程只在 ChiRi SoC 上启动，非 ChiRi 上这些开关没有消费方 -->
     <Panel title={t('battery.title')} desc={t('battery.entry.hint')}>
       <div class="entry__row">
         <button

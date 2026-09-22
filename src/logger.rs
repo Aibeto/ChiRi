@@ -199,7 +199,7 @@ static LOG_RESTARTING: AtomicBool = AtomicBool::new(false);
 ///   在持锁状态下调用会对同一把非重入 Mutex 死锁（status/devimp 路径各自的
 ///   锁在调用前释放，append 路径见其函数内注释）。
 fn note_write(counter: &AtomicU64, dir: &str, bytes: u64) {
-    // 仅 Chiri 调度启用（Yumi 侧调度逻辑冻结，不做自动重启；devimp 本就不产生）
+    // 仅 Chiri 调度启用（非 ChiRi 无调度接管，不做自动重启；devimp 本就不产生）
     if !common::is_chiri_soc() {
         return;
     }
@@ -1284,7 +1284,7 @@ fn watchdog_pid() -> Option<i32> {
 /// 实例并行，devimp/status/daemon 日志各写两份。
 /// 看门狗 sh 以 `echo $$ > pidfile` 记录自身 PID，而 daemon 正是该 sh 的
 /// 前台子进程（service.sh/action.sh 的 "$DAEMON"），`getppid()` 即看门狗 PID。
-/// 由两套 scheduler_ipc 的 5s 周期块调用；文件存在时零开销直返。
+/// 由 chiri scheduler_ipc 的 5s 周期块调用；文件存在时零开销直返。
 pub fn ensure_watchdog_pid_file() {
     let root = common::get_module_root();
     let pid_path = root.join("logs/watchdog.pid");

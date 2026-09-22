@@ -24,7 +24,7 @@
 | `analyze/`                                 | ChiRi CSV 分析台                                                                                                                 |
 | `build.rs`、`xtask/`、`.github/workflows/` | 构建与 CI                                                                                                                        |
 
-`src/scheduler/` 下的 Yumi 调度相关代码不纳入范围：`cpu_load_governor.rs`、`scheduler/config.rs` 的 Yumi 分支、以及 `scheduler/mod.rs` 的 Yumi 接线。该部分在项目中处于备用回退状态，仅在需要对比时引用（例如其 `smoothing_down` 系列参数）。
+`src/scheduler/` 下的 Yumi 调度相关代码不纳入范围：`cpu_load_governor.rs`、`scheduler/config.rs` 的 Yumi 分支、以及 `scheduler/mod.rs` 的 Yumi 接线。（2026-09-22 更新：这部分已整体删除，`smoothing_down` 系列参数也已随之从 feature.yaml 移除；本文其余提及 Yumi 之处均为删除前的历史快照。）
 
 完整覆盖清单与未覆盖项的原因见 12.6 节。
 
