@@ -160,4 +160,4 @@ boost:
 # 8550 实测日常/视频放电功耗在 2~3W 区间，目标取 2.5W——低于它放宽升频，达到即守住。
 # 字段含义见根 config/feature.yaml 的同名段。
 powerbase:
-  target_power_w: 2.5
+  target_power_w: 2.0

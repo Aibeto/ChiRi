@@ -159,7 +159,7 @@ export default {
   'lab.subtitle': '实验性功能警告',
   'lab.notice.stability': '本页面功能高度不稳定，随时可能移除',
   'lab.notice.reboot': '建议在开发者指导下使用',
-  'config.powerbase': '涛声往复就已足够',
+  'config.powerbase': 'ChiRi PB',
   'config.powerbase.hint': '随我来吧对错是伪命题',
 
   'lab.notice.effects': '关闭实验室需要重启',
