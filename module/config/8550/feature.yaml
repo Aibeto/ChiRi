@@ -56,7 +56,10 @@ Thermal:
   # 安全阈值本身（batt_soft_temp_c / batt_hard_temp_c）不动。
   soft_perf_cap: 0.85
   hard_perf_cap: 0.40
-  free_above: 0.80
+  # 豁免档：热压制只落在 (soft_perf_cap, free_above) 区间，>= 豁免档不钳制。
+  # 必须 > soft_perf_cap（相等 = 压制带为空、软限档完全不生效）；
+  # 也不要贴 1.0（持续高负载要能平滑涨过豁免档拿全速）
+  free_above: 0.95
   hysteresis_c: 3
 
 # [sched]

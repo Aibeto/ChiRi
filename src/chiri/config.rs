@@ -958,10 +958,11 @@ impl ThermalGuardConfig {
         if self.hard_perf_cap > self.soft_perf_cap {
             self.hard_perf_cap = self.soft_perf_cap;
         }
-        // 豁免档低于软限压制值时压制会被完全绕过：豁免档至少抬到 soft_perf_cap
+        // 豁免档必须严格高于软限值，否则压制带 (soft_perf_cap, free_above) 为空、
+        // 软限档完全不生效：过低或相等都抬到软限 + 0.10
         self.free_above = self.free_above.clamp(0.0, 1.0);
-        if self.free_above < self.soft_perf_cap {
-            self.free_above = self.soft_perf_cap;
+        if self.free_above <= self.soft_perf_cap {
+            self.free_above = (self.soft_perf_cap + 0.10).min(1.0);
         }
         self.hysteresis_c = self.hysteresis_c.clamp(0.0, 20.0);
     }

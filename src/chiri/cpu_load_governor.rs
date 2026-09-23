@@ -482,14 +482,19 @@ impl CoreGroupWorker {
             .cluster
             .current_perf
             .clamp(self.cfg.perf_floor, self.cfg.perf_ceil);
-        // 热压制（带豁免带）：cap 由 scheduler_ipc 按电池/CPU 温度写入，允许击穿
-        // perf_floor（发热优先于保底性能）；>= 豁免档不钳制，保留到达最高频的能力
+        // 热压制（带豁免带）：cap 由 scheduler_ipc 按电池/CPU 温度写入。
+        // 只钳写频、不回写 current_perf：生效区间 (cap, free_above)，>= 豁免档
+        // 不钳制（保留到达最高频的能力）；decision 状态照常向 target 平滑，
+        // 持续高负载能平滑涨过豁免档拿到全速（内核温控兜底）。
+        // 回写 current_perf 会让状态卡死在 cap：升频步长够不到豁免档时永远被压回。
         let cap = f32::from_bits(self.thermal_cap.load(Ordering::Relaxed));
         let free_above = f32::from_bits(self.thermal_free_above.load(Ordering::Relaxed));
-        if self.cluster.current_perf < free_above {
-            self.cluster.current_perf = self.cluster.current_perf.min(cap);
-        }
-        let target_freq = self.cluster.find_nearest_freq(self.cluster.current_perf);
+        let eff_perf = if self.cluster.current_perf < free_above {
+            self.cluster.current_perf.min(cap)
+        } else {
+            self.cluster.current_perf
+        };
+        let target_freq = self.cluster.find_nearest_freq(eff_perf);
         self.cluster.write_freq(target_freq);
 
         // main_ tick 行：仅决策 tick（core_utils 非空）且开发记录开启时写

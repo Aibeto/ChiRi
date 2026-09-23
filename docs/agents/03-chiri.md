@@ -96,7 +96,7 @@ WebUI 侧：
 
 - 压制解除带斜坡（`THERMAL_UNPRESS_STEP=0.15`）：压制加深立即生效，解除方向每采样周期（2s）最多恢复 0.15，8s 级渐进；立即全量解除会让温度马上反弹再触发深压，重现振荡。
 
-- 压制带豁免档 `free_above`（默认 0.80，normalize 保证 >= soft_perf_cap）：Worker flush 中 `current_perf < free_above` 才 `min(cap)` 钳制（cap 允许击穿 perf_floor）。持续高负载经平滑抬升越过豁免档后不再回落钳制，任何温度下都能到达硬件最高频，过热兜底交给系统/内核温控；但压制意图保留：中低负载区间仍被压在 cap 以下，减少发热积累。
+- 压制带豁免档 `free_above`（8550 0.95 / 8475、8998 0.80；normalize 见下）：热压制只落在 `(soft_perf_cap, free_above)` 区间，Worker flush 中 `current_perf < free_above` 才 `min(cap)`，且**只钳写频、不回写 `current_perf`**（回写会让状态卡死在 cap：升频步长够不到豁免档时永远被压回，「持续高负载涨过豁免档」就不成立）。decision 状态照常向 target 平滑，持续高负载可平滑涨过豁免档拿全速，任何温度下都能到达硬件最高频，过热兜底交给系统/内核温控；但压制意图保留：中低负载区间仍被压在 cap 以下，减少发热积累。**豁免档必须严格大于 soft_perf_cap**（相等 = 压制带为空、软限档完全空转），normalize 对「过低或相等」统一抬到 `soft_perf_cap + 0.10`；也不要贴 1.0，否则持续高负载涨不过豁免档。热压制只作用于 CLG，tuned（playback/akmode）不参与（tick 的 cap 列为 `-`）。
 
 - scheduler_ipc 启动时探测一次传感器（CPU `find_cpu_temp_path()` 缺失打点 `clg-thermal-no-sensor` 静默降级），事件循环内每 2s（`THERMAL_CHECK_INTERVAL`）采样双温度，逐传感器三级判定（>= 硬限压 hard_cap（默认 0.40）；>= 软限压 soft_cap（默认 0.70）；回落到 软限-hysteresis 才解除；回滞带内压制中先退软限档防阶跃）后取两者较小值。cap 或豁免档变化时经 `cpu_governor.set_thermal_limits(cap, free_above)`（f32 bit pattern 存 `AtomicU32`，启动即同步一次豁免档）下发，debug 打点 `clg-thermal-cap`（含电池/CPU 温度，缺失显示 "-"）。
 

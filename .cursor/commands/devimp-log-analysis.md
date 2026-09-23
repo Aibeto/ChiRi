@@ -1,23 +1,19 @@
 ---
-name: devimp-log-analysis
-description: 解析与判定 ChiRi 设备的 devimp 日志包（devimpbin 下 logd_*.tar.gz），做功耗/调度回归分析、FAS 与热限频验证、场景画像、调参 A/B。触发词：devimp、日志包、logd_、功耗分析、FAS 验证、帧率档位、迁移率、热限频、场景特调评估。
+description: 解析与判定 ChiRi 设备的 devimp 日志包（devimpbin 下 logd_*.tar.gz），做功耗/调度回归分析、FAS 与热限频验证、场景画像、调参 A/B
+argument-hint: [日志包/解压目录，或要分析的问题]
 ---
 
-> **位置说明**（2026-09-23 二次修订）：本 skill **只在 `.agents/skills/devimp-log-analysis/` 维护**
-> —— Agent Skills 开放标准（agentskills.io）的通用目录，Cursor 与 CodeBuddy 均直接读取
-> （Cursor 官方识别 `.agents/skills/` 与 `.cursor/skills/`，故无需再维护 `.cursor/` 副本）。
-> **不建 `.codebuddy/skills/` 副本**（用户明确「不用在 CodeBuddy 再写一次 skill」），只改这里。
+> 维护位置：`.cursor/commands/devimp-log-analysis.md`（本文件，唯一副本）；聚合脚本在 `scripts/devimp-analyze.py`。
+> 由 skill 迁移而来（2026-09-23），`.agents/skills/devimp-log-analysis/` 已删除，勿再建 skill 副本。
 
-> 修订记录：v1（0923 初版）曾把 skill 放 `.cursor/skills/` 并当作正式位置，同日改为 `.agents/skills/` 为正式。
-> v2（2026-09-23，`logd_0923-020304` 实测后）：解压改到项目内；补 44 列包的 `ts` 无日期、
-> 主文件无 `tgtop`、**FAS 段无 tick**、`wakeups/migrations` = 2s 增量等口径。
-> v3（2026-09-23）：撤销 `.codebuddy/skills/` 镜像约定（只保留本目录）。
+本次用户输入：$ARGUMENTS
+（为空则先问用户：要分析哪个 logd 包（`devimpbin/` 下哪个 `logd_*.tar.gz` 或已解压目录）？要回答什么问题？）
 
 # devimp 日志包分析（ChiRi 专用）
 
 设备端 Magisk 模块在「导出日志」时打包 `logd_<MMDD-HHMMSS>.tar.gz`，内含
 `devimp_<包名>_<MMDD-HHMMSS>.log`、`status.csv`、`daemon.log`（可能还有内层 tar）。
-本 skill 固化的是已重复验证过的分析流程与**判读口径**——数字很容易读错，先读「判定要点」再下结论。
+本命令固化的是已重复验证过的分析流程与**判读口径**——数字很容易读错，先读「判定要点」再下结论。
 
 ## 一、五步流程
 
@@ -61,8 +57,8 @@ daemon 可能中途重启过（启动序列日志为界）→ 只取重启后的
 ### 4. 跑聚合脚本
 
 ```powershell
-python .agents\skills\devimp-log-analysis\scripts\analyze.py <解压目录> [--since MMDD-HHMMSS] [--min-n 30]
-# 脚本只此一份（无 .codebuddy 副本）；本机 python 3.14 可直接跑
+python scripts\devimp-analyze.py <解压目录> [--since MMDD-HHMMSS] [--min-n 30]
+# 脚本只此一份（scripts\devimp-analyze.py）；本机 python 3.14 可直接跑
 ```
 
 输出：按 `mode×package` 的 n / P_avg / p50 / p95 / battT / cpuT / cap / gpu / psi / mig
@@ -128,8 +124,8 @@ python .agents\skills\devimp-log-analysis\scripts\analyze.py <解压目录> [--s
   - 早期记录的「视频稳态 ≈300/s」只在**无弹幕/网页面板、无滚动**的纯视频稳态下出现；
     本次包内 `@S` 帧显示 `tv.danmaku.bili:web` 与 `surfaceflinger` 同时活跃 → 属 UI 量级。
     **判定异常前先确认是否有弹幕/网页/滚动**，禁止拿一个数跨场景下结论
-- `thermal_cap_pct`：对照 feature.yaml 的 `soft_perf_cap`（8550=0.85、8475/8998=0.70）；
-  `free_above` 决定 32.8℃~41℃（8550）间的渐进压制带；41℃ 触发、38℃ 解除（hysteresis 3）
+- `thermal_cap_pct`：对照 feature.yaml 的 `soft_perf_cap`（8550=0.85、8475/8998=0.70）；41℃ 触发、38℃ 解除（hysteresis 3）
+  - **`free_above` 是性能豁免档、不是温度带**：压制只落在 `(soft_perf_cap, free_above)` 区间，`>= free_above` 不钳制。**`cap=85` ≠ 已压制**——`free_above == soft_perf_cap` 时压制带为空、软限档完全空转（8550 曾如此，2026-09-23 修为 0.95），日志表现 = `cap=85` 期间写频仍可到 hw_max；热压制只作用于 CLG，tuned 段 cap 列 `-`
   - **实测**：batt 42.1℃ 触发 → `cap=85`（`thermal_change batt=42.1 cpu=56.4 cap=85 free=85`）
   - **daemon 重启会把热状态重置回 100**（新会话从零升温）→ 跨重启的 cap 序列不可直接连读
 - 充放电：**不要用电流符号判定**（厂商方向不一）；status.csv 有 `charge` 列（权威）。
@@ -160,7 +156,7 @@ python .agents\skills\devimp-log-analysis\scripts\analyze.py <解压目录> [--s
 | 视频播放（bili，playback 特调后） | 2.1~2.8 W |
 | 音乐播放（本地/在线的 media 场景） | 2.2~3.4 W（GPU 高则偏上） |
 | 亮屏 UI（抖音/搜索/桌面） | 1.9~2.4 W |
-| 聊天（QQ/微信） | 3.0~4.0 W（热态更高） |
+| 聊天（QQ/微信） | 2.0~4.0 W（热态更高） |
 | MOBA（王者，FAS 接管后） | 3.0~4.7 W |
 | 重负载游戏 | 7 W+ |
 
@@ -191,5 +187,3 @@ python .agents\skills\devimp-log-analysis\scripts\analyze.py <解压目录> [--s
     `re.sub(r"[\u2068\u2069]", "", s)`，否则 `P(\d+)`、`mode=⁨…⁩` 之类匹配全部失败
 11. **`@A result=e0` 不是「成功」**：`affinity::io_result_tag` 用 `raw_os_error().unwrap_or(0)`，
     拿不到 errno 时写 `e0`；`e3`=ESRCH（线程已退出，正常）、`e22`=EINVAL（偶发）
-12. **不要建 `.codebuddy/skills/` 副本**（2026-09-23 用户定）：`use_skill` 列不到本 skill 时，
-    直接读 `.agents/skills/devimp-log-analysis/SKILL.md` 照做即可，**不要再另写一份**

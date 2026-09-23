@@ -112,6 +112,7 @@
 - **stat comm 口径（2026-09-23 修）**：`sample_one_tid` 以首 '(' 与末 ')' 定界 comm；旧 `text[1..close]` 混入「tid 尾部+` (`」致 KEY_THREAD_COMMS/黑名单精确匹配恒不命中，修复后已生效。
 - **FG util 口径（2026-09-23 修）**：`compute_tgid_util` 基线存 adj(raw+pending)、util = adj 差分/墙钟；旧「raw 差分+当前 pending」多算 pending(t0)，util 系统性高估。
 - **亲和/core_ctl 恢复写失败（2026-09-23）**：非 ESRCH 失败保留状态（home/计数/moved_group/自钉清单）待重试，成功或 ESRCH 才清；unpin_self 按成功 tid 清单恢复，勿用 self_pinned 总开关短路。
+- **CLG 热压制语义（2026-09-23 修）**：只钳写频、**不回写 `current_perf`**（回写会让状态卡死在 cap，「持续高负载涨过豁免档」不成立）；生效区间 `(soft_perf_cap, free_above)`，`>= free_above` 不钳制。**豁免档必须严格大于 soft_perf_cap**——8550 曾 free 0.80 被 normalize 抬到 0.85 = 压制带为空、41℃ 软限档全程空转（cap=85 仍写 hw_max），已改 0.95（normalize 同日收紧为「过低或相等 → soft+0.10」）。热压制只作用于 CLG，tuned（playback/akmode）不参与。
 
 ## 电池读数（遥测）
 
@@ -146,7 +147,7 @@
 - `cargo xtask build` 先跑 `webui/npm run build` 再拷 `webui/dist` 到模块 `webroot/`；硬约束 `base:'./'`+`type="module"`。CI Node 24。`module.prop` id = `chiri`。dist 由根 `build.rs` 嵌入（`restore_webroot` 启动补齐，缺则降级）。
 - **.gitignore 已合并为根单文件（2026-09-22）**：webui/、module/ 的子 .gitignore 已删除；根内新增 WebUI 段（`webui/` 前缀）与 Magisk 段；根 `/package.json`、`/package-lock.json` 刻意忽略（npm init 残留）。后续新增忽略规则一律进根文件。
 - `mdocs/` 只放项目原有文档；AI 产出放 `.codebuddy/docs/`（已忽略）；`.codebuddy/memory/` 跟踪。
-- **项目 skill 位置（2026-09-23 用户定，同日二次修订）**：**只维护 `.agents/skills/<name>/`**（Agent Skills 开放标准，Cursor 与 CodeBuddy 均读）；**不再建 `.codebuddy/skills/` 副本、不要求两份同步**（用户明确「不用在 CodeBuddy 再写一次 skill」）。现役 skill：`devimp-log-analysis`（含定版/40-48 列 schema 识别）。
+- **devimp 日志包分析入口 = 命令 `/devimp-log-analysis`（2026-09-23 用户定，同日由 skill 转入）**：正文在 `.cursor/commands/devimp-log-analysis.md`（唯一副本，勿再建 skill 或镜像），聚合脚本在 `scripts/devimp-analyze.py`（git mv 自 skill 目录，用法 `python scripts\devimp-analyze.py <解压目录>`）。`.agents/skills/` 下已无项目 skill，旧「skill 位置/镜像」约定随之作废。
 - 评估与准备 ≠ 批准开工。没说「开始改」就不建不改源码；改动前 `git status` 核对足迹，汇报给文件级清单。
 - **只改任务范围内的东西，不「顺手修」**：未提交改动、被注释的代码可能是用户 WIP。检查报错若指向用户正在编辑的文件，只报告不动手。汇报区分「我改的」与「工作区里已有的」。
 - **Yumi 权重归零（2026-09-20 用户声明）**：性能优化及同类工作中，`src/scheduler/` 与 Yumi 设备兼容**不再作为约束**，改动即使波及也可进行（通常只做类型适配，不主动改逻辑）。2026-09-22 Yumi 调度本体已删，`docs/agents/` 口径已同步，本条冲突消解。

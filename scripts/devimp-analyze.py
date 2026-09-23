@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""devimp 日志包聚合分析（ChiRi 专用，详见 ../SKILL.md）。
+"""devimp 日志包聚合分析（ChiRi 专用，详见 .cursor/commands/devimp-log-analysis.md）。
 
 用法:
-    python analyze.py <解压目录> [--since MMDD-HHMMSS] [--min-n 30]
+    python scripts/devimp-analyze.py <解压目录> [--since MMDD-HHMMSS] [--min-n 30]
 
 - 自动识别 48/44/40 列 schema（40 列旧 = 无尾部 8 列；48 列含 from_core；44 列含尾部 8 列无 from_core）
 - 定版：读文件头 `# module=` / `# soc=` / `# android=`，混版本/混机型自动报警
