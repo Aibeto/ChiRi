@@ -56,7 +56,7 @@
 - `daemon.log` ≤50MB + 3 备份；行格式 `[YYYY-MM-DD HH:MM:SS] [LEVEL] [module] msg`（本地时间），模块剥 crate 前缀。
 - `status.csv` ≤8MB + `.1`，每秒一行 **22 列**（末列 `fps` 仅 FAS 激活有值）；新增列一律追加末尾；全精度写入、显示层 `toFixed(1)`。两者都不可整读。
 - 启动：先判短会话（首行距启动 <30s → 清空不打包；解析失败按非短会话），再把上轮打包进 `logd/`（`pack.sh` 走外部 tar，**不得改**；导出 = logd→tar→**gzip**→删中间产物）。
-- 预算：`logd/`、`devimp/` 各自 >128MB 删本目录最旧到 <96MB（最新永不删）。写路径记账 ≥16MB 即 `exit(0)`。
+- 预算：`logd/`、`devimp/` 各自 >128MB 删本目录最旧到 <96MB（最新永不删）。写路径记账 ≥128MB 即 `exit(0)`。
 - **定版手段（离线第一件事）**：devimp 文件头三行 `# module=ChiRi Canary <ver> (versionCode N)` / `# soc=… board=… model=…` / `# android=… kernel=…` 一直存在；daemon.log 另有 `[Main] 模块版本:` 行（2026-09-22 新增）。**同名 tar 里可能混着不同版本/不同机型**，先定版再比数据。
 - devimp/ 双文件（2026-09-22 拆分，原 devimp*<pkg>* 单文件）：`main_<pkg>_<MMDD-HHmmss>.log`（44 列 CSV v2026-09-22，tick/snap/event）+ `aff_<MMDD-HHmmss>.log`（文本帧：@A 动作帧含 `result=ok|e{errno}`、@S 每秒快照帧 top-N〔meta `devimp_top_n` 缺省 10 clamp 1..=64〕+前台/被管线程下钻；`\x01` 保留二进制帧位）。目录/归档 tar/记账键保留 devimp 名；锁 6 把（+AFF_TH_STATE）；t 行 pid=0=归属未知、uclamp 恒 -1。
 
@@ -99,6 +99,8 @@
 - **动态限频**：CLG 与特调同构——写 schedutil、min 压硬件最低、只调 max；按核心组 `up/down_core_count|util_percent` 判定，util=0 不计升频、计入降频；抖动 wait_ms 防抖。
 - **特调参数组**：`Config.tuned_profiles: HashMap<模式名, SpecialTunedConfig>`，`get_tuned_profile(mode)` 缺省回退 `akmode`；新增模式 = special_tuned.yaml 条目+同名参数组（无需改 .rs）；缺参数组打 `tuned-profile-missing`。`boost_affinity`=boost 类亲和（省电型必须 false）；`util_smoothing`=负载 EMA。
 - **降频计时**：`down_target` 只在目标明显回升（>+hyst）时重置计时。
+- **CLG 调频主旋钮（2026-09-23）**：`target_perf = clamp(util × headroom, floor, ceil)`，**与 up_threshold 无关**（up 只管 headroom ramp/升频速度）→ 降平均频率靠 `perf_ceil` 与 `headroom`；实测实际频率紧贴决策上限（QQ big 实际/决策 = 92%）→ 压 ceil 直接生效。触摸地板 = `perf_init + tiers×0.05` 且被 ceil 钳制。
+- **Alpha06-06 亮屏画像（2026-09-23 下午包）**：息屏 0.45W；launcher 1.30W（GPU 2%）vs QQ 4.92W / 酷安 4.24W / 微信 3.30W / bili 4.59W（GPU 18-24%、psi 30-40）→ 亮屏功耗差主要来自内容型 App 的 GPU+CPU 负载，不是「亮屏 UI 固有形态」。
 - **FAS「频率不匹配」不是外部压制的证据**（2026-09-23 定位）：旧实现 `apply_freq_locked` 写完立刻读 `scaling_cur_freq`，内核调频异步未完成 → 读到的是**写入前的旧档**，被误判成压制；实测 55 次的实际值全部 = 旧档、近旁 snap 的 cur==max、帧率达标。已改为「目标稳定 ≥ VERIFY_SETTLE=200ms 后、在下一次写入前抽查」（频繁改频期间跳过；真实压制仍会抓到并重写）。
 - **FAS migration_cost**（2026-09-23 起）：`FasRulesConfig.migration_cost_ns`（`module/config/normal/fas/*.yaml`，None=完全不动），接管期写 `/proc/sys/kernel/sched_migration_cost_ns`、deactivate 按快照恢复（读不到原值就不写）；sgame.yaml 已配 400000。
 - **`scaling_governor` 写入恒 EPERM**（PHB110/A16，三 policy）：内核本就是 schedutil，意图已满足；但 OEM 换 governor 则切不回（环境约束，非本轮回归）。

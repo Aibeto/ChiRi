@@ -44,7 +44,9 @@ tuned_profiles:
   #   接管期生效、退出按快照恢复（feature.yaml 的一次性 200000 不受影响）。
   # **未列 per_cluster 的 big、以及所有组的未列字段都回退上面的模式级值。**
   playback:
-    headroom: 0.95
+    # target = util × headroom（贴负载）
+    # TODO: 实机复核 0.85（看视频功耗与弹幕/滚动掉帧）。
+    headroom: 0.85
     perf_floor: 0.0
     perf_ceil: 1.0
     # 死区 = hw_max × hysteresis，须 ≥ 频表相邻档步长，否则上限会在相邻两档间往复；
@@ -57,11 +59,11 @@ tuned_profiles:
     per_cluster:
       little:
         headroom: 0.90
-        perf_ceil: 0.65
-      # big 组天花板 0.85（≈2383 MHz）
+        perf_ceil: 0.55
+      # big 组天花板 0.75（≈2102 MHz）
       # TODO: 实机复核（弹幕/滚动掉帧则回退）。
       big:
-        perf_ceil: 0.85
+        perf_ceil: 0.75
       prime:
         headroom: 0.80
         perf_ceil: 0.50

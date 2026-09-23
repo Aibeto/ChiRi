@@ -106,13 +106,15 @@ default:
     # 调回 2/3；低载（<down_fast_threshold）仍跳过降频防抖立即下调，空闲不受影响
     down_rate_limit_ticks: 3
     up_rate_limit_ticks: 2
-    headroom_factor: 1.05
+    # headroom 1.0 = 贴负载（target = util × headroom）；>1 为余量放大
+    headroom_factor: 1.00
     headroom_ramp: 0.12
     perf_floor: 0.05
-    # 2026-09-22 实测调整：本文件是 SoC 覆盖，会盖掉根 feature.yaml，故这里同步改。
-    # 日常档加天花板 0.80（原 1.0）；交互响应靠下方 touch_boost_ms 兜，别只降 ceil。
-    perf_ceil: 0.80
-    perf_init: 0.25
+    # 硬天花板：target 再高也被它压住；per_cluster 未覆盖的簇继承此值。
+    # TODO: 实机复核 0.60（看亮屏交互功耗与滚动/输入是否跟手）。
+    perf_ceil: 0.60
+    # 接管起始性能，同时是触摸升频地板的基线（floor = perf_init + tiers × 0.05）
+    perf_init: 0.35
     # 按核心组再收紧（8550 实测日常 util：little 0.55 / big 0.36 / prime 0.32，
     # 但三簇上限都被尖峰顶到 100%）——三簇一刀切只能取「最松那簇」能接受的值：
     # little 最热压到 0.70，prime 空转多压到 0.65，big 不覆盖、继承 0.80。
@@ -123,17 +125,21 @@ default:
     # 恢复按簇收紧。
     per_cluster:
       little:
-        perf_ceil: 0.70
+        perf_ceil: 0.50
+      big:
+        perf_ceil: 0.60
       prime:
-        perf_ceil: 0.65
+        perf_ceil: 0.45
     up_jump_threshold: 0.30
     slow_up_scale: 0.03
     down_fast_threshold: 0.25
     spike_jump_threshold: 0.40
-    spike_decay: 0.25
+    spike_decay: 0.15
     touch_boost_enabled: true
-    touch_boost_ms: 400
-    touch_boost_tiers: 1
+    # 触摸窗口内大核地板抬高：floor = perf_init + tiers × 0.05，且不超过 perf_ceil
+    # TODO: 实机复核 600ms / 4 档（手指在屏上滑动时应始终处于窗口内）。
+    touch_boost_ms: 600
+    touch_boost_tiers: 4
 
 # [boost]
 boost:

@@ -161,13 +161,13 @@ impl SelfHealingAppender {
             }
         }
         // 记账口径与原实现一致：按编码长度计（与写成功与否无关），它决定
-        // 「日志目录预算 / 16MB 打包门限」的触发点
+        // 「日志目录预算 / 128MB 打包门限」的触发点
         note_write(&LOGS_BYTES_WRITTEN, "logs/", bytes);
     }
 }
 
 // 日志打包门限（事件触发，零额外 syscall）：本会话写入 logs/ 与 devimp/ 的字节数
-// 各自累计，任一目录累计 ≥ LOG_RESTART_THRESHOLD_BYTES（16MB）即退出进程——看门狗
+// 各自累计，任一目录累计 ≥ LOG_RESTART_THRESHOLD_BYTES（128MB）即退出进程——看门狗
 // 3s 后拉起新进程，在 logger::init 之前由 archive_on_startup 把两个目录打包进
 // logd/（打包只在启动路径发生，故「打包」只能靠重启调度触发）。
 //
@@ -179,8 +179,8 @@ impl SelfHealingAppender {
 // 每进程从 0 计起：启动归档已把两目录清空重建，本会话写入量即目录大小。
 //
 // [loglimit]
-/// logs/ 或 devimp/ 任一目录增长到该大小（16MB）即重启调度以打包日志
-const LOG_RESTART_THRESHOLD_BYTES: u64 = 16 * 1024 * 1024;
+/// logs/ 或 devimp/ 任一目录增长到该大小（128MB）即重启调度以打包日志
+const LOG_RESTART_THRESHOLD_BYTES: u64 = 128 * 1024 * 1024;
 /// logs/ 本会话累计写入字节（daemon.log + status.csv）
 static LOGS_BYTES_WRITTEN: AtomicU64 = AtomicU64::new(0);
 /// devimp/ 本会话累计写入字节（当前诊断文件 main_* 与 aff_* 共用同一目录预算）
@@ -192,7 +192,7 @@ static LOG_RESTARTING: AtomicBool = AtomicBool::new(false);
 /// 达到门限即退出进程，由看门狗 3s 后拉起走启动归档。
 ///
 /// - 无看门狗（`watchdog_pid()` 为 None：调试直跑 / 孤儿态）**不退出**——退出后
-///   无人拉起、调度会永久停止；此时计数清零，等下一个 16MB 再判（避免每行写
+///   无人拉起、调度会永久停止；此时计数清零，等下一个 128MB 再判（避免每行写
 ///   都去读 /proc）；
 /// - 退出前打点的日志本身也走本函数（同一条写路径），以 `LOG_RESTARTING` 防重入；
 /// - **调用方不得持有 appender 锁**：本函数可能经 `log::info!` 重入 append，
@@ -505,7 +505,7 @@ fn status_write_line(fields: &[&str]) {
         status_check(&mut w);
     }
     drop(w);
-    // 记账（含换行）：写入即事件触发，logs/ 累计增长达 16MB 触发重启打包
+    // 记账（含换行）：写入即事件触发，logs/ 累计增长达 128MB 触发重启打包
     note_write(&LOGS_BYTES_WRITTEN, "logs/", line.len() as u64 + 1);
 }
 
@@ -1324,7 +1324,7 @@ fn main_write_line(row: MainRow) {
         // （logd/ 与 devimp/ 各自独立计量，各自超 128MB 才从本目录最旧文件删到 <96MB）
         enforce_dir_limits(&common::get_module_root());
     }
-    // 记账（含换行）：写入即事件触发，devimp/ 累计增长达 16MB 触发重启打包
+    // 记账（含换行）：写入即事件触发，devimp/ 累计增长达 128MB 触发重启打包
     // （在 WRITER 锁外调用，遵守锁序约定）
     note_write(&DEVIMP_BYTES_WRITTEN, "devimp/", line.len() as u64 + 1);
 }
@@ -1652,7 +1652,7 @@ fn aff_write_block(block: &str, lines: u64) {
         // devimp/ 各自独立计量，与 main_write_line 同口径）
         enforce_dir_limits(&common::get_module_root());
     }
-    // 记账（WRITER 锁外，锁序约定）：devimp/ 目录预算与 16MB 归档门限共用
+    // 记账（WRITER 锁外，锁序约定）：devimp/ 目录预算与 128MB 归档门限共用
     note_write(&DEVIMP_BYTES_WRITTEN, "devimp/", block.len() as u64);
 }
 
