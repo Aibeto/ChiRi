@@ -107,7 +107,7 @@
 - **白名单 `re:` 解析**：必须 `strip_prefix("re:")` 再按 `:` 切分；导出 yaml 只含精确条目 → UI 只能近似。
 - **FAS 单实例+延迟退出**：activate 时 GovernorGuard 切 performance；失前台 `request_delayed_exit` 持策略 15s（夹 1..=600），到期 1s tick 退出并按 `pending_mode_after_fas` 重接管；ModeChange 的 fas→非fas 拦截在 mode_clone 更新前。息屏与 FAS 完全解耦。
 - **帧指标口径**：eBPF 只有一个 uprobe（`Surface::queueBuffer`），`frame_delta_ns` = 相邻帧间隔；必须只投喂新产生的帧。
-- **息屏轴**：scenemode 停迁移 + cpuset 全核 + 只压 CLG 上限；判定走屏幕**投票仲裁**（`OFF_QUORUM=2`）。
+- **息屏轴**：scenemode 停迁移 + cpuset 全核 + 只压 CLG 上限；判定走屏幕**投票仲裁**（OFF 票**超过有效票数一半**即确认，2026-09-23 由固定 2 票改为多数票）。
 - **后台降权**：`AffinityConfig.background_uclamp_max_pct`（默认 50）钳后台/受限组 `cpu.uclamp.max`；`affinity_blacklist.yaml` 含 SystemUI/桌面。`thread_bind` 是线程摆放总闸。
 - **stat comm 口径（2026-09-23 修）**：`sample_one_tid` 以首 '(' 与末 ')' 定界 comm；旧 `text[1..close]` 混入「tid 尾部+` (`」致 KEY_THREAD_COMMS/黑名单精确匹配恒不命中，修复后已生效。
 - **FG util 口径（2026-09-23 修）**：`compute_tgid_util` 基线存 adj(raw+pending)、util = adj 差分/墙钟；旧「raw 差分+当前 pending」多算 pending(t0)，util 系统性高估。

@@ -23,9 +23,9 @@ use crate::i18n::{t, t_with_args};
 /// uevent 线程直推（零轮询延迟），verify_screen_state 自愈路径的变化
 /// 由 app_detect 主循环兜底转发（其循环本身每轮比对 arc）。
 ///
-/// 息屏仲裁（2026-09-18 改口径）：亮→息**翻转尝试**时全节点投票——两个有效节点
-/// 报息屏即确认；只凑到一票 OFF 且没有其它可读节点时也确认（机型只暴露一个节点
-/// 的情况）；一个有效读数都没有时不改判。无效节点（读不到、不存在、已退役）不计票，
+/// 息屏仲裁（口径：**多数票**）：亮→息**翻转尝试**时全节点投票——OFF 票超过有效
+/// 票数的一半才确认；只凑到一票 OFF 且没有其它可读节点时也确认（机型只暴露一个
+/// 节点的情况）；一个有效读数都没有时不改判。无效节点（读不到、不存在、已退役）不计票，
 /// 也不否决。有节点报亮屏却凑不齐息屏票 = 读数矛盾：打点并可退役主节点、切换下一个
 /// （见 retire_primary_and_switch）。
 /// 稳态（无翻转）快速返回不做扫描——稳态息屏期的失真检测由 verify 的定时复核驱动，
@@ -48,7 +48,7 @@ fn update_state_if_changed(state_arc: &Arc<Mutex<bool>>, new_state: bool, source
         return false;
     }
     if !new_state {
-        // 亮→息翻转尝试：全节点投票，两个有效节点报息屏即确认
+        // 亮→息翻转尝试：全节点投票，OFF 票超过半数才确认
         let votes = tally_screen_nodes();
         if !screen_off_confirmed(&votes) {
             if let Some(node) = &votes.on_node {
@@ -471,9 +471,6 @@ struct ScreenVotes {
     on_node: Option<String>,
 }
 
-/// 确认息屏所需的 OFF 票数：两个有效节点报息屏即确认。
-const OFF_QUORUM: usize = 2;
-
 /// 全节点投票：枚举全部候选节点（跳过已退役的），逐个用 [`read_screen_state`] 读，
 /// 不可读的直接跳过——各源读取口径只在 read_screen_state 一处，避免两套逻辑漂移。
 fn tally_screen_nodes() -> ScreenVotes {
@@ -502,14 +499,11 @@ fn tally_screen_nodes() -> ScreenVotes {
     votes
 }
 
-/// 是否确认息屏：OFF 票达到 [`OFF_QUORUM`]；有效节点只有一个时按一票算（机型只暴露
-/// 一个可读节点，否则永远进不了息屏）；一个有效读数都没有时不确认——没有证据就不改判。
+/// 是否确认息屏：OFF 票**超过有效票数的一半**（多数票）。只暴露一个可读节点的机型
+/// （1 票）仍按那一票算；一个有效读数都没有时不确认——没有证据就不改判。
 fn screen_off_confirmed(votes: &ScreenVotes) -> bool {
-    match votes.off + votes.on {
-        0 => false,
-        1 => votes.off == 1,
-        _ => votes.off >= OFF_QUORUM,
-    }
+    let valid = votes.off + votes.on;
+    valid > 0 && votes.off * 2 > valid
 }
 
 /// 读取检测源的屏幕开关状态；None = 不可读（调用方静默跳过）。
