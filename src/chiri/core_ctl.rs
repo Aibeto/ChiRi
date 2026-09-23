@@ -1,4 +1,4 @@
-//! core_ctl.rs: [types] [helpers] [state] [scenemode] [restore]
+//! core_ctl.rs: [types] [helpers] [state] [scenemode] [online_reader] [restore]
 
 /// 核心在线控制器接管（ChiRi 专属）。
 ///
@@ -24,7 +24,9 @@
 /// 由 `CoreCtl.scenemode_offline` 配置独立门控）。
 use crate::chiri::affinity::{io_result_tag, set_tid_affinity};
 use crate::chiri::get_cpu_policies;
+use crate::utils::FastReader;
 use log::{debug, info, warn};
+use std::collections::HashMap;
 use std::fs;
 
 use crate::fluent_args;
@@ -71,6 +73,9 @@ pub struct CoreCtlManager {
     reserved_cpusets: Vec<(String, String)>,
     /// 自身线程被移入根组前的原 cpuset 组相对路径（退出恢复用）
     self_cpuset_group: Option<String>,
+    /// [fast_reader] cpuN/online 节点的 keep-open 读取器（路径构造期缓存，
+    /// 周期纠偏/恢复回读免每 2s format! + open/close），按核号惰性建立
+    online_readers: HashMap<u32, FastReader>,
 }
 
 // [helpers]
@@ -112,6 +117,7 @@ impl CoreCtlManager {
             reserved_core: None,
             reserved_cpusets: Vec::new(),
             self_cpuset_group: None,
+            online_readers: HashMap::new(),
         }
     }
 
@@ -409,6 +415,16 @@ impl CoreCtlManager {
         self.self_pinned = false;
     }
 
+    // [online_reader]
+    /// cpuN/online 的 keep-open 读取器：按核号惰性建立（路径构造期缓存，周期
+    /// 纠偏/恢复回读免每次 format! + open/close）。节点常驻（核下线后文件仍在、
+    /// 值变 0），符合 FastReader 的稳定节点口径。
+    fn online_reader(&mut self, cpu: u32) -> &mut FastReader {
+        self.online_readers
+            .entry(cpu)
+            .or_insert_with(|| FastReader::new(format!("/sys/devices/system/cpu/cpu{cpu}/online")))
+    }
+
     /// scenemode 维持期纠偏：已下线核若被外部重新拉起，重新写 0；被独占的
     /// 专用小核若被框架 CpusetManager 加回业务组（top-app 的 cpus 由框架
     /// 动态管理），重新从组内移除。只读 online 文件 + 组 cpus（每 2s 数次
@@ -417,12 +433,15 @@ impl CoreCtlManager {
         // 逐核收集需要重新下线的核，一次批量写：单核失败 debug、全部失败 warn
         // （见 utils::write_nodes）——此前静默 `let _ =`，全核写不回去也毫无痕迹
         let mut items: Vec<(String, String)> = Vec::new();
-        for (cpu, _) in &self.offlined {
-            let path = format!("/sys/devices/system/cpu/cpu{}/online", cpu);
-            if let Ok(v) = fs::read_to_string(&path) {
-                if v.trim() != "0" {
-                    items.push((path, "0".to_string()));
-                }
+        // [fast_reader] 按下标迭代：online_reader 要 &mut self，与 &self.offlined
+        // 的跨迭代借用冲突（cpu 是 u32 Copy，取完即释放）
+        for i in 0..self.offlined.len() {
+            let cpu = self.offlined[i].0;
+            let reader = self.online_reader(cpu);
+            // 三态口径不变：读失败/节点缺失（None）跳过该核，读到原文才比较
+            let tampered = matches!(reader.read_raw(), Some(v) if v.trim() != "0");
+            if tampered {
+                items.push((reader.path().to_string_lossy().into_owned(), "0".to_string()));
             }
         }
         let written = crate::utils::write_nodes(&items, "corectl-reassert-offline");
@@ -453,10 +472,12 @@ impl CoreCtlManager {
         let total = offlined.len();
         let mut failed = Vec::new();
         for (cpu, orig) in offlined {
-            let path = format!("/sys/devices/system/cpu/cpu{}/online", cpu);
+            // [fast_reader] keep-open 回读 + 路径缓存（恢复重试期免每次 format!+open/close）
+            let reader = self.online_reader(cpu);
+            let path = reader.path().to_string_lossy().into_owned();
             // 判定保持原口径：以回读为真值（原 try_write_file 恒返 Ok，
             // is_ok() 项恒真），写入结果只落 @A 帧观测
-            let write_back = |p: &str, v: &str| {
+            let mut write_back = |p: &str, v: &str| {
                 let res = fs::write(p, v);
                 if crate::logger::diag_active() {
                     crate::logger::aff_action(
@@ -471,10 +492,8 @@ impl CoreCtlManager {
                         p,
                     );
                 }
-                fs::read_to_string(p)
-                    .ok()
-                    .map(|s| s.trim() == v)
-                    .unwrap_or(false)
+                // 三态口径不变：读失败/缺失（None）计 false，读到原文才 trim 比较
+                reader.read_raw().map(|s| s.trim() == v).unwrap_or(false)
             };
             if !write_back(&path, &orig) && !write_back(&path, &orig) {
                 // 周期重试期间每次尝试都会经过这里，降为 debug 防刷屏；

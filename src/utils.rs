@@ -1,4 +1,4 @@
-//! utils.rs: [io] [temp_probe] [batt_temp] [sys_path] [fast_writer] [misc]
+//! utils.rs: [io] [temp_probe] [batt_temp] [sys_path] [fast_writer] [fast_reader] [misc]
 
 use anyhow::Result;
 use inotify::{Inotify, WatchMask};
@@ -572,6 +572,145 @@ impl FastWriter {
         buf.copy_within(start..19, 0);
         buf[digit_len] = b'\n';
         digit_len + 1
+    }
+}
+
+// [fast_reader]
+// FastReader — keep-open + 可复用 buf 的稳定节点读取器（镜像 FastWriter 做法）
+
+/// 最近一次读取的三态：调用点需要区分「节点缺失」与「读失败」时查 [`FastReader::state`]。
+/// 「正常空值」（读到但内容为空）不在此列——`read_raw` 以 `Some("")` 表达，
+/// 与 `fs::read_to_string` 的 Ok("") 一一对应
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ReadState {
+    /// 读取成功（内容可能为空串）
+    Ok,
+    /// 节点不存在（ENOENT/ENOTDIR）：机型没有该节点，属合法缺失
+    Missing,
+    /// 其他读取失败（权限/IO/非法 UTF-8）：多为瞬态，下次调用自动重开重试
+    Failed,
+}
+
+/// 稳定 sysfs/procfs 节点的 keep-open 读取器：fd 常驻 + seek(0) 重读入可复用 buf，
+/// 消除每 tick 的路径分配 / String 分配 / open-close。**只收常驻节点**（cpufreq
+/// policy 的 scaling_*、uclamp、cpuN/online 等）；per-pid `/proc/<pid>/*` 一律不用
+/// （进程退出节点即失效），保持每次 open。
+///
+/// 读取三态（与 `fs::read_to_string` 链逐字节对齐）：`None` = 读失败/节点缺失，
+/// `Some("")` = 正常空值；需区分缺失与失败时读后查 [`Self::state`]。读错误/EOF
+/// 异常丢弃 fd 并重开重试一次，仍失败则丢弃 fd、下次调用自动重开。
+pub struct FastReader {
+    file: Option<File>,
+    /// 读入复用 buf：每次 seek(0) 后从头覆盖写入，跨调用不重新分配
+    buf: Vec<u8>,
+    /// 节点路径（构造期缓存，调用点免再 format! 拼路径）
+    path: PathBuf,
+    state: ReadState,
+}
+
+impl FastReader {
+    pub fn new<P: AsRef<Path>>(path: P) -> Self {
+        let mut r = Self {
+            file: None,
+            buf: Vec::new(),
+            path: path.as_ref().to_path_buf(),
+            state: ReadState::Missing,
+        };
+        r.reopen();
+        r
+    }
+
+    /// 节点路径（构造期缓存的原字符串）
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// 最近一次读取的三态结果（read_raw/read_u32 返回 None 时区分缺失与失败）
+    #[allow(dead_code)] // 接口面：本轮落点未全部需要三态区分，保留查询能力
+    pub fn state(&self) -> ReadState {
+        self.state
+    }
+
+    /// 打开 fd；失败按 errno 记 Missing/Failed（不告警：机型没有该节点是常态）
+    fn reopen(&mut self) -> bool {
+        match File::open(&self.path) {
+            Ok(f) => {
+                self.file = Some(f);
+                true
+            }
+            Err(e) => {
+                self.state = Self::err_state(&e);
+                false
+            }
+        }
+    }
+
+    /// errno → 三态（口径同 utils 节点缺失判定：ENOTDIR(20) 与 ENOENT 同计缺失）
+    fn err_state(e: &std::io::Error) -> ReadState {
+        if e.kind() == std::io::ErrorKind::NotFound || e.raw_os_error() == Some(20) {
+            ReadState::Missing
+        } else {
+            ReadState::Failed
+        }
+    }
+
+    /// 读入内部 buf（seek(0) + read_to_end）；纯 IO，UTF-8 校验在 read_raw
+    fn read_into_buf(&mut self) -> std::io::Result<()> {
+        self.buf.clear();
+        let file = self
+            .file
+            .as_mut()
+            .ok_or_else(|| std::io::Error::from_raw_os_error(libc::ENOENT))?;
+        file.seek(SeekFrom::Start(0))?;
+        file.read_to_end(&mut self.buf)?;
+        Ok(())
+    }
+
+    /// 原文读取（内容比较型调用点用，不归一化）：`Some(&str)` = 读到内容（空内容为
+    /// `Some("")`），`None` = 读失败/节点缺失。与 `fs::read_to_string(..).ok()` 同口径
+    /// （非法 UTF-8 计读失败）；返回值借用内部 buf，下次 read_* 即失效。
+    pub fn read_raw(&mut self) -> Option<&str> {
+        // 构造期未就绪的节点在这里惰性补打开
+        if self.file.is_none() && !self.reopen() {
+            return None;
+        }
+        let mut res = self.read_into_buf();
+        if res.is_err() {
+            // 读错误/EOF 异常：丢弃 fd、重开后重试一次（umount/热插拔/节点重建后
+            // 旧 fd 会持续报错）
+            self.file = None;
+            if !self.reopen() {
+                return None;
+            }
+            res = self.read_into_buf();
+        }
+        match res {
+            Ok(()) => match std::str::from_utf8(&self.buf) {
+                Ok(s) => {
+                    self.state = ReadState::Ok;
+                    Some(s)
+                }
+                Err(_) => {
+                    // 与 read_to_string 同口径：非法 UTF-8 计读失败
+                    self.state = ReadState::Failed;
+                    self.file = None;
+                    None
+                }
+            },
+            Err(e) => {
+                self.state = Self::err_state(&e);
+                self.file = None;
+                None
+            }
+        }
+    }
+
+    /// 读 u32（trim + parse，不经 String 分配）：`None` = 读失败/节点缺失/内容非 u32，
+    /// 与 `read_to_string(..)?.trim().parse().ok()` 链逐字节等价（parse 失败时
+    /// `state()` 仍为 Ok，可与读失败区分）。
+    #[allow(dead_code)] // 接口面：本轮落点无整型读，后续 tick 读侧接入时启用
+    pub fn read_u32(&mut self) -> Option<u32> {
+        self.read_raw().and_then(|s| s.trim().parse().ok())
     }
 }
 

@@ -35,7 +35,7 @@
 /// 黑名单：affinity_blacklist.yaml 编译嵌入 + 空 cmdline/`/` 开头内置兜底；
 /// 线程 comm 命中不迁移；后台 promote 前读一次进程 cmdline 校验并缓存。
 use crate::chiri::config::AffinityConfig;
-use crate::utils::SysPathExist;
+use crate::utils::{FastReader, SysPathExist};
 use log::{debug, info};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -782,6 +782,10 @@ pub struct AffinityManager {
     lab_static_mode: Option<String>,
     /// 静态分组改动过的 (组名, 原 cpus) 快照，退出时恢复
     lab_group_snapshot: Vec<(String, String)>,
+    /// [fast_reader] top-app uclamp.min/max 的 keep-open 读取器（路径构造期缓存），
+    /// 接管快照读取免每次 open/close（cgroup 节点常驻，符合稳定节点口径）
+    uclamp_reader: FastReader,
+    uclamp_max_reader: FastReader,
 }
 
 impl AffinityManager {
@@ -810,6 +814,8 @@ impl AffinityManager {
             boost_uclamp_prev: None,
             lab_static_mode: None,
             lab_group_snapshot: Vec::new(),
+            uclamp_reader: FastReader::new("/dev/cpuctl/top-app/cpu.uclamp.min"),
+            uclamp_max_reader: FastReader::new(UCLAMP_MAX_PATH),
         }
     }
 
@@ -828,17 +834,17 @@ impl AffinityManager {
             }
         }
         self.snapshot = Some(snap);
-        let uclamp_path = "/dev/cpuctl/top-app/cpu.uclamp.min";
+        // [fast_reader] keep-open 读取：三态口径不变（读失败/空值均落 ""，非空存 trim 原文）
         self.uclamp_snapshot = Some(
-            std::fs::read_to_string(uclamp_path)
-                .ok()
+            self.uclamp_reader
+                .read_raw()
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .unwrap_or_default(),
         );
         self.uclamp_max_snapshot = Some(
-            std::fs::read_to_string(UCLAMP_MAX_PATH)
-                .ok()
+            self.uclamp_max_reader
+                .read_raw()
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .unwrap_or_default(),

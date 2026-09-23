@@ -11,7 +11,7 @@ use std::fs;
 const MIGRATION_COST_PATH: &str = "/proc/sys/kernel/sched_migration_cost_ns";
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::fluent_args;
 use crate::i18n::t_with_args;
@@ -43,6 +43,14 @@ struct ClusterState {
     down_target: u32,
     /// 用于决策的负载 EMA（util_smoothing < 1 时启用；-1 = 未初始化）
     ema_util: f32,
+    // [dwell] 写频滞回状态（Phase 2，与 CLG 同口径）
+    /// 上次**实际写频**成功时刻：dwell 以它计时；None = 接管初写后尚未写过
+    /// （接管初写不启动时钟，首次受控写频立即生效）
+    last_write_at: Option<Instant>,
+    /// 上次实际写频方向：升 = 1、降 = -1、未写过 = 0（翻摆判定基准）
+    last_write_dir: i8,
+    /// 上次写频失败：下次写入视为防篡改补写、豁免滞回（重试时序不变）
+    last_failed: bool,
 }
 
 /// 按 affected_cpus 的 CPU ID 判定核心组，区间随命中 SoC 变化
@@ -229,6 +237,10 @@ impl TunedGovernor {
                 down_since: None,
                 down_target: 0,
                 ema_util: -1.0,
+                // [dwell] 写频滞回状态：接管初写不启动 dwell 时钟
+                last_write_at: None,
+                last_write_dir: 0,
+                last_failed: false,
             });
         }
 
@@ -363,6 +375,32 @@ impl TunedGovernor {
         freqs.iter().copied().find(|&f| f >= want).unwrap_or(hw_max)
     }
 
+    // [dwell] 受控写频（与 CLG write_freq 同口径）：死区由调用方 hysteresis 保证
+    // （|target−current| 超死区才调用），这里做「最小驻留内方向翻摆延迟」与写失败
+    // 防篡改补写豁免；接管初写/恢复不走本函数。返回是否写入成功（成功才前移
+    // current_max 并记录实际写频；失败/被延迟由下一 tick 补写当前 target）。
+    fn gated_write(c: &mut ClusterState, target: u32, dwell_ms: u64) -> bool {
+        let dir: i8 = if target > c.current_max { 1 } else { -1 };
+        if !c.last_failed && c.last_write_dir != 0 && dir != c.last_write_dir {
+            if let Some(at) = c.last_write_at {
+                if at.elapsed() < Duration::from_millis(dwell_ms) {
+                    return false;
+                }
+            }
+        }
+        let old = c.current_max;
+        let ok = c.max_writer.write_value_force(target);
+        if ok {
+            c.current_max = target;
+            c.last_write_at = Some(Instant::now());
+            c.last_write_dir = if target > old { 1 } else { -1 };
+            c.last_failed = false;
+        } else {
+            c.last_failed = true;
+        }
+        ok
+    }
+
     /// 无档位动态限频入口，每个 SystemLoadUpdate（特调 40ms）触发一次。
     /// 每个核心组独立决策（decision 语义与 CLG 对齐）：
     ///   up        目标 > 当前 max + hysteresis，立即上调；
@@ -422,9 +460,8 @@ impl TunedGovernor {
                 // 升频：立即执行（响应性优先），并取消进行中的降频等待。
                 // 写成功才前移状态：失败时下一 tick target 仍超死区 → up 重试
                 //（与 CLG「写失败下次 tick 自动重试」语义对齐）
-                if c.max_writer.write_value_force(target_max) {
-                    c.current_max = target_max;
-                }
+                // [dwell] 经写频滞回（同 CLG）：翻摆延迟、写失败补写豁免
+                Self::gated_write(c, target_max, cfg.write_dwell_ms);
                 c.down_since = None;
                 decision = "up";
             } else if target_max < c.current_max.saturating_sub(hyst_freq) {
@@ -449,10 +486,10 @@ impl TunedGovernor {
                     Some(since) => {
                         c.down_target = target_max;
                         if now.duration_since(since).as_millis() as u64 >= p.down_hold_ms {
-                            // 写成功才前移状态并结束等待：失败保留计时起点，
+                            // 写成功才前移状态并结束等待：失败/被 dwell 延迟保留计时起点，
                             // 下一 tick（elapsed 仍满）立即重试
-                            if c.max_writer.write_value_force(target_max) {
-                                c.current_max = target_max;
+                            // [dwell] 经写频滞回（同 CLG）：翻摆延迟、写失败补写豁免
+                            if Self::gated_write(c, target_max, cfg.write_dwell_ms) {
                                 c.down_since = None;
                             }
                             decision = "down";
@@ -464,6 +501,9 @@ impl TunedGovernor {
             } else {
                 // 死区内：目标与当前上限一致，取消进行中的降频等待
                 c.down_since = None;
+                // [dwell] 目标收敛进死区：上次写失败的补写诉求消失，清标记防悬挂
+                //（否则任意久之后的下一次真实写频会白豁免滞回一次）
+                c.last_failed = false;
                 decision = "hold";
             }
 

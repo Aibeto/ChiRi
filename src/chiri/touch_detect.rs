@@ -1,4 +1,4 @@
-//! touch_detect.rs: [consts] [monitor]
+//! touch_detect.rs: [consts] [monitor] [poll_wait]
 
 use log::{debug, info, warn};
 use std::fs;
@@ -47,7 +47,7 @@ pub fn monitor_touch(tx: SyncSender<()>) {
             continue;
         }
 
-        // 内层循环：poll 等待可读，超时继续轮询（期间不占用 CPU）
+        // 内层循环：poll 阻塞等待可读（超时 -1，无事件零唤醒）
         'poll: loop {
             let mut fds: Vec<libc::pollfd> = devices
                 .iter()
@@ -58,24 +58,37 @@ pub fn monitor_touch(tx: SyncSender<()>) {
                 })
                 .collect();
 
-            let ret = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, 200) };
+            // [poll_wait] 超时 -1 = 无限期阻塞。旧 200ms 超时分支（ret==0 → continue）
+            // 不改任何状态、只是每秒 5 次空唤醒，删掉与保留等价；事件处理与重枚举时机不变
+            let ret = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, -1) };
             if ret < 0 {
                 debug!("{}", t("touch-detect-poll-error"));
                 std::thread::sleep(Duration::from_millis(500));
                 break; // 重新枚举
             }
-            if ret == 0 {
-                continue; // 超时无事件
-            }
 
             let mut buf = [0u8; INPUT_EVENT_SIZE];
             for (i, pfd) in fds.iter().enumerate() {
+                // 挂断/错误/无效描述符（部分内核在设备断开时上报）：与读错误同路
+                // 重新枚举。阻塞等待后没有超时兜底，这类 revents 必须显式处理，
+                // 否则 poll 立即返回却无事可做，会原地空转
+                if pfd.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0 {
+                    // [poll_backoff] 异常 revents 多为电平触发，重枚举后 poll 会立即
+                    // 返回；退避 500ms（与 poll 出错路径同款）防持续异常时紧循环空转。
+                    std::thread::sleep(Duration::from_millis(500));
+                    break 'poll;
+                }
                 if pfd.revents & libc::POLLIN == 0 {
                     continue;
                 }
                 match devices[i].read(&mut buf) {
                     // 读到 0 字节或读取失败 = 设备断开/异常，重新枚举
-                    Ok(0) | Err(_) => break 'poll,
+                    // [poll_backoff] 读失败多为驱动持续异常（POLLIN 电平触发但 read
+                    // 恒败），与异常 revents 同款退避 500ms，防重枚举后立即再失败的紧循环
+                    Ok(0) | Err(_) => {
+                        std::thread::sleep(Duration::from_millis(500));
+                        break 'poll;
+                    }
                     Ok(n) => {
                         // 一次 read 可能包含多个 input_event，逐个解析
                         let mut off = 0;

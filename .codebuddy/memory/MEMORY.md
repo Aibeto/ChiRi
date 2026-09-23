@@ -1,6 +1,6 @@
 # ChiRi 长期记忆
 
-> 协作文件在 `.codebuddy/`：`AGENTS.md`（仓库根 `[tag]` 索引，勿通读）、本文件（长期事实，就地更新）、`YYYY-MM-DD.md`（按日追加）、`docs/`（AI 产出）。`mdocs/` 只放项目原有文档。旧 `.workbuddy/` 已废弃。开工前读 `AGENTS.md` 与最近几天日志。
+> 本目录为 CodeBuddy 环境记忆（2026-09-23 起协作文件按环境分文件夹，见 `AGENTS.md`）：`AGENTS.md`（仓库根 `[tag]` 索引，勿通读）、本文件（长期事实，就地更新）、`YYYY-MM-DD.md`（按日追加）、`docs/`（AI 产出）。`mdocs/` 只放项目原有文档。旧 `.workbuddy/` 已废弃。开工前读 `AGENTS.md` 与最近几天日志。2026-09-23 前的历史条目保留于此，各环境只读；Cursor 的记忆在 `.cursor/memory/`。
 
 ## 工具链（本机）
 

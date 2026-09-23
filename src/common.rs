@@ -416,6 +416,26 @@ pub fn special_tuned_entries() -> &'static [SpecialTunedEntry] {
     SPECIAL_TUNED.get_or_init(|| parse_special_tuned(SPECIAL_TUNED_TEXT))
 }
 
+// [exact_index]
+/// 精确条目（regex.is_none()）的查找索引：只加速「精确段」查询，
+/// 不改任何遍历/导出行为（special_tuned_entries 顺序原样）。
+/// 建表按文件顺序 `entry().or_insert()`，同名条目保留**第一条**，
+/// 与原线性 find 的「文件顺序第一条」语义逐字节等价。
+static SPECIAL_TUNED_EXACT: OnceLock<HashMap<&'static str, &'static SpecialTunedEntry>> =
+    OnceLock::new();
+
+fn special_tuned_exact() -> &'static HashMap<&'static str, &'static SpecialTunedEntry> {
+    SPECIAL_TUNED_EXACT.get_or_init(|| {
+        let mut map = HashMap::new();
+        for e in special_tuned_entries() {
+            if e.regex.is_none() {
+                map.entry(e.package.as_str()).or_insert(e);
+            }
+        }
+        map
+    })
+}
+
 /// 查询包名命中的白名单条目：先按精确包名匹配（文件顺序），未命中再按正则条目。
 /// 调度优先级：rules.yaml 用户自定义 app_modes > 特调白名单回退模式 > global_mode。
 /// 实验室（rhine）关闭全部场景特调期间恒返回 None（`special_tuned_mode` 与
@@ -424,10 +444,13 @@ pub fn special_tuned_entry(pkg: &str) -> Option<&'static SpecialTunedEntry> {
     if lab_special_tuned_disabled() {
         return None;
     }
-    let list = special_tuned_entries();
-    list.iter()
-        .find(|e| e.regex.is_none() && e.package == pkg)
-        .or_else(|| list.iter().find(|e| e.matches(pkg)))
+    // [exact_index] 两段式查找顺序不变：先精确段（HashMap 索引等价原线性
+    // 「文件顺序第一条」），未命中再按文件顺序线性匹配（正则条目一次编译、
+    // 线性 is_match；此段的精确条目全等分支在第一段落空时恒不命中，行为不变）
+    special_tuned_exact()
+        .get(pkg)
+        .copied()
+        .or_else(|| special_tuned_entries().iter().find(|e| e.matches(pkg)))
 }
 
 /// 查询包名是否命中特调白名单，命中返回优先回退模式

@@ -277,6 +277,18 @@ pub struct CpuLoadGovernorConfig {
     /// 触摸升频抬高的频率档数：在可用频率表中向上移动的档数（1 档即一个频率步进）
     #[serde(default = "d_clg_touch_boost_tiers")]
     pub touch_boost_tiers: u32,
+    // [dwell] 写频决策层滞回（Phase 2）：最小驻留 + 死区
+    /// 写频最小驻留（ms）+ 方向翻摆滞回：距上次实际写频不足该时长且本次写频方向
+    /// 与上次相反（翻摆）时延迟写，到期后的下一次 flush 补写当前 target。
+    /// 缺省 320ms ≈ 2 个负载 tick（ChiRi 采样 160ms；特调侧同名参数 80ms）。
+    /// 豁免路径（触摸 floor 提频 / 极低负载立即降频 / 写失败防篡改补写）不经滞回
+    /// 立即写；热保护 clamp 不豁免（温度毛刺不得绕过滞回直写频率）。
+    #[serde(default = "d_clg_write_dwell_ms")]
+    pub write_dwell_ms: u64,
+    /// 写频死区（比例，占硬件最高频）：|target−current| 小于该阈值不写，防相邻
+    /// OPP 档来回改写。与 tuned 的 hysteresis 同口径；0 = 关闭。
+    #[serde(default = "d_clg_write_deadzone")]
+    pub write_deadzone: f32,
 }
 
 // CLG 各参数缺省值：feature.yaml 省略字段时回退到此处（与 normalize 的兜底默认一致）
@@ -333,6 +345,14 @@ fn d_clg_touch_boost_ms() -> u64 {
 }
 fn d_clg_touch_boost_tiers() -> u32 {
     1
+}
+/// [dwell] 写频最小驻留缺省：2 tick × ChiRi 160ms 负载采样
+fn d_clg_write_dwell_ms() -> u64 {
+    320
+}
+/// [dwell] 写频死区缺省：硬件最高频的 3%（与 tuned hysteresis 同口径）
+fn d_clg_write_deadzone() -> f32 {
+    0.03
 }
 
 /// 按核心组的参数覆盖（CLG `per_cluster` 段的元素）：只覆盖最常用的五个量
@@ -402,6 +422,8 @@ impl Default for CpuLoadGovernorConfig {
             touch_boost_enabled: true,
             touch_boost_ms: d_clg_touch_boost_ms(),
             touch_boost_tiers: d_clg_touch_boost_tiers(),
+            write_dwell_ms: d_clg_write_dwell_ms(),
+            write_deadzone: d_clg_write_deadzone(),
         }
     }
 }
@@ -481,6 +503,12 @@ impl CpuLoadGovernorConfig {
         if !self.touch_boost_enabled {
             self.touch_boost_ms = 0;
         }
+        // [dwell] 写频滞回参数钳制：驻留 0 = 关闭翻摆延迟；死区 0 = 关闭（上限 0.2）
+        self.write_dwell_ms = self.write_dwell_ms.min(5_000);
+        if !self.write_deadzone.is_finite() {
+            self.write_deadzone = d_clg_write_deadzone();
+        }
+        self.write_deadzone = self.write_deadzone.clamp(0.0, 0.2);
 
         // 交叉约束（顺序保证 clamp 边界合法）
         if self.perf_floor > self.perf_ceil {
@@ -654,6 +682,12 @@ pub struct SpecialTunedConfig {
     /// 调高可减无谓迁移与 cache 失效；release 时按快照恢复，不污染其它场景。
     #[serde(default)]
     pub migration_cost_ns: Option<u64>,
+    // [dwell] 写频决策层滞回（Phase 2，与 CLG 同口径）
+    /// 写频最小驻留（ms）+ 方向翻摆滞回，与 CLG 的 write_dwell_ms 同口径：
+    /// 缺省 80ms ≈ 2 个特调 tick（40ms）。死区沿用上方 hysteresis 字段；
+    /// 接管初写/恢复与写失败补写不经滞回。
+    #[serde(default = "d_ak_write_dwell_ms")]
+    pub write_dwell_ms: u64,
 }
 
 /// 按核心组的参数覆盖（`per_cluster` 段的元素）：**全部字段可选**，
@@ -732,6 +766,10 @@ fn d_ak_util_smoothing() -> f32 {
 fn d_ak_perf_ceil() -> f32 {
     1.0
 }
+/// [dwell] 写频最小驻留缺省：2 tick × 特调 40ms 采样
+fn d_ak_write_dwell_ms() -> u64 {
+    80
+}
 
 impl Default for SpecialTunedConfig {
     fn default() -> Self {
@@ -745,6 +783,7 @@ impl Default for SpecialTunedConfig {
             perf_ceil: d_ak_perf_ceil(),
             per_cluster: HashMap::new(),
             migration_cost_ns: None,
+            write_dwell_ms: d_ak_write_dwell_ms(),
         }
     }
 }
@@ -779,6 +818,8 @@ impl SpecialTunedConfig {
         if self.perf_floor > self.perf_ceil {
             self.perf_floor = self.perf_ceil;
         }
+        // [dwell] 写频驻留钳制（ms）：0 = 关闭翻摆延迟
+        self.write_dwell_ms = self.write_dwell_ms.min(5_000);
         for ov in self.per_cluster.values_mut() {
             ov.normalize();
         }

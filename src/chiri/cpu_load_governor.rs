@@ -7,7 +7,7 @@ use std::fs;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, mpsc};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::fluent_args;
 use crate::i18n::{t, t_with_args};
@@ -56,6 +56,16 @@ struct ClusterState {
     last_util: f32,
     /// 决策负载 EMA 状态（util_smoothing < 1 时启用；-1 = 未初始化），语义同 tuned
     ema_util: f32,
+    // [dwell] 写频滞回状态（Phase 2）：最小驻留 + 死区 + 方向翻摆抑制
+    /// 上次**实际写频**成功时刻（含豁免写）：dwell 以它计时；None = 尚未写过
+    /// （接管初写不走 write_freq、不启动时钟，首次受控写频立即生效）
+    last_write_at: Option<Instant>,
+    /// 上次实际写频方向：升 = 1、降 = -1、未写过 = 0（翻摆判定基准）
+    last_write_dir: i8,
+    /// 上次 write_freq 写入失败：下次写入视为防篡改补写、豁免滞回（重试时序不变）
+    last_failed: bool,
+    /// on_load_update 命中「极低负载立即降频」快路径（豁免滞回），flush 消费清零
+    fast_down: bool,
 }
 
 impl ClusterState {
@@ -80,20 +90,56 @@ impl ClusterState {
         }
     }
 
+    // [deadzone_hold] 死区频差（kHz）= write_deadzone × 硬件最高频。
+    // hold 判定与 write_freq 吞写 gate 共用此换算，两层不得各算各的。
+    #[inline]
+    fn deadzone_band(&self, deadzone_ratio: f32) -> f32 {
+        let hw_max = *self.available_freqs.last().unwrap_or(&0) as f32;
+        hw_max * deadzone_ratio
+    }
+
     /// 写 scaling_max_freq（性能上限）。
     /// min 已在 init 时压到硬件最低，之后只调 max。
     /// schedutil 在 [min, max] 里自己看着办——空闲时降到地板频，忙碌时贴近 max。
     /// 这比锁频(min=max)好的地方：不用等 160ms tick 才降频，内核微秒级就降下来了，
     /// 空转发热大幅减少。写 max 也不用管写序问题，因为 min 恒 <= max。
-    fn write_freq(&mut self, freq: u32) {
+    fn write_freq(&mut self, freq: u32, dwell_ms: u64, deadzone_ratio: f32, exempt: bool) {
         if freq == self.current_freq {
+            // 目标已与缓存值一致：上次写失败的补写诉求消失，清标记防悬挂——
+            // 否则任意久之后的下一次真实写频会白豁免滞回一次
+            self.last_failed = false;
             return;
+        }
+        // [dwell] 写频滞回（Phase 2）：死区内不写；距上次实际写频不足 dwell 且方向
+        // 翻摆时延迟写，到期后的下一次 flush 补写当前 target。豁免路径（触摸 floor
+        // 提频 / 极低负载立即降频 / 上次写失败的防篡改补写）直通；接管初写/恢复
+        // 不走本函数（写频时序与现状逐字节一致）。
+        if !exempt {
+            // [deadzone_hold] 死区 gate（双保险）：换算走 deadzone_band()，与
+            // on_load_update 的 hold 判定同源；flush 层目标与决策层落点不一致
+            // （热 clamp / 触摸 floor 后）时同样不写近距档。
+            if (freq.abs_diff(self.current_freq) as f32) < self.deadzone_band(deadzone_ratio) {
+                return;
+            }
+            let dir: i8 = if freq > self.current_freq { 1 } else { -1 };
+            let flip = self.last_write_dir != 0 && dir != self.last_write_dir;
+            if flip {
+                if let Some(at) = self.last_write_at {
+                    if at.elapsed() < Duration::from_millis(dwell_ms) {
+                        return;
+                    }
+                }
+            }
         }
         let old_freq = self.current_freq;
         let ok = self.max_writer.write_value_force(freq);
         // 写入成功才更新缓存，失败则下次 tick 自动重试
         if ok {
             self.current_freq = freq;
+            // [dwell] 实际写频记录（含豁免写）：dwell 计时与翻摆判定基准
+            self.last_write_at = Some(Instant::now());
+            self.last_write_dir = if freq > old_freq { 1 } else { -1 };
+            self.last_failed = false;
             debug!(
                 "{}",
                 t_with_args(
@@ -106,6 +152,8 @@ impl ClusterState {
                 )
             );
         } else {
+            // [dwell] 写失败：下次写入视为防篡改补写、豁免滞回（重试时序不变）
+            self.last_failed = true;
             debug!(
                 "{}",
                 t_with_args(
@@ -349,7 +397,7 @@ impl CoreGroupWorker {
     /// 决策入口：每次 SystemLoadUpdate 触发，只计算目标性能比，不写 sysfs。
     /// 同时记录 main_ tick 行所需摘要（over/under 计数、目标性能、决策标签）。
     /// 决策标签四种：up / down_wait / down / hold。hold 表示降频落点与当前频点
-    /// 相同（ceiling/floor 钳制稳态），不计 debounce、不写频。
+    /// 差在死区内（含相同，ceiling/floor 钳制稳态），不计 debounce、不写频。
     fn on_load_update(&mut self, core_utils: &[f32]) {
         let raw_util = self.cluster.max_util(core_utils);
         self.dev_raw_util = raw_util;
@@ -408,7 +456,12 @@ impl CoreGroupWorker {
         self.dev_tgt_perf = target_perf;
         let old_perf = self.cluster.current_perf;
 
-        if target_perf > old_perf {
+        // [perf_eps] 浮点停滞防护：current_perf 几何逼近 target_perf 时，有效步进
+        // 系数 α ≤ 0.5（滞回带内慢升分支）会在差 1 ulp 处增量舍入为 0、永远到不了
+        // target，严格 > 比较使该稳态永久落 up 分支（假 up + up_wait 无限累加）。
+        // 加 epsilon 让停滞态落入 else，由下方 [deadzone_hold] 死区 hold 正常收尾；
+        // 1e-6 远小于任何真实负载增量，正常升降路径不受影响。
+        if target_perf > old_perf + 1e-6 {
             self.cluster.down_wait = 0;
             self.cluster.up_wait += 1;
 
@@ -436,14 +489,20 @@ impl CoreGroupWorker {
             }
         } else {
             self.cluster.up_wait = 0;
-            // 先算降频落点：与当前频点相同（ceiling/floor 钳制稳态，如 reduce
-            // little ceiling 0.60 卡住时 util=1.00、tgt 略低于 current 但落点同一档
+            // 先算降频落点：落点与当前频点差在死区内（含同档，如 reduce
+            // little ceiling 0.60 卡住时 util=1.00、tgt 略低于 current 但落点同档
             // OPP）则写频无效果——不计数、不写频，decision 标 hold。此前该稳态
             // 每 tick 标 down 且 deb_down 无限增长，main_ 日志出现「满载却 decision=down」
-            // 的矛盾记录。真实降频路径（落点不同）行为不变；flush 每 tick 仍会
-            // 重写 ceiling 防篡改，稳态跳过决策写频无副作用。
+            // 的矛盾记录。真实降频路径（落点超死区）行为不变；flush 每 tick 经
+            // write_freq 值去重为 no-op（同值不落盘），防篡改仅在目标值变化时的
+            // 写入中顺带发生，稳态跳过决策写频无副作用。
             let target_freq = self.cluster.find_nearest_freq(target_perf);
-            if target_freq == self.cluster.current_freq {
+            // [deadzone_hold] hold 判定用死区比较（≤ 死区频差，含相等；
+            // write_deadzone=0 时退化为精确相等）：死区频差与 write_freq 吞写
+            // gate 共用 deadzone_band()，写不进 sysfs 的落点不累计 down_wait。
+            if (target_freq.abs_diff(self.cluster.current_freq) as f32)
+                <= self.cluster.deadzone_band(self.cfg.write_deadzone)
+            {
                 self.cluster.down_wait = 0;
                 self.dev_decision = "hold";
             } else {
@@ -452,6 +511,8 @@ impl CoreGroupWorker {
                 if self.cluster.down_wait >= self.cfg.down_rate_limit_ticks
                     || util < self.cfg.down_fast_threshold
                 {
+                    // [dwell] 极低负载立即降频 = 豁免路径：本次写频绕过滞回（flush 消费）
+                    self.cluster.fast_down = util < self.cfg.down_fast_threshold;
                     self.dev_decision = "down";
                     // 直接降上限（能效优先）：不做平滑渐变，一步到位写目标档。
                     // 降 ceiling 只收窄 schedutil 可用区间，不会把实际频率抬上去，
@@ -471,9 +532,12 @@ impl CoreGroupWorker {
     fn flush(&mut self, core_utils: &[f32], log_counter: &mut u32) {
         // 触摸升频：Worker 自主检查共享的 AtomicTouchState
         let mut touch_active = false;
+        // [dwell] floor 提频写入豁免滞回（floor 提频立即生效）
+        let mut touch_raised = false;
         if self.cfg.touch_boost_enabled {
             let floor = self.touch.get_floor();
             if floor > 0.0 && Self::is_big_cluster(&self.cluster.affected_cpus, &self.core_ranges) {
+                touch_raised = floor > self.cluster.current_perf;
                 self.cluster.current_perf = self.cluster.current_perf.max(floor);
                 touch_active = true;
             }
@@ -495,7 +559,17 @@ impl CoreGroupWorker {
             self.cluster.current_perf
         };
         let target_freq = self.cluster.find_nearest_freq(eff_perf);
-        self.cluster.write_freq(target_freq);
+        // [dwell] 豁免判定：触摸 floor 提频的升向写入 / 极低负载立即降频的降向写入
+        // （fast_down 消费制，只作用本次 flush）/ 上次写失败的防篡改补写。热保护
+        // clamp 刻意不豁免（温度毛刺不得绕过滞回直写频率），它是降频方向，经
+        // 降频快路径/非翻摆写入自然生效。
+        let fast_down = std::mem::take(&mut self.cluster.fast_down);
+        let exempt = (touch_raised && target_freq > self.cluster.current_freq)
+            || (fast_down && target_freq < self.cluster.current_freq)
+            || self.cluster.last_failed;
+        let dwell_ms = self.cfg.write_dwell_ms;
+        let deadzone = self.cfg.write_deadzone;
+        self.cluster.write_freq(target_freq, dwell_ms, deadzone, exempt);
 
         // main_ tick 行：仅决策 tick（core_utils 非空）且开发记录开启时写
         if !core_utils.is_empty() && crate::logger::diag_active() {
@@ -692,6 +766,11 @@ impl CoreGroupWorker {
             up_wait: 0,
             ema_util: -1.0,
             last_util: 0.0,
+            // [dwell] 写频滞回状态：接管初写不走 write_freq、不启动 dwell 时钟
+            last_write_at: None,
+            last_write_dir: 0,
+            last_failed: false,
+            fast_down: false,
         };
 
         let init_freq = cluster.find_nearest_freq(init_perf);
