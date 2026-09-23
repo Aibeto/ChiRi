@@ -29,7 +29,8 @@ Affinity:
   # 后台任务的 util 需求被钳低 → EAS 放置与 schedutil 频率回落、优先落小核，
   # 给 UI/视频等视觉可感的线程让路；不禁止使用大核（空闲时仍会被调度上去）。
   # 刻意不含 system-background（媒体/音频等可感知的系统后台）。
-  background_uclamp_max_pct: 50
+  # TODO: 实机复核 35（看后台同步/消息推送是否受影响）。
+  background_uclamp_max_pct: 35
 
 # [corectl]
 CoreCtl:
@@ -94,25 +95,31 @@ reduce:
 # [default]
 default:
   cpu_load_governor:
-    up_threshold: 0.78
-    down_threshold: 0.55
-    smoothing_up: 0.75
+    # 高频门槛：util ≥ 该值才算「高负载」并走全速升频，否则在滞回带内慢速爬升
+    # TODO: 实机复核 0.88（重点看应用启动/重载响应是否变钝）。
+    up_threshold: 0.88
+    # 降频门槛：低于该值开始降频（与 up 之间构成滞回带）
+    down_threshold: 0.62
+    # 高负载升频步长：每次只走 60% 差距（越小爬升越缓）
+    smoothing_up: 0.60
     # 决策负载 EMA（1.0=关闭）：滤掉抖动负载的单 tick 摆动，抑制决策翻转与
     # scaling_max_freq 高频改写（2026-09-22 本机型 QQ 日志回放：大核反转 458→194、
     # 写频 −30%；alpha 0.35 可再降但上限均值抬升更多，取 0.5 折中）。boost 不开。
     util_smoothing: 0.5
-    # 防抖：原 1/1 等于无防抖，8550 实测 cap 与方向每 tick 都可能翻转
-    # （升频平滑推进、降频一步到位，util 抖动即来回改写 scaling_max_freq）。
-    # 调回 2/3；低载（<down_fast_threshold）仍跳过降频防抖立即下调，空闲不受影响
-    down_rate_limit_ticks: 3
-    up_rate_limit_ticks: 2
-    # headroom 1.0 = 贴负载（target = util × headroom）；>1 为余量放大
+    # 降频确认 tick 数（越小回落越快）
+    down_rate_limit_ticks: 2
+    # 升频确认 tick 数（越大越难升）
+    up_rate_limit_ticks: 3
+    # target = util × headroom；1.0 = 贴负载，不给余量放大
     headroom_factor: 1.00
-    headroom_ramp: 0.12
+    # headroom 的过渡带宽：util 从 (up_threshold − ramp) 爬到 up_threshold 期间
+    # headroom 由 1.0 线性升到 headroom_factor（越窄，「高负载加成」启用越晚）
+    headroom_ramp: 0.08
     perf_floor: 0.05
-    # 硬天花板：target 再高也被它压住；per_cluster 未覆盖的簇继承此值。
-    # TODO: 实机复核 0.60（看亮屏交互功耗与滚动/输入是否跟手）。
-    perf_ceil: 0.60
+    # 不设天花板：上限完全由负载动态决定，保留随时到最高频的能力。
+    # 控功耗靠「升频门槛 + 升频速率」（up_threshold / rate limit / smoothing / jump），
+    # 不靠砍上限；需要单独收紧的簇走 per_cluster 覆盖（本档不覆盖任何簇）。
+    perf_ceil: 1.00
     # 接管起始性能，同时是触摸升频地板的基线（floor = perf_init + tiers × 0.05）
     perf_init: 0.35
     # 按核心组再收紧（8550 实测日常 util：little 0.55 / big 0.36 / prime 0.32，
@@ -123,18 +130,19 @@ default:
     # surfaceflinger/system_server 主导的亮屏 UI 固有形态，视频稳态才是 ~300/s。
     # 之前拿 cloudmusic（亮屏 UI）对比 0920 视频稳态属场景错配，P2 嫌疑解除，
     # 恢复按簇收紧。
-    per_cluster:
-      little:
-        perf_ceil: 0.50
-      big:
-        perf_ceil: 0.60
-      prime:
-        perf_ceil: 0.45
-    up_jump_threshold: 0.30
-    slow_up_scale: 0.03
-    down_fast_threshold: 0.25
+    # 本档不做 per_cluster 覆盖：三簇上限都交给负载动态决定（见 perf_ceil 注释）。
+    # 历史：2026-09-22 曾按簇收紧（little 0.70 / prime 0.65），2026-09-23 改为不封顶、只控门槛；
+    # 迁移率的 A/B 结论（高迁移是亮屏 UI 固有形态，与 per_cluster 无关）见 memory/2026-09-22.md。
+    # 跳变门槛：target 相对当前跳升超过该值才算「显著跳变」而立即升频，
+    # 否则走滞回带慢速爬升（提高它 = 尖峰更难把上限瞬间拉到高频）
+    up_jump_threshold: 0.45
+    # 滞回带内的升频速度系数（配合 smoothing_up）
+    slow_up_scale: 0.02
+    # 低于该 util 立即降频（跳过 down_wait 确认期）
+    down_fast_threshold: 0.30
     spike_jump_threshold: 0.40
-    spike_decay: 0.15
+    # 单 tick 尖峰只保留 10% 增量（削 p95 尖峰，不动稳态）
+    spike_decay: 0.10
     touch_boost_enabled: true
     # 触摸窗口内大核地板抬高：floor = perf_init + tiers × 0.05，且不超过 perf_ceil
     # TODO: 实机复核 600ms / 4 档（手指在屏上滑动时应始终处于窗口内）。

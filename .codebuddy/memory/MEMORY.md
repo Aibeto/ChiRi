@@ -99,7 +99,7 @@
 - **动态限频**：CLG 与特调同构——写 schedutil、min 压硬件最低、只调 max；按核心组 `up/down_core_count|util_percent` 判定，util=0 不计升频、计入降频；抖动 wait_ms 防抖。
 - **特调参数组**：`Config.tuned_profiles: HashMap<模式名, SpecialTunedConfig>`，`get_tuned_profile(mode)` 缺省回退 `akmode`；新增模式 = special_tuned.yaml 条目+同名参数组（无需改 .rs）；缺参数组打 `tuned-profile-missing`。`boost_affinity`=boost 类亲和（省电型必须 false）；`util_smoothing`=负载 EMA。
 - **降频计时**：`down_target` 只在目标明显回升（>+hyst）时重置计时。
-- **CLG 调频主旋钮（2026-09-23）**：`target_perf = clamp(util × headroom, floor, ceil)`，**与 up_threshold 无关**（up 只管 headroom ramp/升频速度）→ 降平均频率靠 `perf_ceil` 与 `headroom`；实测实际频率紧贴决策上限（QQ big 实际/决策 = 92%）→ 压 ceil 直接生效。触摸地板 = `perf_init + tiers×0.05` 且被 ceil 钳制。
+- **CLG 调频主旋钮（2026-09-23，口径修正）**：`target_perf = clamp(util × headroom, floor, ceil)`，**与 up_threshold 无关**（up 只管 headroom ramp 与升频速度）。**降功耗不封顶**：除特调外在用模式都必须保留随时到最高频的能力（`perf_ceil 1.0`），控功耗靠「高频门槛」（up_threshold / rate limit / smoothing / jump）与「headroom 过渡带宽」；实测实际频率紧贴决策上限（QQ big 实际/决策 = 92%）。触摸地板 = `perf_init + tiers×0.05`。
 - **Alpha06-06 亮屏画像（2026-09-23 下午包）**：息屏 0.45W；launcher 1.30W（GPU 2%）vs QQ 4.92W / 酷安 4.24W / 微信 3.30W / bili 4.59W（GPU 18-24%、psi 30-40）→ 亮屏功耗差主要来自内容型 App 的 GPU+CPU 负载，不是「亮屏 UI 固有形态」。
 - **FAS「频率不匹配」不是外部压制的证据**（2026-09-23 定位）：旧实现 `apply_freq_locked` 写完立刻读 `scaling_cur_freq`，内核调频异步未完成 → 读到的是**写入前的旧档**，被误判成压制；实测 55 次的实际值全部 = 旧档、近旁 snap 的 cur==max、帧率达标。已改为「目标稳定 ≥ VERIFY_SETTLE=200ms 后、在下一次写入前抽查」（频繁改频期间跳过；真实压制仍会抓到并重写）。
 - **FAS migration_cost**（2026-09-23 起）：`FasRulesConfig.migration_cost_ns`（`module/config/normal/fas/*.yaml`，None=完全不动），接管期写 `/proc/sys/kernel/sched_migration_cost_ns`、deactivate 按快照恢复（读不到原值就不写）；sgame.yaml 已配 400000。
