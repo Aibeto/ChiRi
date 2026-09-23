@@ -558,17 +558,7 @@ util 数组按**真实 CPU ID 索引**，长度是 `max_cpu_id + 1`。这样 CLG
 - `LcdPower`：`/sys/class/lcd/*/lcd_power == 0`（LCD class，三星 Exynos 等机型）
 - `DrmEnabled`：`/sys/class/drm` 内屏 connector 的 `enabled` == "enabled"（无该节点退 `dpms`）
 
-**息屏仲裁**用的是投票制。亮转息时所有有效节点投票，需要 2 票（`OFF_QUORUM = 2`）才确认。只有一个有效节点时按一票算。所有节点都读不到时，fail-safe 选择「恒亮屏」——宁可多耗电，也不要错误地进入省电模式。
-
-相关常量：
-
-| 常量                         | 值  | 作用                           |
-| ---------------------------- | --- | ------------------------------ |
-| `SCREEN_READ_FAIL_LIMIT`     | 8   | 连续读失败这么多次就退役该节点 |
-| `OFF_REVIEW_INTERVAL`        | 10s | 息屏稳态下全节点复核周期       |
-| `INCONSISTENCY_SWITCH_DELAY` | 15s | 节点读数不一致时的切换延迟     |
-| `VETO_RETIRE_EPISODES`       | 3   | 被驳回这么多次后退役           |
-| `OFF_QUORUM`                 | 2   | 息屏确认所需票数               |
+**息屏仲裁**用的是投票制：亮转息时所有有效节点投票，**OFF 票超过有效票数一半**才确认息屏；只有一个有效节点时按一票算，全部读不到时不改判（保持现状）。`verify_screen_state` 每轮同样全票校正。2026-09-23 起不做节点退役，票数是唯一判断标准（退役阈值、复核间隔、切换延迟等常量均已删除）。
 
 ### 4.8 遥测
 
@@ -3073,8 +3063,6 @@ WebUI 侧的路径注入防护（`isSafeConfigRel` 拒绝绝对路径、`..`、�
 | `FG_BUSY_RELEASE_UTIL_PCT`      | 15.0        | `chiri/affinity.rs`        |
 | `BIG_HIGH_WATER`                | 0.90        | `chiri/affinity.rs`        |
 | `LITTLE_HIGH_WATER`             | 0.70        | `chiri/affinity.rs`        |
-| `SCREEN_READ_FAIL_LIMIT`        | 8           | `monitor/screen_detect.rs` |
-| `OFF_QUORUM`                    | 2           | `monitor/screen_detect.rs` |
 | `FRAMETIME_WINDOW`              | 144         | `monitor/fps_monitor.rs`   |
 | `MIN_FRAME_NS` / `MAX_FRAME_NS` | 1ms / 200ms | `monitor/fps_monitor.rs`   |
 

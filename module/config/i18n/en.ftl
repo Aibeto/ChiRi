@@ -63,11 +63,8 @@ screen-uevent-backlight = [Screen] backlight event: { $dev } -> state={ $state }
 screen-uevent-backlight-unreadable = [Screen] backlight state unreadable: { $dev }
 screen-detect-source-found = [Screen] Screen state source ready: { $kind } @ { $path }
 screen-detect-no-source = [Screen] No usable screen state source (/sys/class/backlight, backlight leds under /sys/class/leds, /sys/class/graphics/fb*/blank, /sys/class/lcd/*/lcd_power and the enabled/dpms node of internal DRM connectors all unavailable); state cannot be self-healed, uevent events only
-screen-detect-read-failed = [Screen] Screen state source read failed ({ $kind } @ { $path }); node retired and next one selected after consecutive failures, no repeat until success
-screen-detect-nodes-exhausted = [Screen] All { $count } screen state nodes exhausted (incorrect or contradictory), entering always-on mode: screen-off detection disabled, screen state permanently treated as ON (prefer losing power saving over mis-detected screen-off freezing the device)
-screen-off-vetoed = [Screen] Not enough screen-off votes: node { $node } reports ON (source: { $source }); screen-off not confirmed; node retired after 15s of persistent inconsistency
+screen-off-vetoed = [Screen] Not enough screen-off votes: node { $node } reports ON (source: { $source }); screen-off not confirmed
 screen-off-unconfirmed = [Screen] No readable screen-state node (source: { $source }); screen-off not confirmed
-screen-detect-node-switched = [Screen] Detection node persistently inconsistent/failed, retired { $retired }, switched to { $next }
 screen-uevent-leds = [Screen] leds backlight event: { $dev } -> state={ $state }
 screen-uevent-leds-unreadable = [Screen] leds backlight state unreadable: { $dev }
 scheduler-screen-on = [Scheduler] Screen ON trigger event

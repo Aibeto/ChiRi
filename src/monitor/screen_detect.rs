@@ -1,17 +1,17 @@
-//! screen_detect.rs: [update] [source] [select] [switch] [read] [verify] [uevent]
+//! screen_detect.rs: [update] [source] [select] [read] [verify] [uevent]
 
 use kobject_uevent::{ActionType, UEvent};
-use log::{debug, error, info, warn};
+use log::{debug, info, warn};
 use netlink_sys::{Socket, SocketAddr, protocols::NETLINK_KOBJECT_UEVENT};
 use std::error::Error;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::SyncSender;
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::common::DaemonEvent;
 use crate::fluent_args;
@@ -23,22 +23,16 @@ use crate::i18n::{t, t_with_args};
 /// uevent 线程直推（零轮询延迟），verify_screen_state 自愈路径的变化
 /// 由 app_detect 主循环兜底转发（其循环本身每轮比对 arc）。
 ///
-/// 息屏仲裁（口径：**多数票**）：亮→息**翻转尝试**时全节点投票——OFF 票超过有效
-/// 票数的一半才确认；只凑到一票 OFF 且没有其它可读节点时也确认（机型只暴露一个
-/// 节点的情况）；一个有效读数都没有时不改判。无效节点（读不到、不存在、已退役）不计票，
-/// 也不否决。有节点报亮屏却凑不齐息屏票 = 读数矛盾：打点并可退役主节点、切换下一个
-/// （见 retire_primary_and_switch）。
-/// 稳态（无翻转）快速返回不做扫描——稳态息屏期的失真检测由 verify 的定时复核驱动，
+/// 息屏仲裁（口径：**多数票**，无节点退役）：亮→息**翻转尝试**时全节点投票——
+/// OFF 票超过有效票数的一半才确认；只凑到一票 OFF 且没有其它可读节点时也确认
+/// （机型只暴露一个节点的情况）；一个有效读数都没有时不改判。读不到、不存在的
+/// 节点不计票、也不否决。
+/// 稳态（无翻转）快速返回不做扫描——全节点复核由 verify 的定时轮询承担，
 /// 不随事件频率空跑全节点扫描。
 /// 所有息屏事件生产者（verify 自愈、power/backlight/leds uevent）共用本函数，
 /// 策略天然覆盖全部息屏事件。
-/// 注意：复核扫描必须在拿 arc 锁之前——命中驳回且全部节点耗尽时会进入
-/// 恒亮屏模式（enter_always_on 需要写 arc），持锁状态下会死锁。
+/// 注意：投票扫描必须在拿 arc 锁之前——本函数后半段要写 arc，持锁会与调用方互等。
 fn update_state_if_changed(state_arc: &Arc<Mutex<bool>>, new_state: bool, source: &str) -> bool {
-    // 恒亮屏模式：全部节点已耗尽，拒绝一切息屏事件（永久按亮屏处理）
-    if !new_state && ALWAYS_ON.load(Ordering::Relaxed) {
-        return false;
-    }
     // 窥视当前状态（短锁）：稳态（无翻转）直接返回，不做全节点扫描
     let current = *state_arc.lock().unwrap();
     if new_state == current {
@@ -61,14 +55,8 @@ fn update_state_if_changed(state_arc: &Arc<Mutex<bool>>, new_state: bool, source
                         )
                     );
                 }
-                // 事件源报 OFF 却凑不齐息屏票：读数矛盾。退役切换延迟 15s——
-                // 单次不一致可能是瞬时毛刺，持续不一致才切换（见
-                // INCONSISTENCY_SWITCH_DELAY）；期间息屏事件继续被驳回
-                if inconsistency_due_for_switch() || veto_episode_due_for_switch() {
-                    retire_primary_and_switch(state_arc);
-                }
             } else {
-                // 一个有效读数都没有：保持亮屏。反复读失败由 verify 的计数退役该节点
+                // 一个有效读数都没有：保持亮屏
                 debug!(
                     "{}",
                     t_with_args("screen-off-unconfirmed", &fluent_args!("source" => source))
@@ -76,9 +64,6 @@ fn update_state_if_changed(state_arc: &Arc<Mutex<bool>>, new_state: bool, source
             }
             return false;
         }
-        // 息屏确认：一致性恢复，清不一致计时与驳回计数
-        INCONSISTENT_SINCE.lock().unwrap().take();
-        reset_veto_episodes();
     } else {
         VETO_WARNED.store(false, Ordering::Relaxed);
     }
@@ -192,61 +177,12 @@ fn is_backlight_led_name(name: &str) -> bool {
     !NON_PANEL_LED_KEYWORDS.iter().any(|k| n.contains(k))
 }
 
-/// 主检测源缓存：`None` 表示尚未发现，每次校验重扫直到找到——
-/// 避免开机早期 sysfs 尚未就绪时永久缓存 None 导致自愈失效。
-static SCREEN_SOURCE: Mutex<Option<(PathBuf, ScreenSourceKind)>> = Mutex::new(None);
-/// 缓存源连续不可读计数（verify_screen_state 维护，达限退役重扫）
-static SCREEN_READ_FAILS: AtomicU32 = AtomicU32::new(0);
-/// 连续不可读退役阈值：verify 每轮调用（息屏期 1s / 亮屏期 1.5s+），8 次 ≈ 8~12s
-const SCREEN_READ_FAIL_LIMIT: u32 = 8;
 /// 诊断打点去重：检测源发现 / 无源告警各只打一条（verify 高频调用防刷屏）
 static SOURCE_FOUND_LOGGED: AtomicBool = AtomicBool::new(false);
 static NO_SOURCE_LOGGED: AtomicBool = AtomicBool::new(false);
-/// 读失败告警去重：一次持续读失败只 warn 一条，读成功后复位（防每 8~12s
-/// 重扫循环刷屏）；换源后仍失败也不重复——至少留有一条含路径的告警可查
-static READ_FAIL_WARNED: AtomicBool = AtomicBool::new(false);
 /// 亮屏否决告警去重：一次被否决的息屏 episode 只 warn 一条，ON 读数到达后复位
 /// （防真实息屏期间每轮 verify 刷屏）
 static VETO_WARNED: AtomicBool = AtomicBool::new(false);
-/// 退役节点记录器：出现过「报 OFF 被其他节点驳回」或「持续不可读/不存在」的
-/// 主节点登记于此，重扫选主时跳过；全部候选退役 = 节点耗尽 → 恒亮屏模式
-static RETIRED_NODES: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
-/// 恒亮屏模式：全部候选节点耗尽后置位——不再读取任何节点、不再接受息屏事件，
-/// 屏幕状态永久按亮屏处理（fail-safe：宁可不节电，不可亮屏被误判息屏卡死设备）
-static ALWAYS_ON: AtomicBool = AtomicBool::new(false);
-/// 恒亮屏 error 打点去重（仅一次）
-static ALWAYS_ON_LOGGED: AtomicBool = AtomicBool::new(false);
-/// 稳态息屏期全节点复核间隔：arc 已 OFF 期间每该时长全节点扫描一次，
-/// 检测主节点失真（息屏不清零/读数卡死会让 arc 永久滞留 OFF——scenemode/
-/// prime 下线无法退出，亮屏使用中超大核异常离线）。息屏期 verify ~1s 一轮，
-/// 10s 复核 = 每 ~10 轮多读几个小文件，开销可忽略。
-const OFF_REVIEW_INTERVAL: Duration = Duration::from_secs(10);
-/// 稳态息屏复核计时器（记录器）：上次全节点复核时刻；None = 尚未复核过
-/// （进入息屏后首轮即复核一次）
-static LAST_OFF_REVIEW: Mutex<Option<Instant>> = Mutex::new(None);
-/// 不一致切换延迟：主节点息屏读数被其他节点亮屏驳回后，**持续不一致达到
-/// 该时长才退役主节点并切换**——单次不一致可能是瞬时毛刺，立即换节点反而
-/// 抖动；期间息屏事件照常驳回（亮屏优先，宁可不节电）
-const INCONSISTENCY_SWITCH_DELAY: Duration = Duration::from_secs(15);
-/// 不一致起始时刻（记录器）：None = 当前主节点无不一致；Some(t) = 自 t 起
-/// 持续不一致。清零时机：主节点读到 ON（verify）/ 息屏转换被全节点一致
-/// 接受 / 稳态复核全节点一致 OFF / 退役切换后（新主节点重新计时）
-static INCONSISTENT_SINCE: Mutex<Option<Instant>> = Mutex::new(None);
-/// 息屏「驳回 episode」计数器：与 INCONSISTENT_SINCE 互补。后者要求**连续**不一致
-/// 15s，但主节点自身每轮 verify 读到 ON 就会清它（见 verify_screen_state），
-/// 于是「报 OFF 却被判亮屏」的失真节点永远攒不满窗口、永不退役——屏幕状态整夜
-/// 钉死在 ON（实测：某 8550 面板 panel1-backlight 息屏仍报亮，整夜 0 条 screen,off
-/// 事件、scenemode 从未进入 → 大核带电 + 小核上限全开）。本计数只按「息屏尝试
-/// 被驳回」的次数累加，ON 读数不清零，只在**全节点一致 OFF**（节点被证可信）时复位。
-static VETO_EPISODES: AtomicU32 = AtomicU32::new(0);
-/// 上次计入 episode 的时刻（去重 + 窗口判定）
-static VETO_EPISODE_LAST: Mutex<Option<Instant>> = Mutex::new(None);
-/// 退役阈值：同一主节点累计该次数的息屏驳回即判定读数不可信，退役换下一个候选
-const VETO_RETIRE_EPISODES: u32 = 3;
-/// episode 计数窗口：距上次计入超过该时长则重新起算，避免跨天累计误退役
-const VETO_EPISODE_WINDOW: Duration = Duration::from_secs(1800);
-/// episode 最小间隔：一次息屏可能连发多个 uevent，短于该间隔不重复计数
-const VETO_EPISODE_MIN_GAP: Duration = Duration::from_secs(60);
 
 // [select]
 /// 按可靠性优先级枚举全部候选屏幕状态节点（有序）：
@@ -328,142 +264,8 @@ fn enumerate_screen_nodes() -> Vec<(PathBuf, ScreenSourceKind)> {
     nodes
 }
 
-/// 选主检测节点：按可靠性优先级枚举全部候选，跳过已退役节点，取第一个可用者。
-/// 全部候选已退役（或系统无任何候选）返回 None。
-fn select_primary_node() -> Option<(PathBuf, ScreenSourceKind)> {
-    let retired = RETIRED_NODES.lock().unwrap();
-    enumerate_screen_nodes()
-        .into_iter()
-        .find(|(dev, _)| !retired.iter().any(|r| r == dev))
-}
-
-/// 取缓存的检测源；未缓存时重扫一次并缓存。
-fn screen_source() -> Option<(PathBuf, ScreenSourceKind)> {
-    let mut cache = SCREEN_SOURCE.lock().unwrap();
-    if cache.is_none() {
-        *cache = select_primary_node();
-        if cache.is_some() {
-            // 从「无源/源失效」恢复：重置告警去重与失败计数，重新打点新源
-            NO_SOURCE_LOGGED.store(false, Ordering::Relaxed);
-            SOURCE_FOUND_LOGGED.store(false, Ordering::Relaxed);
-            SCREEN_READ_FAILS.store(0, Ordering::Relaxed);
-        }
-    }
-    cache.clone()
-}
-
-/// 登记一次「主节点息屏读数被亮屏驳回」的不一致，返回是否已持续达到
-/// 切换延迟（应退役主节点切换下一个）。首次不一致仅启动计时，不切换。
-fn inconsistency_due_for_switch() -> bool {
-    let mut since = INCONSISTENT_SINCE.lock().unwrap();
-    match *since {
-        None => {
-            *since = Some(Instant::now());
-            false
-        }
-        Some(t) => t.elapsed() >= INCONSISTENCY_SWITCH_DELAY,
-    }
-}
-
-/// 登记一次「息屏尝试被驳回」episode，返回是否达到退役阈值。
-/// 与 inconsistency_due_for_switch 的差异见 VETO_EPISODES 注释：本计数不被主节点
-/// 的 ON 读数清除，因此能覆盖「节点持续失真 → verify 每轮清计时」的死锁场景。
-/// 最小间隔内重复调用不计数（同一次息屏的多个 uevent 只算一次）。
-fn veto_episode_due_for_switch() -> bool {
-    let mut last = VETO_EPISODE_LAST.lock().unwrap();
-    match *last {
-        Some(t) if t.elapsed() < VETO_EPISODE_MIN_GAP => return false,
-        Some(t) if t.elapsed() < VETO_EPISODE_WINDOW => {
-            VETO_EPISODES.fetch_add(1, Ordering::Relaxed);
-        }
-        _ => VETO_EPISODES.store(1, Ordering::Relaxed),
-    }
-    // 阈值判定与 `*last` 更新在 match 之外统一执行（上面两个分支都落到这里，
-    // 故计数每次递增后都会重新判定，非只有首计数才返回 true）。
-    // 勿改成在分支内 `return ... >= VETO_RETIRE_EPISODES`：那会跳过本行 `*last`
-    // 更新，MIN_GAP 去重随即失效（last 不前进 → 每次调用都计数 → 计数飞涨误退役）。
-    *last = Some(Instant::now());
-    VETO_EPISODES.load(Ordering::Relaxed) >= VETO_RETIRE_EPISODES
-}
-
-/// 复位 episode 计数：全节点一致 OFF（主节点读数被证实可信）时调用
-fn reset_veto_episodes() {
-    VETO_EPISODES.store(0, Ordering::Relaxed);
-    VETO_EPISODE_LAST.lock().unwrap().take();
-}
-
-// [switch]
-/// 进入恒亮屏模式：全部候选节点耗尽（不正确或矛盾）——不再检测息屏，屏幕
-/// 状态永久按亮屏处理。error 打点一次（比 warn 高一级，提示所有节点均不正确
-/// 或矛盾）。若当前 arc 为 OFF，校正为 ON——app_detect 主循环会把该变化转发
-/// 为 ScreenStateChange(true)，调度器恢复亮屏安全态。
-/// 注意：调用方不得持有 arc 锁（本函数经 update_state_if_changed 写 arc）。
-fn enter_always_on(state_arc: &Arc<Mutex<bool>>) {
-    ALWAYS_ON.store(true, Ordering::Relaxed);
-    INCONSISTENT_SINCE.lock().unwrap().take();
-    if !ALWAYS_ON_LOGGED.swap(true, Ordering::Relaxed) {
-        let count = RETIRED_NODES.lock().unwrap().len();
-        error!(
-            "{}",
-            t_with_args(
-                "screen-detect-nodes-exhausted",
-                &fluent_args!("count" => count.to_string())
-            )
-        );
-    }
-    update_state_if_changed(state_arc, true, "always-on");
-}
-
-/// 退役当前主节点并切换到下一个未退役候选（息屏读数被驳回且不一致持续
-/// 超过 15s = 主节点读数矛盾；节点持续不可读/不存在 = 节点失效——两种
-/// 情况都「再切一个节点」）。全部候选退役 → 恒亮屏模式（error 一次，不再
-/// 检测息屏）。注意：调用方不得持有 arc 锁（耗尽路径经 enter_always_on 写 arc）。
-fn retire_primary_and_switch(state_arc: &Arc<Mutex<bool>>) {
-    // 1) 当前主源登记退役（None = 本就无主源，仅尝试补选）
-    let retired = SCREEN_SOURCE.lock().unwrap().take();
-    let retired_str = retired
-        .as_ref()
-        .map(|(d, _)| d.display().to_string())
-        .unwrap_or_else(|| "-".to_string());
-    if let Some((dev, _)) = retired {
-        let mut set = RETIRED_NODES.lock().unwrap();
-        if !set.contains(&dev) {
-            set.push(dev);
-        }
-    }
-    // 2) 切换到下一个未退役候选
-    match select_primary_node() {
-        Some((next, kind)) => {
-            *SCREEN_SOURCE.lock().unwrap() = Some((next.clone(), kind));
-            SCREEN_READ_FAILS.store(0, Ordering::Relaxed);
-            // 新主节点重新计时（15s 不一致窗口重新开始）；驳回 episode 同时复位，
-            // 否则新节点会在第一次驳回就被旧计数连锁退役，逐个耗尽候选
-            INCONSISTENT_SINCE.lock().unwrap().take();
-            reset_veto_episodes();
-            warn!(
-                "{}",
-                t_with_args(
-                    "screen-detect-node-switched",
-                    &fluent_args!(
-                        "retired" => retired_str,
-                        "next" => next.display().to_string()
-                    )
-                )
-            );
-        }
-        None => {
-            // 无候选可选：曾有候选（全部退役）→ 恒亮屏；系统本就无任何候选
-            // 节点（开机早期 sysfs 未就绪）→ 维持「无源」路径等待就绪
-            if !enumerate_screen_nodes().is_empty() {
-                enter_always_on(state_arc);
-            }
-        }
-    }
-}
-
 // [read]
-/// 息屏仲裁票数：只统计**有效读数**。读不到、节点不存在、已退役的都不计票
-/// （用户口径 2026-09-18：无效节点不参与判定，也不否决）。
+/// 息屏仲裁票数：只统计**有效读数**。读不到、不存在的节点不计票，也不否决。
 struct ScreenVotes {
     off: usize,
     on: usize,
@@ -471,19 +273,15 @@ struct ScreenVotes {
     on_node: Option<String>,
 }
 
-/// 全节点投票：枚举全部候选节点（跳过已退役的），逐个用 [`read_screen_state`] 读，
+/// 全节点投票：枚举全部候选节点，逐个用 [`read_screen_state`] 读，
 /// 不可读的直接跳过——各源读取口径只在 read_screen_state 一处，避免两套逻辑漂移。
 fn tally_screen_nodes() -> ScreenVotes {
-    let retired = RETIRED_NODES.lock().unwrap();
     let mut votes = ScreenVotes {
         off: 0,
         on: 0,
         on_node: None,
     };
     for (dev, kind) in enumerate_screen_nodes() {
-        if retired.iter().any(|r| r == &dev) {
-            continue;
-        }
         match read_screen_state(kind, &dev) {
             Some(true) => {
                 votes.on += 1;
@@ -584,114 +382,51 @@ fn read_backlight_state(dev: &Path) -> Option<bool> {
 /// 唤醒、netlink 缓冲溢出，或机型根本不广播屏幕类 uevent——现代内核已无
 /// early_suspend/late_resume power uevent，leds/backlight 亮度变化多数驱动
 /// 也不广播 KOBJ_CHANGE），导致 `state_arc` 与实际屏幕状态脱节。
-/// 由 app_detect 主循环每轮调用一次，直接读检测源 sysfs 校正 arc；
-/// 无可用源或读取失败时静默跳过，不干扰 uevent 主路径。
+/// 由 app_detect 主循环每轮调用一次：**全节点投票**，票数为唯一判断标准，
+/// 结论与 arc 不一致时经 [`update_state_if_changed`] 校正。无有效读数或票数
+/// 平手时不改判，不干扰 uevent 主路径。
 ///
-/// 诊断打点（防刷屏）：① 发现可用源且读成功时 info 打点源类别与路径——
-/// 「屏幕状态读不到」时从 daemon.log 即可确认设备实际可用的检测源；
-/// ② 三类源全部缺失时 info 告警一次；③ 源存在但首次读失败时 warn 打点
-/// （含源路径——SELinux 拒读/权限/IO 错误等故障模式的唯一可见痕迹，
-/// 持续失败不重复，读成功后复位）。
-/// 主节点连续 8 次全不可读（~8s）→ 退役并切换下一个候选（节点缺失/不存在
-/// 的兜底：直接再切一个节点）；全部候选退役 → 恒亮屏模式（error 一次）。
+/// 诊断打点（防刷屏）：① 首次发现可读节点时 info 打点源类别与路径——「屏幕
+/// 状态读不到」时从 daemon.log 即可确认设备实际可用的检测源；② 全部节点缺失
+/// 或全不可读时 info 告警一次（恢复后复位）。
 pub fn verify_screen_state(state_arc: &Arc<Mutex<bool>>) {
-    // 恒亮屏模式：不再读取任何节点、不再检测息屏（arc 已被校正为 ON）
-    if ALWAYS_ON.load(Ordering::Relaxed) {
+    let nodes = enumerate_screen_nodes();
+    if nodes.is_empty() {
+        if !NO_SOURCE_LOGGED.swap(true, Ordering::Relaxed) {
+            info!("{}", t("screen-detect-no-source"));
+        }
         return;
     }
-    if let Some((dev, kind)) = screen_source() {
-        match read_screen_state(kind, &dev) {
-            Some(state) => {
-                SCREEN_READ_FAILS.store(0, Ordering::Relaxed);
-                READ_FAIL_WARNED.store(false, Ordering::Relaxed);
-                if !SOURCE_FOUND_LOGGED.swap(true, Ordering::Relaxed) {
-                    info!(
-                        "{}",
-                        t_with_args(
-                            "screen-detect-source-found",
-                            &fluent_args!(
-                                "kind" => kind.as_str(),
-                                "path" => dev.display().to_string()
-                            )
-                        )
-                    );
-                }
-                update_state_if_changed(state_arc, state, kind.as_str());
-                if state {
-                    // 主节点读到 ON：息屏读数矛盾已消失，清不一致计时
-                    INCONSISTENT_SINCE.lock().unwrap().take();
-                } else {
-                    // 稳态息屏定时复核：arc 已 OFF 期间每 OFF_REVIEW_INTERVAL 全节点
-                    // 扫描一次，兜住「主节点失真把 arc 永久钉在 OFF」——否则
-                    // scenemode/prime 下线无法退出，亮屏使用中超大核异常离线
-                    // （翻转路径的全节点复核只覆盖「亮→息」瞬间，盖不住稳态）。
-                    // 复核发现任一节点亮屏 → 主节点读数失真：切换需不一致持续
-                    // 15s（INCONSISTENCY_SWITCH_DELAY），随后强制改判亮屏（经
-                    // update_state_if_changed 写 arc，app_detect 每轮比对转发
-                    // ScreenStateChange(true)，scenemode 退出恢复 prime）。
-                    let due = {
-                        let mut last = LAST_OFF_REVIEW.lock().unwrap();
-                        match *last {
-                            Some(t) if t.elapsed() < OFF_REVIEW_INTERVAL => false,
-                            _ => {
-                                *last = Some(Instant::now());
-                                true
-                            }
-                        }
-                    };
-                    if due {
-                        // 稳态复核（arc 已 OFF）：息屏票凑不齐、又有节点报亮屏 → 事件源
-                        // 读数失真，切回亮屏（写 arc，app_detect 每轮比对转发退出场景模式）
-                        let votes = tally_screen_nodes();
-                        if votes.on > 0 && !screen_off_confirmed(&votes) {
-                            if !VETO_WARNED.swap(true, Ordering::Relaxed) {
-                                warn!(
-                                    "{}",
-                                    t_with_args(
-                                        "screen-off-vetoed",
-                                        &fluent_args!(
-                                            "source" => "steady-review",
-                                            "node" => votes.on_node.clone().unwrap_or_default()
-                                        )
-                                    )
-                                );
-                            }
-                            if inconsistency_due_for_switch() || veto_episode_due_for_switch() {
-                                retire_primary_and_switch(state_arc);
-                            }
-                            update_state_if_changed(state_arc, true, "steady-review");
-                        } else if screen_off_confirmed(&votes) {
-                            // 息屏票仍然够：一致性恢复，清不一致计时与驳回计数
-                            INCONSISTENT_SINCE.lock().unwrap().take();
-                            reset_veto_episodes();
-                        }
-                    }
-                }
-            }
-            None => {
-                let fails = SCREEN_READ_FAILS.fetch_add(1, Ordering::Relaxed) + 1;
-                if fails == 1 && !READ_FAIL_WARNED.swap(true, Ordering::Relaxed) {
-                    warn!(
-                        "{}",
-                        t_with_args(
-                            "screen-detect-read-failed",
-                            &fluent_args!(
-                                "kind" => kind.as_str(),
-                                "path" => dev.display().to_string()
-                            )
-                        )
-                    );
-                }
-                if fails >= SCREEN_READ_FAIL_LIMIT {
-                    // 节点持续不可读/不存在 → 退役并切换下一个候选；
-                    // 全部候选退役 → 恒亮屏模式（enter_always_on 内 error 打点）
-                    retire_primary_and_switch(state_arc);
-                }
-            }
+    // 全节点投票：票数为唯一判断标准
+    let votes = tally_screen_nodes();
+    let valid = votes.off + votes.on;
+    if valid == 0 {
+        // 全部不可读：没有证据就不改判（恢复后复位，便于下次告警）
+        if !NO_SOURCE_LOGGED.swap(true, Ordering::Relaxed) {
+            info!("{}", t("screen-detect-no-source"));
         }
-    } else if !NO_SOURCE_LOGGED.swap(true, Ordering::Relaxed) {
-        info!("{}", t("screen-detect-no-source"));
+        return;
     }
+    NO_SOURCE_LOGGED.store(false, Ordering::Relaxed);
+    if !SOURCE_FOUND_LOGGED.swap(true, Ordering::Relaxed) {
+        let (dev, kind) = &nodes[0];
+        info!(
+            "{}",
+            t_with_args(
+                "screen-detect-source-found",
+                &fluent_args!("kind" => kind.as_str(), "path" => dev.display().to_string())
+            )
+        );
+    }
+    let decided = if votes.off * 2 > valid {
+        false
+    } else if votes.on * 2 > valid {
+        true
+    } else {
+        // 票数平手：保持现状
+        return;
+    };
+    update_state_if_changed(state_arc, decided, "verify");
 }
 
 // [uevent]

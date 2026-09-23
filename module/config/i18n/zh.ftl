@@ -63,11 +63,8 @@ screen-uevent-backlight = [Screen] 背光事件: { $dev } -> state={ $state }
 screen-uevent-backlight-unreadable = [Screen] 背光状态不可读: { $dev }
 screen-detect-source-found = [Screen] 屏幕状态检测源就绪: { $kind } @ { $path }
 screen-detect-no-source = [Screen] 未找到可用屏幕状态检测源（/sys/class/backlight、/sys/class/leds 背光节点、/sys/class/graphics/fb*/blank、/sys/class/lcd/*/lcd_power、/sys/class/drm 内屏 connector 的 enabled/dpms 均不可用），屏幕状态无法自动校正，仅能依赖 uevent 事件
-screen-detect-read-failed = [Screen] 屏幕状态检测源读取失败（{ $kind } @ { $path }），连续失败将退役并切换下一个节点；读成功前不再重复告警
-screen-detect-nodes-exhausted = [Screen] 全部 { $count } 个屏幕状态节点已耗尽（不正确或矛盾），进入恒亮屏模式：不再检测息屏，屏幕状态永久按亮屏处理（宁可不节电，不可误判息屏卡死设备）
-screen-off-vetoed = [Screen] 息屏票不足: 节点 { $node } 报亮屏（来源: { $source }），本次不确认息屏；读数矛盾持续 15s 后退役该检测节点
+screen-off-vetoed = [Screen] 息屏票不足: 节点 { $node } 报亮屏（来源: { $source }），本次不确认息屏
 screen-off-unconfirmed = [Screen] 没有可读的屏幕状态节点（来源: { $source }），本次不确认息屏
-screen-detect-node-switched = [Screen] 检测节点读数持续不一致/失效，已退役 { $retired }，切换到 { $next }
 screen-uevent-leds = [Screen] leds 背光事件: { $dev } -> state={ $state }
 screen-uevent-leds-unreadable = [Screen] leds 背光状态不可读: { $dev }
 scheduler-screen-on = [Scheduler] 亮屏触发事件
