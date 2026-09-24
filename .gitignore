@@ -33,15 +33,7 @@ logd/
 .tmp-log/
 
 # TRAE & CodeBuddy
-# .trae/
-.trae/documents/
-.trae/specs/
-# .codebuddy/memory/
-.codebuddy/docs/
-.codebuddy/teams/
 .trae-html-share-packages/
-.workbuddy/docs
-.codebuddy/plans
 
 # reference
 AppOptR/

@@ -29,7 +29,7 @@ module/               # Magisk/KernelSU 模块载体（module.prop、customize.s
 webui/                # Svelte 5(runes) + TypeScript + Vite + ak-ui 管理界面；分层 kernel/shell → contract → data → views，tests/ 为纯逻辑断言（详见 webui/README.md）
   scripts/fetch-fonts.mjs  # 构建期拉取字体（predev/prebuild 自动执行）：Poppins 拉丁 + Noto Sans SC 中文子集，产物 src/assets/fonts/ 不入库
 updateInformation/    # 更新.json 与 changelog
-.github/workflows/    # CI：Node 24 + Rust nightly + NDK r29 + cargo-ndk
+.github/workflows/    # CI：Node 24 + Rust nightly + NDK r29 + cargo-ndk；提交信息含 "skip ci"（不分大小写）时跳过该次构建
 ```
 
 ## [stack] 技术栈
